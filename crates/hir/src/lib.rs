@@ -17,8 +17,8 @@ pub use hir_def::library::{
     LibrarySourceLocation, index_library, library_declaration_source, release_letter,
 };
 pub use hir_def::resolver::{
-    DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, resolve_import_path,
-    resolve_type_path, resolve_type_path_in_declaration,
+    DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, is_classifier,
+    resolve_import_path, resolve_type_path, resolve_type_path_in_declaration,
 };
 pub use hir_def::{
     ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,
@@ -31,6 +31,7 @@ pub use hir_ty::infer::{
 };
 pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use hir_ty::members::{Member, Types};
+pub use hir_ty::overrides::override_family;
 pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};
 

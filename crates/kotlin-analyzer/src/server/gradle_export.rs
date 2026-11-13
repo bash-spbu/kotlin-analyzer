@@ -42,6 +42,18 @@ pub(super) fn cached_model(root: &Path) -> Option<PathBuf> {
     )
 }
 
+/// Whether a change to `path` can change the model.
+pub(super) fn is_build_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| BUILD_FILES.contains(&name))
+}
+
+/// Glob patterns of the build files, for a file watcher.
+pub(super) fn build_file_globs() -> impl Iterator<Item = String> {
+    BUILD_FILES.iter().map(|name| format!("**/{name}"))
+}
+
 pub(super) fn is_gradle_build(root: &Path) -> bool {
     [
         "settings.gradle",

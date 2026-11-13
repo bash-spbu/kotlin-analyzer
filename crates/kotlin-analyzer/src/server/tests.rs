@@ -14,10 +14,12 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// An editor talking to a server running on its own thread.
 struct Client {
     connection: Connection,
-    server: Option<JoinHandle<Result<(), String>>>,
+    server: Option<JoinHandle<Result<super::Ending, String>>>,
     next_id: i32,
     /// Notifications that arrived while waiting for something else.
     unread: Vec<Notification>,
+    /// The methods of the requests the server sent.
+    server_requests: Vec<String>,
 }
 
 impl Client {
@@ -29,13 +31,19 @@ impl Client {
             server: Some(thread),
             next_id: 0,
             unread: Vec::new(),
+            server_requests: Vec::new(),
         };
         client.request(
             "initialize",
             json!({
                 "processId": null,
                 "rootUri": uri(root),
-                "capabilities": {},
+                "capabilities": {
+                    "workspace": {
+                        "semanticTokens": { "refreshSupport": true },
+                        "didChangeWatchedFiles": { "dynamicRegistration": true }
+                    }
+                },
                 "initializationOptions": { "gradleExport": false },
             }),
         );
@@ -108,8 +116,10 @@ impl Client {
             .expect("the server answers in time")
     }
 
-    /// The server's own requests (progress tokens) get an empty answer.
-    fn answer(&self, request: Request) {
+    /// The server's own requests (progress tokens, refreshes) get an empty
+    /// answer.
+    fn answer(&mut self, request: Request) {
+        self.server_requests.push(request.method.clone());
         let response = Response::new_ok(request.id, Value::Null);
         self.connection
             .sender
@@ -132,12 +142,55 @@ impl Client {
 
     fn shut_down(mut self) {
         self.request("shutdown", Value::Null);
+        assert_eq!(self.exit(), super::Ending::AfterShutdown);
+    }
+
+    /// Waits until the server has sent a request with `method`.
+    fn wait_for_server_request(&mut self, method: &str) {
+        while !self.server_requests.iter().any(|sent| sent == method) {
+            match self.receive() {
+                Message::Request(request) => self.answer(request),
+                Message::Notification(notification) => self.unread.push(notification),
+                Message::Response(_) => {}
+            }
+        }
+    }
+
+    fn exit(mut self) -> super::Ending {
         self.notify("exit", Value::Null);
         let server = self.server.take().expect("started");
         server
             .join()
             .expect("the server thread ends")
-            .expect("cleanly");
+            .expect("cleanly")
+    }
+
+    fn open(&self, path: &Path, text: &str) {
+        self.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri(path),
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": text,
+                }
+            }),
+        );
+    }
+
+    /// The next diagnostics published for `path`, as their messages.
+    fn diagnostics_of(&mut self, path: &Path) -> Vec<String> {
+        let published = self.wait_for(|notification| {
+            notification.method == "textDocument/publishDiagnostics"
+                && notification.params["uri"] == uri(path)
+        });
+        published.params["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|diagnostic| diagnostic["message"].as_str().unwrap_or("").to_owned())
+            .collect()
     }
 }
 
@@ -197,6 +250,63 @@ fn loads_publishes_diagnostics_and_reloads_new_and_deleted_files() {
     assert_eq!(reloaded, Value::Null);
     client.wait_for_load(2);
     assert_eq!(client.workspace_symbols("Second"), vec!["Second"]);
+    assert!(client.workspace_symbols("First").is_empty());
+
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_edit_rechecks_other_open_files_and_exit_without_shutdown_fails() {
+    let root = workspace("recheck");
+    let sources = root.join("src/main/kotlin/app");
+    let maker_text = "package app\nclass Box\nfun make(box: Box) {}\n";
+    let user_text = "package app\nfun use() = make(Box())\n";
+    std::fs::write(sources.join("Maker.kt"), maker_text).unwrap();
+    std::fs::write(sources.join("User.kt"), user_text).unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    client.wait_for_server_request("workspace/semanticTokens/refresh");
+    let maker = sources.join("Maker.kt");
+    let user = sources.join("User.kt");
+    client.open(&maker, maker_text);
+    client.open(&user, user_text);
+    assert!(client.diagnostics_of(&user).is_empty());
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri(&maker), "version": 2 },
+            "contentChanges": [{ "text": "package app\nclass Box\nfun make() {}\n" }],
+        }),
+    );
+    let messages = client.diagnostics_of(&user);
+    assert_eq!(messages, vec!["No `make` takes these arguments"]);
+
+    assert_eq!(client.exit(), super::Ending::WithoutShutdown);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn files_changed_on_disk_are_read_again_when_the_client_reports_them() {
+    let root = workspace("watch");
+    let sources = root.join("src/main/kotlin/app");
+    std::fs::write(sources.join("First.kt"), "package app\nclass First\n").unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_server_request("client/registerCapability");
+    client.wait_for_load(1);
+
+    let added = sources.join("Added.kt");
+    std::fs::write(&added, "package app\nclass Added\n").unwrap();
+    std::fs::remove_file(sources.join("First.kt")).unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [
+            { "uri": uri(&added), "type": 1 },
+            { "uri": uri(&sources.join("First.kt")), "type": 3 },
+        ] }),
+    );
+    assert_eq!(client.workspace_symbols("Added"), vec!["Added"]);
     assert!(client.workspace_symbols("First").is_empty());
 
     client.shut_down();

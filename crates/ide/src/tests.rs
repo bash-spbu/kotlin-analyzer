@@ -518,6 +518,39 @@ class Outer(val seed: Long, factor: Int) {
 }
 
 #[test]
+fn names_kotlin_reserves_are_written_in_backticks() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/b/Use.kt
+package b
+enum class Direction { `in`, out }
+fun use(direction: Direction): Int {
+    val `object` = 1
+    obj$0
+    return when (direction) { Direction.out -> 1 }
+}
+"#,
+    );
+    let (file, offset) = fixture.cursor();
+    let completions = analysis(&fixture).completions(file, offset).unwrap();
+    let object = completions
+        .items
+        .iter()
+        .find(|item| item.label == "object")
+        .expect("the local is offered");
+    assert_eq!(object.insert_text(), "`object`");
+    let diagnostics = analysis(&fixture)
+        .diagnostics(file, &crate::DiagnosticsConfig::default())
+        .unwrap();
+    let fill = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.check == crate::Check::NonExhaustiveWhen)
+        .and_then(|diagnostic| diagnostic.fixes.first())
+        .expect("a fix for the when");
+    assert_eq!(fill.edits[0].new_text, "; Direction.`in` -> TODO()");
+}
+
+#[test]
 fn completion_in_a_type_offers_classes_only_and_sees_smart_casts_elsewhere() {
     check_completions(
         r#"
@@ -604,6 +637,20 @@ fun use() {
     check_signature_help(
         &fixture.replace("CALL", "Money(currency = $0)"),
         expect!["> Money(amount: Long, [currency: String = …])"],
+    );
+    // Commas in characters, strings and comparisons don't separate
+    // arguments — with the `)` typed and without.
+    check_signature_help(
+        &fixture.replace("CALL", "pay(1 < 2, ',', $0)"),
+        expect![[r#"
+              pay(amount: Long)
+            > pay(amount: Long, note: String, [vararg tags: String])"#]],
+    );
+    check_signature_help(
+        &fixture.replace("CALL", "pay(1 < 2, \"a,b\", $0"),
+        expect![[r#"
+              pay(amount: Long)
+            > pay(amount: Long, note: String, [vararg tags: String])"#]],
     );
     check_signature_help(
         &fixture.replace("CALL", "pay($0)"),
@@ -706,6 +753,56 @@ class Account {
             .unwrap(),
         Err(crate::RenameError::NothingToRename)
     );
+}
+
+#[test]
+fn renaming_a_member_renames_its_overrides_and_what_it_overrides() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/a/Payments.kt
+package a
+interface Payment { fun settle() }
+open class Card : Payment {
+    override fun settle() {}
+    fun settle(times: Int) {}
+}
+class Gold : Card() { override fun settle() {} }
+class Cash : Payment { override fun sett$0le() {} }
+//- /app/b/Use.kt
+package b
+import a.Card
+import a.Payment
+fun use(payment: Payment, card: Card) {
+    payment.settle()
+    card.settle()
+    card.settle(2)
+}
+"#,
+    );
+    let (file, offset) = fixture.cursor();
+    let change = analysis(&fixture)
+        .rename(file, offset, "complete")
+        .unwrap()
+        .unwrap();
+    let mut renamed: Vec<String> = Vec::new();
+    for (file, edits) in &change.edits {
+        let text = fixture.vfs.contents(*file).unwrap();
+        for edit in edits {
+            let line = text[..edit.range.start as usize].matches('\n').count() + 1;
+            renamed.push(format!("{}:{line}", fixture.vfs.path(*file).display()));
+        }
+    }
+    renamed.sort();
+    // Every declaration and call of the parameterless `settle`; not the
+    // overload taking `times`.
+    expect![[r#"
+        /app/a/Payments.kt:2
+        /app/a/Payments.kt:4
+        /app/a/Payments.kt:7
+        /app/a/Payments.kt:8
+        /app/b/Use.kt:5
+        /app/b/Use.kt:6"#]]
+    .assert_eq(&renamed.join("\n"));
 }
 
 #[test]

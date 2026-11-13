@@ -73,6 +73,25 @@ impl Target {
         Some((target, name.range))
     }
 
+    /// The target with every member its members override or are
+    /// overridden by.
+    fn with_overrides(self, db: &RootDatabase) -> Target {
+        match self {
+            Target::Declarations(declarations) => {
+                let mut family: Vec<ItemLocation> = Vec::new();
+                for declaration in declarations {
+                    for member in hir::override_family(db, declaration) {
+                        if !family.contains(&member) {
+                            family.push(member);
+                        }
+                    }
+                }
+                Target::Declarations(family)
+            }
+            local => local,
+        }
+    }
+
     /// Whether an occurrence meaning `other` refers to this target.
     fn includes(&self, other: &Target) -> bool {
         match (self, other) {
@@ -94,16 +113,33 @@ pub(crate) fn references(
     let Some((target, range)) = Target::at(db, file, offset) else {
         return Vec::new();
     };
-    let name = db
-        .source_file(file)
+    target_references(
+        db,
+        &target,
+        &written_name(db, file, range),
+        include_declaration,
+    )
+}
+
+/// The name written at `range` of `file`, without backticks.
+fn written_name(db: &RootDatabase, file: FileId, range: TextRange) -> String {
+    db.source_file(file)
         .map(|source| {
             source.text(db)[range.start as usize..range.end as usize]
                 .trim_matches('`')
                 .to_owned()
         })
-        .unwrap_or_default();
-    let mut found = occurrences(db, &target, &name);
-    let declarations = declaration_ranges(db, &target);
+        .unwrap_or_default()
+}
+
+fn target_references(
+    db: &RootDatabase,
+    target: &Target,
+    name: &str,
+    include_declaration: bool,
+) -> Vec<FileRange> {
+    let mut found = occurrences(db, target, name);
+    let declarations = declaration_ranges(db, target);
     if include_declaration {
         found.extend(declarations.iter().copied());
     } else {
@@ -121,7 +157,7 @@ pub(crate) fn prepare_rename(
     offset: usize,
 ) -> Result<TextRange, RenameError> {
     let (target, range) = Target::at(db, file, offset).ok_or(RenameError::NothingToRename)?;
-    check_renameable(db, &target)?;
+    check_renameable(db, &target.with_overrides(db))?;
     Ok(range)
 }
 
@@ -131,14 +167,18 @@ pub(crate) fn rename(
     offset: usize,
     new_name: &str,
 ) -> Result<SourceChange, RenameError> {
-    let (target, _) = Target::at(db, file, offset).ok_or(RenameError::NothingToRename)?;
+    let (target, range) = Target::at(db, file, offset).ok_or(RenameError::NothingToRename)?;
+    // A member is renamed with what it overrides and what overrides it:
+    // they are one member to the code that calls them.
+    let target = target.with_overrides(db);
     check_renameable(db, &target)?;
     let new_name = new_name.trim();
     if !is_valid_name(new_name) {
         return Err(RenameError::InvalidName(new_name.to_owned()));
     }
     let mut by_file: Vec<(FileId, Vec<TextEdit>)> = Vec::new();
-    for occurrence in references(db, file, offset, true) {
+    let name = written_name(db, file, range);
+    for occurrence in target_references(db, &target, &name, true) {
         let edit = TextEdit {
             range: occurrence.range,
             new_text: new_name.to_owned(),
@@ -177,43 +217,7 @@ fn check_renameable(db: &RootDatabase, target: &Target) -> Result<(), RenameErro
 
 /// A plain Kotlin identifier (a keyword would need backticks: refused).
 fn is_valid_name(name: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "as",
-        "break",
-        "class",
-        "continue",
-        "do",
-        "else",
-        "false",
-        "for",
-        "fun",
-        "if",
-        "in",
-        "interface",
-        "is",
-        "null",
-        "object",
-        "package",
-        "return",
-        "super",
-        "this",
-        "throw",
-        "true",
-        "try",
-        "typealias",
-        "typeof",
-        "val",
-        "var",
-        "when",
-        "while",
-    ];
-    let mut chars = name.chars();
-    let starts_well = chars
-        .next()
-        .is_some_and(|first| first.is_alphabetic() || first == '_');
-    starts_well
-        && chars.all(|char| char.is_alphanumeric() || char == '_')
-        && !KEYWORDS.contains(&name)
+    syntax::names::is_plain_identifier(name)
 }
 
 /// Where the target is declared.

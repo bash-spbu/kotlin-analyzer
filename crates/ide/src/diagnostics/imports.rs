@@ -255,41 +255,68 @@ fn matches(
 /// Where a new import goes.
 pub(crate) struct ImportPlacement {
     offset: usize,
-    /// Blank line needed before (after a `package` line, no imports yet).
-    after_package: bool,
+    anchor: ImportAnchor,
+    /// The text before `offset` doesn't end a line (the file's last line
+    /// has no line break).
+    unterminated: bool,
+}
+
+/// What a new import goes after.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ImportAnchor {
+    LastImport,
+    /// The `package` line: a blank line between.
+    Package,
+    /// `@file:` annotations, which must come first: a blank line between.
+    FileAnnotations,
+    /// Nothing: the import starts the file, a blank line after it.
+    StartOfFile,
 }
 
 impl ImportPlacement {
     pub(crate) fn of(parse: &Parse) -> ImportPlacement {
         let root = parse.root();
-        let last_import = syntax::descendants(root)
-            .filter(|node| node.kind() == "import_header")
-            .last();
-        if let Some(import) = last_import {
-            return ImportPlacement {
-                offset: line_end(parse.text(), import.end_byte()),
-                after_package: false,
-            };
-        }
-        match named_children(root).find(|child| child.kind() == "package_header") {
-            Some(package) => ImportPlacement {
-                offset: line_end(parse.text(), package.end_byte()),
-                after_package: true,
-            },
-            None => ImportPlacement {
-                offset: 0,
-                after_package: false,
-            },
+        let header = |kind: &str| {
+            named_children(root)
+                .filter(|child| child.kind() == kind)
+                .last()
+        };
+        let import_list = named_children(root).find(|child| child.kind() == "import_list");
+        let last_import = import_list
+            .and_then(|list| {
+                named_children(list)
+                    .filter(|child| child.kind() == "import_header")
+                    .last()
+            })
+            .or_else(|| header("import_header"));
+        let (anchor, after) = match (
+            last_import,
+            header("package_header"),
+            header("file_annotation"),
+        ) {
+            (Some(import), _, _) => (ImportAnchor::LastImport, Some(import)),
+            (None, Some(package), _) => (ImportAnchor::Package, Some(package)),
+            (None, None, Some(annotation)) => (ImportAnchor::FileAnnotations, Some(annotation)),
+            (None, None, None) => (ImportAnchor::StartOfFile, None),
+        };
+        let text = parse.text();
+        let offset = after.map_or(0, |node| line_end(text, node.end_byte()));
+        ImportPlacement {
+            offset,
+            anchor,
+            unterminated: offset > 0 && !text[..offset].ends_with('\n'),
         }
     }
 
     pub(crate) fn edit(&self, qualified: &str) -> TextEdit {
-        let new_text = if self.after_package {
-            format!("\nimport {qualified}\n")
-        } else if self.offset == 0 {
-            format!("import {qualified}\n\n")
-        } else {
-            format!("import {qualified}\n")
+        let import = format!("import {}\n", syntax::names::escaped_path(qualified));
+        let line_break = if self.unterminated { "\n" } else { "" };
+        let new_text = match self.anchor {
+            ImportAnchor::LastImport => format!("{line_break}{import}"),
+            ImportAnchor::Package | ImportAnchor::FileAnnotations => {
+                format!("{line_break}\n{import}")
+            }
+            ImportAnchor::StartOfFile => format!("{import}\n"),
         };
         TextEdit {
             range: TextRange::new(self.offset, self.offset),
@@ -369,4 +396,46 @@ fn unused_imports(parse: &Parse) -> Vec<Diagnostic> {
         });
     }
     unused
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use syntax::Language;
+
+    use super::ImportPlacement;
+
+    /// The file with `a.in.Money` imported the way a fix would.
+    fn with_import(text: &str) -> String {
+        let parse = syntax::parse(Arc::from(text), Language::Kotlin);
+        let edit = ImportPlacement::of(&parse).edit("a.in.Money");
+        let mut result = text.to_owned();
+        result.insert_str(edit.range.start as usize, &edit.new_text);
+        result
+    }
+
+    #[test]
+    fn imports_go_after_imports_package_or_file_annotations() {
+        assert_eq!(
+            with_import("package b\nimport c.D\n\nfun f() {}\n"),
+            "package b\nimport c.D\nimport a.`in`.Money\n\nfun f() {}\n"
+        );
+        assert_eq!(
+            with_import("package b\nimport c.D"),
+            "package b\nimport c.D\nimport a.`in`.Money\n"
+        );
+        assert_eq!(
+            with_import("package b"),
+            "package b\n\nimport a.`in`.Money\n"
+        );
+        assert_eq!(
+            with_import("@file:JvmName(\"Utils\")\n\nfun f() {}\n"),
+            "@file:JvmName(\"Utils\")\n\nimport a.`in`.Money\n\nfun f() {}\n"
+        );
+        assert_eq!(
+            with_import("fun f() {}\n"),
+            "import a.`in`.Money\n\nfun f() {}\n"
+        );
+    }
 }

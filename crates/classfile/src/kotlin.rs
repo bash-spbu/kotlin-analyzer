@@ -17,9 +17,28 @@ use crate::{
 };
 
 /// `kind` of `@kotlin.Metadata`.
-const CLASS: i32 = 1;
-const FILE_FACADE: i32 = 2;
-const MULTI_FILE_CLASS_PART: i32 = 5;
+/// What a class file's `@Metadata` (its `k`) describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MetadataKind {
+    Class,
+    /// `FooKt`: a file's top-level declarations.
+    FileFacade,
+    /// One file's part of a `@JvmMultifileClass` facade.
+    MultiFileClassPart,
+    /// A synthetic class, a lambda, the multi-file facade itself.
+    Other,
+}
+
+impl MetadataKind {
+    fn of(kind: i32) -> MetadataKind {
+        match kind {
+            1 => MetadataKind::Class,
+            2 => MetadataKind::FileFacade,
+            5 => MetadataKind::MultiFileClassPart,
+            _ => MetadataKind::Other,
+        }
+    }
+}
 
 /// Strings Kotlin's JVM string table refers to by index, so they needn't be
 /// stored in every class file (`JvmNameResolverBase.PREDEFINED_STRINGS`).
@@ -84,12 +103,14 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
         .filter(|method| method.hidden)
         .map(|method| format!("{}{}", method.name, method.descriptor))
         .collect();
-    match metadata.kind {
-        CLASS => match read_class(message, &names, &hidden, class.source_file.clone()) {
-            Some(library_class) => ClassContents::Class(library_class),
-            None => ClassContents::Nothing,
-        },
-        FILE_FACADE | MULTI_FILE_CLASS_PART => {
+    match MetadataKind::of(metadata.kind) {
+        MetadataKind::Class => {
+            match read_class(message, &names, &hidden, class.source_file.clone()) {
+                Some(library_class) => ClassContents::Class(library_class),
+                None => ClassContents::Nothing,
+            }
+        }
+        MetadataKind::FileFacade | MetadataKind::MultiFileClassPart => {
             let directory = || match class.name.rsplit_once('/') {
                 Some((package, _)) => Path::parse(&package.replace('/', ".")),
                 None => Path::default(),
@@ -106,7 +127,7 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
                 class.source_file.clone(),
             ))
         }
-        _ => ClassContents::Nothing,
+        MetadataKind::Other => ClassContents::Nothing,
     }
 }
 
@@ -220,10 +241,30 @@ struct Record {
     range: i32,
     predefined_index: Option<i32>,
     string: Option<String>,
-    /// 0 none, 1 internal name to class id, 2 descriptor to class id.
-    operation: i32,
+    operation: StringOperation,
     substring: Vec<i32>,
     replace_char: Vec<i32>,
+}
+
+/// How a record turns its string into a name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum StringOperation {
+    #[default]
+    None,
+    /// `kotlin/collections/Map$Entry` → `kotlin/collections/Map.Entry`.
+    InternalToClassId,
+    /// `Lkotlin/collections/Map$Entry;` → the same, without `L` and `;`.
+    DescriptorToClassId,
+}
+
+impl StringOperation {
+    fn of(operation: i32) -> StringOperation {
+        match operation {
+            1 => StringOperation::InternalToClassId,
+            2 => StringOperation::DescriptorToClassId,
+            _ => StringOperation::None,
+        }
+    }
 }
 
 /// How metadata indexes resolve to names.
@@ -297,12 +338,12 @@ impl NameTable {
                     text = text.replace(from, &to.to_string());
                 }
                 match record.operation {
-                    1 => text = text.replace('$', "."),
-                    2 => {
+                    StringOperation::InternalToClassId => text = text.replace('$', "."),
+                    StringOperation::DescriptorToClassId => {
                         text = without_first_and_last(&text);
                         text = text.replace('$', ".");
                     }
-                    _ => {}
+                    StringOperation::None => {}
                 }
                 Some(text)
             }
@@ -361,7 +402,7 @@ fn read_record(bytes: &[u8]) -> Record {
         match number {
             1 => record.range = value.as_i32().unwrap_or(1),
             2 => record.predefined_index = value.as_i32(),
-            3 => record.operation = value.as_i32().unwrap_or(0),
+            3 => record.operation = StringOperation::of(value.as_i32().unwrap_or(0)),
             4 => value.push_integers(&mut record.substring),
             5 => value.push_integers(&mut record.replace_char),
             6 => {
@@ -425,13 +466,22 @@ fn visibility_of(flags: i32) -> Option<Visibility> {
     }
 }
 
-fn modality(flags: i32) -> i32 {
-    (flags >> 4) & 0b11
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Modality {
+    Final,
+    Open,
+    Abstract,
+    Sealed,
 }
 
-const MODALITY_OPEN: i32 = 1;
-const MODALITY_ABSTRACT: i32 = 2;
-const MODALITY_SEALED: i32 = 3;
+fn modality(flags: i32) -> Modality {
+    match (flags >> 4) & 0b11 {
+        1 => Modality::Open,
+        2 => Modality::Abstract,
+        3 => Modality::Sealed,
+        _ => Modality::Final,
+    }
+}
 
 fn bit(flags: i32, index: u32) -> bool {
     flags & (1 << index) != 0
@@ -523,9 +573,9 @@ fn read_class(
         origin: Origin::Kotlin,
         visibility,
         modifiers: Modifiers {
-            is_abstract: class_modality == MODALITY_ABSTRACT,
-            is_open: class_modality == MODALITY_OPEN,
-            is_sealed: class_modality == MODALITY_SEALED,
+            is_abstract: class_modality == Modality::Abstract,
+            is_open: class_modality == Modality::Open,
+            is_sealed: class_modality == Modality::Sealed,
             is_inner: bit(flags, 9),
             is_data: bit(flags, 10),
             is_expect: bit(flags, 12),
@@ -710,8 +760,8 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
         kind: MemberKind::Function,
         visibility,
         modifiers: Modifiers {
-            is_abstract: modality(flags) == MODALITY_ABSTRACT,
-            is_open: modality(flags) == MODALITY_OPEN,
+            is_abstract: modality(flags) == Modality::Abstract,
+            is_open: modality(flags) == Modality::Open,
             is_operator: bit(flags, 8),
             is_infix: bit(flags, 9),
             is_inline: bit(flags, 10),
@@ -765,8 +815,8 @@ fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
         },
         visibility,
         modifiers: Modifiers {
-            is_abstract: modality(flags) == MODALITY_ABSTRACT,
-            is_open: modality(flags) == MODALITY_OPEN,
+            is_abstract: modality(flags) == Modality::Abstract,
+            is_open: modality(flags) == Modality::Open,
             is_const: bit(flags, 11),
             ..Modifiers::default()
         },
@@ -871,8 +921,7 @@ struct RawType {
 
 #[derive(Clone)]
 struct RawArgument {
-    /// 0 in, 1 out, 2 invariant, 3 star.
-    projection: i32,
+    projection: Projection,
     type_ref: Option<RawType>,
     type_id: Option<i32>,
 }
@@ -923,16 +972,36 @@ fn annotation_class_id(bytes: &[u8]) -> Option<i32> {
     None
 }
 
+/// A type argument's projection: `in T`, `out T`, `T`, `*`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Projection {
+    In,
+    Out,
+    Invariant,
+    Star,
+}
+
+impl Projection {
+    fn of(projection: i32) -> Projection {
+        match projection {
+            0 => Projection::In,
+            1 => Projection::Out,
+            3 => Projection::Star,
+            _ => Projection::Invariant,
+        }
+    }
+}
+
 fn read_argument(bytes: &[u8], nesting: Nesting) -> RawArgument {
     let mut argument = RawArgument {
-        projection: 2,
+        projection: Projection::Invariant,
         type_ref: None,
         type_id: None,
     };
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
-            1 => argument.projection = value.as_i32().unwrap_or(2),
+            1 => argument.projection = Projection::of(value.as_i32().unwrap_or(2)),
             2 => {
                 argument.type_ref = value
                     .as_bytes()
@@ -1092,12 +1161,12 @@ impl<'table> TypeContext<'table> {
                     .clone()
                     .or_else(|| argument.type_id.and_then(|id| self.table.raw(id)));
                 match (argument.projection, type_ref) {
-                    (3, _) | (_, None) => TypeArgument::Star,
+                    (Projection::Star, _) | (_, None) => TypeArgument::Star,
                     (projection, Some(type_ref)) => TypeArgument::Type {
                         variance: match projection {
-                            0 => Variance::In,
-                            1 => Variance::Out,
-                            _ => Variance::Invariant,
+                            Projection::In => Variance::In,
+                            Projection::Out => Variance::Out,
+                            Projection::Invariant | Projection::Star => Variance::Invariant,
                         },
                         type_ref: self.library_type_nested(&type_ref, nested),
                     },
@@ -1265,7 +1334,7 @@ mod tests {
         let looping = RawType {
             class_name: Some(0),
             arguments: vec![RawArgument {
-                projection: 2,
+                projection: Projection::Invariant,
                 type_ref: None,
                 type_id: Some(0),
             }],
@@ -1304,7 +1373,7 @@ mod tests {
             records: vec![
                 Record {
                     range: 2,
-                    operation: 2,
+                    operation: StringOperation::DescriptorToClassId,
                     ..Record::default()
                 };
                 2

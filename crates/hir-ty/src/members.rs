@@ -650,6 +650,49 @@ impl ErasedType {
 }
 
 impl Types<'_> {
+    /// The members of `member`'s class's supertypes that `member`
+    /// overrides: same name, shape and parameter types, compared in the
+    /// class's own type parameters. Nearest first.
+    pub fn overridden(&self, member: ItemLocation) -> Vec<ItemLocation> {
+        let tree = item_tree(self.db, member.container);
+        let item = tree.item(member.item);
+        let (Some(class), Some(shape)) =
+            (item.parent, MemberShape::of(&item.kind, &item.signature))
+        else {
+            return Vec::new();
+        };
+        let class = ItemLocation {
+            container: member.container,
+            item: class,
+        };
+        let self_type = self.self_type(class);
+        let own = Member {
+            location: member,
+            substitution: class_substitution(&self_type),
+        };
+        let mut found = Vec::new();
+        for supertype in self.all_supertypes(&self_type).into_iter().skip(1) {
+            let super_tree = item_tree(self.db, supertype.class.container);
+            for candidate in super_tree.named(Some(supertype.class.item), item.name) {
+                let candidate_item = super_tree.item(*candidate);
+                let same_shape =
+                    MemberShape::of(&candidate_item.kind, &candidate_item.signature) == Some(shape);
+                let location = ItemLocation {
+                    container: supertype.class.container,
+                    item: *candidate,
+                };
+                let inherited = Member {
+                    location,
+                    substitution: class_substitution(&supertype),
+                };
+                if same_shape && self.same_signature(&own, &inherited) {
+                    found.push(location);
+                }
+            }
+        }
+        found
+    }
+
     /// Whether `nearer` overrides `farther` (both found on one receiver, of
     /// one shape): the same erased receiver and parameter types. When a
     /// type isn't known, they count as different — two candidates leave a

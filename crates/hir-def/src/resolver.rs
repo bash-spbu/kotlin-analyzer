@@ -200,7 +200,8 @@ fn classifiers_in_package(
         .collect()
 }
 
-fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
+/// Whether the declaration is a class, interface, object or type alias.
+pub fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
     item_tree(db, location.container)
         .item(location.item)
         .kind

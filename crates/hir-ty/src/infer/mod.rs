@@ -21,6 +21,7 @@ mod declarations;
 mod exhaustiveness;
 mod expressions;
 mod fit;
+mod member_scope;
 mod narrowing;
 
 use std::sync::Arc;

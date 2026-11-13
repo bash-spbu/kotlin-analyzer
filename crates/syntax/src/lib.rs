@@ -4,6 +4,7 @@
 //! other files.
 
 pub mod ast;
+pub mod names;
 mod pointer;
 mod range;
 

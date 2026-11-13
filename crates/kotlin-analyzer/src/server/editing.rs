@@ -92,7 +92,7 @@ fn completion(
             filter_text: Some(item.label.clone()),
             text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
                 range: convert::range(&index, &text, item.replace),
-                new_text: item.label.clone(),
+                new_text: item.insert_text().into_owned(),
             })),
             additional_text_edits: item.import_edit.as_ref().map(|edit| {
                 vec![lsp_types::TextEdit {

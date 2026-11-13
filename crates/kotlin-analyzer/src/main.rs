@@ -44,7 +44,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         None => match server::run() {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(server::Ending::AfterShutdown) => ExitCode::SUCCESS,
+            Ok(server::Ending::WithoutShutdown) => ExitCode::FAILURE,
             Err(error) => {
                 eprintln!("kotlin-analyzer: {error}");
                 ExitCode::FAILURE

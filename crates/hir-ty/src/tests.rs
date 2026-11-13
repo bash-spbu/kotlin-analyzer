@@ -1157,6 +1157,14 @@ fun asserted(side: Side?): Int {
     return when (side) { Side.BUY -> 1; Side.SELL -> 2 }
 }
 fun unchecked(side: Side?): Int = when (side) { Side.BUY -> 1; Side.SELL -> 2 }
+class Info(val legacyId: String?, val note: String?)
+class Holder(val info: Info?) {
+    val key: Int?
+        get() {
+            val id = info?.legacyId ?: return null
+            return info.note?.length
+        }
+}
 "#,
         expect!["when@17 missing null"],
     );

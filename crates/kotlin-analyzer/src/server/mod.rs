@@ -43,15 +43,24 @@ const EXPORT_TOKEN: &str = "kotlin-analyzer/gradle";
 /// workspace's files.
 pub const RELOAD_COMMAND: &str = "kotlin-analyzer.reloadWorkspace";
 
-pub fn run() -> Result<(), String> {
+/// How a session ended. LSP: an `exit` not preceded by `shutdown` (or a
+/// client that just went away) ends with exit code 1.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ending {
+    AfterShutdown,
+    WithoutShutdown,
+}
+
+pub fn run() -> Result<Ending, String> {
     let (connection, io_threads) = Connection::stdio();
-    run_on(&connection)?;
+    let ending = run_on(&connection)?;
     drop(connection);
-    io_threads.join().map_err(|error| error.to_string())
+    io_threads.join().map_err(|error| error.to_string())?;
+    Ok(ending)
 }
 
 /// Serves `connection` until the client says `exit` (or goes away).
-pub(crate) fn run_on(connection: &Connection) -> Result<(), String> {
+pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     let (initialize_id, initialize_params) = connection
         .initialize_start()
         .map_err(|error| error.to_string())?;
@@ -85,6 +94,10 @@ pub(crate) fn run_on(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     let mut state = GlobalState::new(connection.sender.clone(), root, project_json);
+    state.refreshes = ClientRefreshes::of(&params.capabilities);
+    if watches_files(&params.capabilities) {
+        state.register_file_watchers();
+    }
     state.diagnostics_config = Arc::new(diagnostics_config);
     state.gradle_export = gradle_export;
     state.start_loading();
@@ -162,8 +175,45 @@ enum Task {
     Diagnostics {
         file: FileId,
         version: i32,
+        /// Which computation for the file it is: only the latest asked
+        /// for is published (an earlier one may finish later).
+        generation: u64,
         diagnostics: Vec<lsp_types::Diagnostic>,
     },
+}
+
+/// Whether the client watches files for the server when asked to.
+fn watches_files(capabilities: &lsp_types::ClientCapabilities) -> bool {
+    capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+        .and_then(|watched| watched.dynamic_registration)
+        .unwrap_or(false)
+}
+
+/// What the client can be asked to request again once the workspace has
+/// loaded (tokens and hints computed before then knew less).
+#[derive(Clone, Copy, Default)]
+struct ClientRefreshes {
+    semantic_tokens: bool,
+    inlay_hints: bool,
+}
+
+impl ClientRefreshes {
+    fn of(capabilities: &lsp_types::ClientCapabilities) -> ClientRefreshes {
+        let workspace = capabilities.workspace.as_ref();
+        ClientRefreshes {
+            semantic_tokens: workspace
+                .and_then(|workspace| workspace.semantic_tokens.as_ref())
+                .and_then(|tokens| tokens.refresh_support)
+                .unwrap_or(false),
+            inlay_hints: workspace
+                .and_then(|workspace| workspace.inlay_hint.as_ref())
+                .and_then(|hints| hints.refresh_support)
+                .unwrap_or(false),
+        }
+    }
 }
 
 struct GlobalState {
@@ -191,6 +241,10 @@ struct GlobalState {
     exporting: bool,
     /// The latest load started: only its result is applied.
     load_generation: u64,
+    /// The latest diagnostics computation asked for, per open file.
+    diagnostics_generations: FxHashMap<FileId, u64>,
+    next_diagnostics_generation: u64,
+    refreshes: ClientRefreshes,
 }
 
 impl GlobalState {
@@ -222,14 +276,17 @@ impl GlobalState {
             gradle_export: true,
             exporting: false,
             load_generation: 0,
+            diagnostics_generations: FxHashMap::default(),
+            next_diagnostics_generation: 0,
+            refreshes: ClientRefreshes::default(),
         }
     }
 
-    fn main_loop(&mut self, receiver: &Receiver<Message>) -> Result<(), String> {
+    fn main_loop(&mut self, receiver: &Receiver<Message>) -> Result<Ending, String> {
         loop {
             select! {
                 recv(receiver) -> message => {
-                    let Ok(message) = message else { return Ok(()) };
+                    let Ok(message) = message else { return Ok(Ending::WithoutShutdown) };
                     match message {
                         Message::Request(request) => {
                             if request.method == request::Shutdown::METHOD {
@@ -241,7 +298,11 @@ impl GlobalState {
                         }
                         Message::Notification(notification) => {
                             if notification.method == notification::Exit::METHOD {
-                                return Ok(());
+                                return Ok(if self.shutdown_requested {
+                                    Ending::AfterShutdown
+                                } else {
+                                    Ending::WithoutShutdown
+                                });
                             }
                             self.on_notification(notification);
                         }
@@ -249,7 +310,7 @@ impl GlobalState {
                     }
                 }
                 recv(self.task_receiver) -> task => {
-                    let Ok(task) = task else { return Ok(()) };
+                    let Ok(task) = task else { return Ok(Ending::WithoutShutdown) };
                     self.on_task(task);
                 }
             }
@@ -356,10 +417,12 @@ impl GlobalState {
             Task::Diagnostics {
                 file,
                 version,
+                generation,
                 diagnostics,
             } => {
                 let current = self.open_documents.get(&file).copied();
-                if current != Some(version) {
+                let latest = self.diagnostics_generations.get(&file).copied();
+                if current != Some(version) || latest != Some(generation) {
                     return;
                 }
                 let Some(uri) = convert::uri_of(self.vfs.path(file)) else {
@@ -446,6 +509,96 @@ impl GlobalState {
             }),
         );
         self.update_diagnostics(self.open_documents.keys().copied().collect());
+        self.ask_for_refreshes();
+    }
+
+    /// Asks the client to report changes to sources, build files and the
+    /// model file made outside the editor (a `git checkout`, a generator).
+    fn register_file_watchers(&mut self) {
+        let mut globs: Vec<String> = ["**/*.kt", "**/*.java"]
+            .iter()
+            .map(|glob| (*glob).to_owned())
+            .collect();
+        globs.extend(gradle_export::build_file_globs());
+        globs.push("**/.kotlin-analyzer/project.json".to_owned());
+        if let Some(model) = &self.project_json {
+            globs.push(model.display().to_string());
+        }
+        let watchers: Vec<lsp_types::FileSystemWatcher> = globs
+            .into_iter()
+            .map(|glob| lsp_types::FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::String(glob),
+                kind: None,
+            })
+            .collect();
+        let options = lsp_types::DidChangeWatchedFilesRegistrationOptions { watchers };
+        self.send_request::<request::RegisterCapability>(lsp_types::RegistrationParams {
+            registrations: vec![lsp_types::Registration {
+                id: "kotlin-analyzer/watched-files".to_owned(),
+                method: notification::DidChangeWatchedFiles::METHOD.to_owned(),
+                register_options: serde_json::to_value(options).ok(),
+            }],
+        });
+    }
+
+    /// Files changed on disk: sources not open in the editor are read
+    /// again; a build file may change the model (exported again if so), the
+    /// model file itself reloads the workspace.
+    fn on_watched_files(&mut self, changes: Vec<lsp_types::FileEvent>) {
+        let mut model_changed = false;
+        let mut build_changed = false;
+        for change in changes {
+            let Some(path) = convert::path_of(&change.uri) else {
+                continue;
+            };
+            if self.is_model_file(&path) {
+                model_changed = true;
+                continue;
+            }
+            if gradle_export::is_build_file(&path) {
+                build_changed = true;
+                continue;
+            }
+            if syntax::Language::of_path(&path).is_none() {
+                continue;
+            }
+            let is_open = self
+                .vfs
+                .file_id(&path)
+                .is_some_and(|file| self.open_documents.contains_key(&file));
+            if is_open {
+                continue;
+            }
+            let text = match change.typ {
+                lsp_types::FileChangeType::DELETED => None,
+                _ => std::fs::read_to_string(&path).ok().map(Arc::from),
+            };
+            self.vfs.set_contents(&path, text);
+        }
+        self.apply_vfs_changes();
+        self.update_diagnostics(self.open_documents.keys().copied().collect());
+        if model_changed {
+            self.start_loading();
+        }
+        if build_changed {
+            self.start_export();
+        }
+    }
+
+    fn is_model_file(&self, path: &std::path::Path) -> bool {
+        let workspace_model = self.root.join(".kotlin-analyzer/project.json");
+        path == workspace_model || self.project_json.as_deref() == Some(path)
+    }
+
+    /// Tokens and hints the client asked for while loading were computed
+    /// without the libraries: it's asked to request them again.
+    fn ask_for_refreshes(&mut self) {
+        if self.refreshes.semantic_tokens {
+            self.send_request::<request::SemanticTokensRefresh>(());
+        }
+        if self.refreshes.inlay_hints {
+            self.send_request::<request::InlayHintRefreshRequest>(());
+        }
     }
 
     fn on_request(&mut self, request: Request) {
@@ -537,7 +690,17 @@ impl GlobalState {
                     self.open_documents
                         .insert(file, params.text_document.version);
                     self.apply_vfs_changes();
-                    self.update_diagnostics(vec![file]);
+                    // An edit can change what other files' code means: all
+                    // open files are checked again, the edited one first.
+                    self.update_diagnostics(self.edited_first(file));
+                    return;
+                }
+                Err(notification) => notification,
+            };
+        let notification =
+            match cast_notification::<notification::DidChangeWatchedFiles>(notification) {
+                Ok(params) => {
+                    self.on_watched_files(params.changes);
                     return;
                 }
                 Err(notification) => notification,
@@ -559,6 +722,7 @@ impl GlobalState {
             };
             if let Some(file) = self.vfs.file_id(&path) {
                 self.open_documents.remove(&file);
+                self.diagnostics_generations.remove(&file);
             }
             // The disk's version is the file's text again.
             let on_disk = std::fs::read_to_string(&path).ok().map(Arc::from);
@@ -587,11 +751,26 @@ impl GlobalState {
         self.paths = Arc::new(self.vfs.paths().to_vec());
     }
 
+    /// The open files, `edited` first.
+    fn edited_first(&self, edited: FileId) -> Vec<FileId> {
+        let mut files = vec![edited];
+        files.extend(
+            self.open_documents
+                .keys()
+                .copied()
+                .filter(|file| *file != edited),
+        );
+        files
+    }
+
     fn update_diagnostics(&mut self, files: Vec<FileId>) {
         for file in files {
             let Some(version) = self.open_documents.get(&file).copied() else {
                 continue;
             };
+            self.next_diagnostics_generation += 1;
+            let generation = self.next_diagnostics_generation;
+            self.diagnostics_generations.insert(file, generation);
             let analysis = self.host.analysis();
             let sender = self.task_sender.clone();
             // Until the workspace is loaded only syntax is known for sure.
@@ -610,6 +789,7 @@ impl GlobalState {
                 let _ = sender.send(Task::Diagnostics {
                     file,
                     version,
+                    generation,
                     diagnostics,
                 });
             });

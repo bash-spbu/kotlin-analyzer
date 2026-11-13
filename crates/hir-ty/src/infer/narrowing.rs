@@ -7,6 +7,7 @@ use hir_def::item_tree::Signature;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
+use super::member_scope::data_flow_scope;
 use super::{LocalId, Reference, UnsafeCall};
 use crate::ty::{Nullability, Ty};
 
@@ -396,7 +397,7 @@ impl Inferrer<'_> {
     /// asserted, assigned, used null-safely) anywhere in the declaration
     /// around `node`.
     fn null_guarded(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
-        let scope = enclosing_declaration(node);
+        let scope = data_flow_scope(node);
         syntax::descendants(scope).any(|candidate| self.guards(candidate, path))
     }
 
@@ -447,34 +448,4 @@ impl Inferrer<'_> {
             _ => false,
         }
     }
-}
-
-/// The member-level declaration around `node` (a function, an accessor,
-/// an initializer, a property), or the file.
-fn enclosing_declaration(node: SyntaxNode<'_>) -> SyntaxNode<'_> {
-    let mut current = node;
-    let mut found = node;
-    while let Some(parent) = current.parent() {
-        let is_declaration = matches!(
-            parent.kind(),
-            "function_declaration"
-                | "getter"
-                | "setter"
-                | "anonymous_initializer"
-                | "secondary_constructor"
-                | "property_declaration"
-        );
-        let at_member_level = parent.parent().is_some_and(|grandparent| {
-            matches!(
-                grandparent.kind(),
-                "class_body" | "source_file" | "enum_class_body"
-            )
-        });
-        if is_declaration && at_member_level {
-            return parent;
-        }
-        found = parent;
-        current = parent;
-    }
-    found
 }

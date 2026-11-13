@@ -164,17 +164,26 @@ fn callee_name(call: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
     }
 }
 
-/// Which argument the cursor is in (by position), and its name when named.
+/// Which argument the cursor is in (by position: the commas of the list
+/// before it), and its name when it's written `name = …`.
 fn argument_at(
     parse: &syntax::Parse,
     arguments: SyntaxNode<'_>,
     offset: usize,
 ) -> (usize, Option<String>) {
+    let commas_before: Vec<SyntaxNode<'_>> = syntax::children(arguments)
+        .filter(|child| !child.is_named() && child.kind() == "," && child.end_byte() <= offset)
+        .collect();
+    let position = commas_before.len();
+    // The argument begun after the last comma before the cursor: its text
+    // up to the cursor says whether it's named (`currency = ` parses as an
+    // error while its value isn't typed, so the text, not the node).
+    let begun_at = commas_before
+        .last()
+        .map_or(arguments.start_byte() + 1, |comma| comma.end_byte());
     let text = parse.text();
-    let open = arguments.start_byte() + 1;
-    let before = &text[open.min(offset)..offset.min(text.len())];
-    let (position, current) = top_level_arguments(before);
-    (position, argument_name(current))
+    let named = argument_name(&text[begun_at.min(offset)..offset.min(text.len())]);
+    (position, named)
 }
 
 /// How many top-level commas `text` (a call's arguments up to the cursor)
@@ -184,12 +193,15 @@ fn top_level_arguments(text: &str) -> (usize, &str) {
     let mut commas = 0;
     let mut current_start = 0;
     let mut in_string = false;
+    let mut in_char = false;
     for (index, char) in text.char_indices() {
         match char {
-            '"' => in_string = !in_string,
-            _ if in_string => {}
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            '"' if !in_char => in_string = !in_string,
+            '\'' if !in_string => in_char = !in_char,
+            _ if in_string || in_char => {}
+            // `<` and `>` aren't counted: `a < b, c` is two arguments.
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 commas += 1;
                 current_start = index + 1;

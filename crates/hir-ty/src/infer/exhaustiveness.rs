@@ -9,6 +9,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
 use super::fit::Fit;
+use super::member_scope::data_flow_scope;
 use super::narrowing::StablePath;
 use super::{NonExhaustiveWhen, Reference};
 use crate::lower::lower_supertype;
@@ -139,7 +140,7 @@ impl Inferrer<'_> {
             return true;
         };
         let path = StablePath::of(self.text(subject));
-        let scope = enclosing_body(node);
+        let scope = data_flow_scope(node);
         syntax::descendants(scope)
             .filter(|candidate| candidate.end_byte() <= node.start_byte())
             .any(|candidate| self.compares(candidate, &path) || self.guards(candidate, &path))
@@ -303,7 +304,8 @@ impl Inferrer<'_> {
         entries: Vec<ItemLocation>,
         covered: &Covered,
     ) -> Vec<String> {
-        let enum_name = crate::display::class_name(self.db, enum_class);
+        let enum_name =
+            syntax::names::escaped_path(&crate::display::class_name(self.db, enum_class));
         entries
             .into_iter()
             .filter(|entry| !covered.declarations.contains(entry))
@@ -311,13 +313,14 @@ impl Inferrer<'_> {
             .collect()
     }
 
+    /// The name a branch writes for it, backticked where Kotlin needs it.
     fn item_name(&self, location: ItemLocation) -> String {
         let tree = hir_def::item_tree(self.db, location.container);
         let item = tree.item(location.item);
         if item.kind == ItemKind::EnumEntry {
-            return item.name.to_string();
+            return syntax::names::escaped(item.name.as_str()).into_owned();
         }
-        crate::display::class_name(self.db, location)
+        syntax::names::escaped_path(&crate::display::class_name(self.db, location))
     }
 }
 
@@ -336,23 +339,4 @@ fn last_identifier(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
         }),
         _ => None,
     }
-}
-
-/// The function (or other member-level declaration) around `node`.
-fn enclosing_body(node: SyntaxNode<'_>) -> SyntaxNode<'_> {
-    let mut current = node;
-    while let Some(parent) = current.parent() {
-        if matches!(
-            parent.kind(),
-            "function_declaration"
-                | "getter"
-                | "setter"
-                | "anonymous_initializer"
-                | "secondary_constructor"
-        ) {
-            return parent;
-        }
-        current = parent;
-    }
-    current
 }

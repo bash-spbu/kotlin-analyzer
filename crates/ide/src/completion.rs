@@ -38,6 +38,14 @@ pub struct CompletionItem {
     pub relevance: u32,
 }
 
+impl CompletionItem {
+    /// What accepting it writes: the name, in backticks where Kotlin needs
+    /// them (`` `in` ``).
+    pub fn insert_text(&self) -> std::borrow::Cow<'_, str> {
+        syntax::names::escaped(&self.label)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CompletionKind {
     Variable,
@@ -393,7 +401,7 @@ impl<'db> Builder<'db> {
             for location in
                 hir::resolve_import_path(self.db, self.file, &import.path).declarations()
             {
-                if is_classifier(self.db, location) && import.visible_name().is_some() {
+                if hir::is_classifier(self.db, location) && import.visible_name().is_some() {
                     self.push_declaration(location, Source::Scope, None);
                 }
             }
@@ -404,7 +412,7 @@ impl<'db> Builder<'db> {
                     continue;
                 }
                 for location in hir::visible_top_level(self.db, self.file, &package, name) {
-                    if is_classifier(self.db, location) {
+                    if hir::is_classifier(self.db, location) {
                         self.push_declaration(location, Source::Scope, None);
                     }
                 }
@@ -440,7 +448,7 @@ impl<'db> Builder<'db> {
             let declarations = hir::visible_top_level(self.db, self.file, &package, name);
             let fitting = declarations.into_iter().find(|location| {
                 if classifiers_only {
-                    is_classifier(self.db, *location)
+                    hir::is_classifier(self.db, *location)
                 } else {
                     !is_extension(self.db, *location)
                 }
@@ -517,13 +525,6 @@ fn is_extension(db: &RootDatabase, location: ItemLocation) -> bool {
             ..
         }
     )
-}
-
-fn is_classifier(db: &RootDatabase, location: ItemLocation) -> bool {
-    hir::item_tree(db, location.container)
-        .item(location.item)
-        .kind
-        .is_classifier()
 }
 
 fn kind_of(kind: ItemKind, is_member: bool) -> CompletionKind {
