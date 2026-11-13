@@ -105,6 +105,18 @@ implicit receivers in subclasses.
 A declaration without a written type gets its body's type; one whose type
 depends on itself is `Unknown`.
 
+A class's primary-constructor parameters are visible in its initializers
+(property initializers, `init` blocks, supertype arguments), not in its
+functions and accessors — there the name is the property. `Name(…)` may
+call an object's or a companion's `operator fun invoke`. An override takes
+its parameters' default values from what it overrides. Member extensions of
+the implicit receivers' classes are candidates for `receiver.f()`.
+
+Compiled declarations deprecated as hidden (`@Deprecated(level = HIDDEN)`,
+`@DeprecatedSinceKotlin(hiddenSince = …)`) don't exist for Kotlin code. A
+Kotlin file facade belongs to the package its metadata names (`pn`), not
+its class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
+
 ### Not modelled yet (stays `Unknown`, never reported)
 
 - contracts (`require(x is T)`, `requireNotNull(x)`, `checkNotNull`) and
@@ -112,5 +124,6 @@ depends on itself is `Unknown`.
 - members of anonymous objects (`object { val x = 1 }`);
 - declarations compiler plugins generate (`serializer()` of
   `@Serializable` classes);
-- member extensions, which need two receivers;
+- member extension properties, and member extensions on an implicit
+  receiver;
 - type parameters of local functions.

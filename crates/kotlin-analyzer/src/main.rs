@@ -2,6 +2,7 @@
 //! line tools for measuring it on a real workspace.
 
 mod analysis_stats;
+mod diagnostics;
 mod load;
 mod server;
 
@@ -16,6 +17,10 @@ USAGE:
     kotlin-analyzer analysis-stats <root> [--project-json <file>]
                                 load a workspace and report sizes, times, memory
                                 and how many type names resolve
+    kotlin-analyzer diagnostics <root> [--project-json <file>] [--only <check,…>]
+                                [--experimental] [--limit <n>]
+                                run every check over every workspace file; exits 1
+                                on any error or warning
     kotlin-analyzer parse <file>
                                 print a Kotlin or Java file's syntax tree
     kotlin-analyzer --version   print the version
@@ -31,6 +36,7 @@ fn main() -> ExitCode {
         }
         Some("parse") => parse_command(arguments.get(1)),
         Some("analysis-stats") => analysis_stats_command(&arguments[1..]),
+        Some("diagnostics") => diagnostics::command(&arguments[1..]),
         Some("definition") => analysis_stats::definition_command(&arguments[1..]),
         Some("inference") => analysis_stats::inference_command(&arguments[1..]),
         Some("--help" | "-h") => {

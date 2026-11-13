@@ -13,7 +13,10 @@ use syntax::ast::AstNode;
 use syntax::ast::kotlin::{FunctionDeclaration, PropertyDeclaration};
 use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 
-use super::{InferenceResult, Local, LocalId, LocalKind, Reference, ResolvedName};
+use super::{
+    ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
+    NonExhaustiveWhen, Reference, ResolvedName, UnresolvedName, UnsafeCall,
+};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::Types;
 use crate::ty::{FunctionType, Nullability, Ty};
@@ -21,11 +24,28 @@ use crate::ty::{FunctionType, Nullability, Ty};
 /// How deep expressions nest before the walk gives up on them.
 pub(super) const MAX_DEPTH: u32 = 160;
 
+/// Names compiler plugins generate, which the model doesn't know: a miss
+/// on one says nothing.
+const PLUGIN_GENERATED_NAMES: &[&str] = &["serializer"];
+
 /// One level of local names, and the smart casts in force there.
 #[derive(Default)]
 struct Scope {
+    kind: ScopeKind,
     names: Vec<(Name, LocalId)>,
     narrowed: Vec<(LocalId, Ty)>,
+}
+
+/// What a scope belongs to, where that decides what's visible through it.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(super) enum ScopeKind {
+    #[default]
+    Block,
+    /// A class's primary constructor parameters: seen by its initializers,
+    /// not by its functions.
+    ConstructorParameters,
+    /// A function's (or accessor's) own scope.
+    Function,
 }
 
 /// A value members can be used on without naming it: `this` of a class or
@@ -48,6 +68,8 @@ pub(crate) struct Inferrer<'db> {
     result: InferenceResult,
     top_level: FxHashMap<Name, Rc<Vec<Vec<ItemLocation>>>>,
     pub(super) depth: u32,
+    /// How many scopes of unknown shape enclose the walk.
+    uncertain_scopes: u32,
 }
 
 impl<'db> Inferrer<'db> {
@@ -72,6 +94,8 @@ impl<'db> Inferrer<'db> {
             result: InferenceResult::default(),
             top_level: FxHashMap::default(),
             depth: 0,
+            // A script's implicit receivers (Gradle's DSL) aren't modelled.
+            uncertain_scopes: u32::from(is_script(parse)),
         }
     }
 
@@ -153,17 +177,88 @@ impl<'db> Inferrer<'db> {
             .insert(name.start_byte() as u32, ResolvedName { reference, ty });
     }
 
-    pub(super) fn record_unresolved(&mut self, name: SyntaxNode<'_>) {
+    /// What was recorded for the name `node`, if anything.
+    pub(super) fn recorded_at(&self, node: SyntaxNode<'_>) -> Option<ResolvedName> {
+        self.result.names.get(&(node.start_byte() as u32)).cloned()
+    }
+
+    pub(super) fn record_unresolved(&mut self, name: SyntaxNode<'_>, site: NameSite) {
         let spelled = self.name(name);
-        self.result
-            .unresolved
-            .push((name.start_byte() as u32, spelled));
+        let certainty = self.lookup_certainty(spelled, &site);
+        self.result.unresolved.push(UnresolvedName {
+            range: TextRange::of(name),
+            name: spelled,
+            site,
+            certainty,
+        });
+    }
+
+    pub(super) fn record_argument_mismatch(&mut self, mismatch: ArgumentMismatch) {
+        self.result.argument_mismatches.push(mismatch);
+    }
+
+    pub(super) fn record_unsafe_call(&mut self, call: UnsafeCall) {
+        self.result.unsafe_calls.push(call);
+    }
+
+    pub(super) fn record_non_exhaustive_when(&mut self, when: NonExhaustiveWhen) {
+        self.result.non_exhaustive_whens.push(when);
+    }
+
+    /// Whether a lookup of `name` at `site`, here, searched everything there
+    /// is: no scope of unknown shape around, every receiver's class
+    /// hierarchy resolved, and not a name compiler plugins generate.
+    pub(super) fn lookup_certainty(&self, name: Name, site: &NameSite) -> Certainty {
+        let generated_by_plugin = PLUGIN_GENERATED_NAMES.contains(&name.as_str());
+        if self.uncertain_scopes > 0 || generated_by_plugin {
+            return Certainty::Uncertain;
+        }
+        let receivers_known = self
+            .receivers
+            .iter()
+            .all(|receiver| self.is_fully_known(&receiver.ty));
+        let site_known = match site {
+            NameSite::Member(receiver) => self.is_fully_known(receiver),
+            NameSite::Scope | NameSite::Static | NameSite::Package => true,
+        };
+        if receivers_known && site_known {
+            Certainty::Certain
+        } else {
+            Certainty::Uncertain
+        }
+    }
+
+    /// A type whose members are all known: not unknown, and every
+    /// supertype in its hierarchy resolves.
+    fn is_fully_known(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Unknown => false,
+            Ty::Class(class) => self.types.hierarchy_complete(class.class),
+            Ty::TypeParameter { .. } | Ty::Function(_) | Ty::Nothing { .. } => true,
+        }
+    }
+
+    /// Enters a scope whose shape isn't known (a lambda that may have a
+    /// receiver); names missed inside it are uncertain.
+    pub(super) fn enter_uncertain_scope(&mut self) {
+        self.uncertain_scopes += 1;
+    }
+
+    pub(super) fn leave_uncertain_scope(&mut self) {
+        self.uncertain_scopes -= 1;
     }
 
     // --- scopes ---------------------------------------------------------
 
     pub(super) fn push_scope(&mut self) {
         self.scopes.push(Scope::default());
+    }
+
+    pub(super) fn push_scope_of(&mut self, kind: ScopeKind) {
+        self.scopes.push(Scope {
+            kind,
+            ..Scope::default()
+        });
     }
 
     pub(super) fn pop_scope(&mut self) {
@@ -208,12 +303,21 @@ impl<'db> Inferrer<'db> {
     }
 
     pub(super) fn lookup_local(&self, name: Name) -> Option<LocalId> {
-        self.scopes
-            .iter()
-            .rev()
-            .flat_map(|scope| scope.names.iter().rev())
-            .find(|(declared, _)| *declared == name)
-            .map(|(_, id)| *id)
+        let mut inside_function = false;
+        for scope in self.scopes.iter().rev() {
+            let hidden = inside_function && scope.kind == ScopeKind::ConstructorParameters;
+            if !hidden
+                && let Some((_, id)) = scope
+                    .names
+                    .iter()
+                    .rev()
+                    .find(|(declared, _)| *declared == name)
+            {
+                return Some(*id);
+            }
+            inside_function |= scope.kind == ScopeKind::Function;
+        }
+        None
     }
 
     /// A local's type here: its declared or inferred type, or what a smart
@@ -285,6 +389,23 @@ impl<'db> Inferrer<'db> {
             if let Some(location) = self.item_of(class) {
                 self.push_class_receivers(location);
             }
+            // Its initializers see its constructor's parameters.
+            self.push_scope_of(ScopeKind::ConstructorParameters);
+            let constructor =
+                named_children(class).find(|child| child.kind() == "primary_constructor");
+            for parameter in constructor.into_iter().flat_map(|constructor| {
+                named_children(constructor).filter(|child| child.kind() == "class_parameter")
+            }) {
+                let ty = self
+                    .type_child(parameter)
+                    .map(|written| self.written_type(written))
+                    .unwrap_or(Ty::Unknown);
+                if let Some(name) =
+                    named_children(parameter).find(|child| child.kind() == "simple_identifier")
+                {
+                    self.declare_node(name, ty, LocalKind::Parameter);
+                }
+            }
         }
     }
 
@@ -339,7 +460,7 @@ impl<'db> Inferrer<'db> {
             Some(class) => self.push_class_receivers(class),
             None => 0,
         };
-        self.push_scope();
+        self.push_scope_of(ScopeKind::ConstructorParameters);
         for child in named_children(node) {
             match child.kind() {
                 "primary_constructor" => self.constructor_parameters(child),
@@ -416,7 +537,7 @@ impl<'db> Inferrer<'db> {
     }
 
     fn secondary_constructor(&mut self, node: SyntaxNode<'_>) {
-        self.push_scope();
+        self.push_scope_of(ScopeKind::Function);
         for child in named_children(node) {
             match child.kind() {
                 "function_value_parameters" => self.parameters(child),
@@ -494,7 +615,7 @@ impl<'db> Inferrer<'db> {
         if let Some(receiver) = receiver_type {
             self.push_receiver(receiver, label);
         }
-        self.push_scope();
+        self.push_scope_of(ScopeKind::Function);
         for child in named_children(node) {
             if child.kind() == "function_value_parameters" {
                 self.parameters(child);
@@ -543,7 +664,9 @@ impl<'db> Inferrer<'db> {
                     if let Some(body) =
                         named_children(child).find(|part| part.kind() == "function_body")
                     {
+                        self.push_scope_of(ScopeKind::Function);
                         let ty = self.function_body(body, written.as_ref());
+                        self.pop_scope();
                         if written.is_none() && initialized.is_none() && has_token(body, "=") {
                             if pushed_receiver {
                                 self.pop_receiver();
@@ -563,7 +686,7 @@ impl<'db> Inferrer<'db> {
     }
 
     fn setter(&mut self, node: SyntaxNode<'_>, property_type: Option<Ty>) {
-        self.push_scope();
+        self.push_scope_of(ScopeKind::Function);
         for child in named_children(node) {
             match child.kind() {
                 "parameter_with_optional_type" | "simple_identifier" => {
@@ -784,6 +907,28 @@ impl<'db> Inferrer<'db> {
             }
         }
     }
+}
+
+/// A script (`.kts`): statements at the top level, which a regular file
+/// can't have.
+fn is_script(parse: &Parse) -> bool {
+    named_children(parse.root()).any(|child| {
+        !matches!(
+            child.kind(),
+            "package_header"
+                | "import_list"
+                | "import_header"
+                | "file_annotation"
+                | "shebang_line"
+                | "line_comment"
+                | "multiline_comment"
+                | "class_declaration"
+                | "object_declaration"
+                | "function_declaration"
+                | "property_declaration"
+                | "type_alias"
+        )
+    })
 }
 
 /// The node at or above `node` that spans exactly `range`.

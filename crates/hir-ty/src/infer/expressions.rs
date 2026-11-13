@@ -8,7 +8,7 @@ use intern::{Name, Path};
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
-use super::{LocalKind, Reference};
+use super::{LocalKind, NameSite, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
 
@@ -232,8 +232,42 @@ impl Inferrer<'_> {
         if hir_def::def_map::package_prefix_exists(self.db, self.file, &path) {
             return Typed::Package(path);
         }
-        self.record_unresolved(node);
+        // A function's name where a value goes: a reference Kotlin rejects —
+        // or a call the parser split (`returns mockk<T> { … }`). Either way
+        // the name is the function's.
+        let functions = self.functions_named(name);
+        if !functions.is_empty() {
+            self.record(node, Reference::Candidates(functions.into()), Ty::Unknown);
+            return Typed::Value(Ty::Unknown);
+        }
+        self.record_unresolved(node, NameSite::Scope);
         Typed::Value(Ty::Unknown)
+    }
+
+    /// The functions named `name` an unqualified call could reach: members
+    /// of the implicit receivers, then top-level ones.
+    fn functions_named(&mut self, name: Name) -> Vec<ItemLocation> {
+        let mut found: Vec<ItemLocation> = Vec::new();
+        for index in (0..self.receivers.len()).rev() {
+            let receiver = self.receivers[index].ty.clone();
+            found.extend(
+                self.types
+                    .members_named(&receiver, name)
+                    .into_iter()
+                    .map(|member| member.location)
+                    .filter(|location| self.item_kind(*location) == ItemKind::Function),
+            );
+        }
+        let levels = self.top_level(name);
+        for level in levels.iter() {
+            found.extend(
+                level
+                    .iter()
+                    .copied()
+                    .filter(|location| self.item_kind(*location) == ItemKind::Function),
+            );
+        }
+        found
     }
 
     /// A nested classifier or enum entry visible by its simple name inside
@@ -352,10 +386,21 @@ impl Inferrer<'_> {
             return Typed::Value(Ty::Unknown);
         };
         let name = self.name(name_node);
+        if has_token(suffix, "::") {
+            return Typed::Value(self.member_reference(&receiver, name_node, name));
+        }
         match receiver {
             Typed::Value(receiver_type) => {
                 match self.property_of(&receiver_type, name) {
                     Some((location, ty)) => {
+                        if !safe {
+                            self.check_receiver_not_null(
+                                receiver_node,
+                                &receiver_type,
+                                name_node,
+                                location,
+                            );
+                        }
                         let ty = if safe { ty.nullable() } else { ty };
                         self.record(name_node, Reference::Declaration(location), ty.clone());
                         Typed::Value(ty)
@@ -366,7 +411,10 @@ impl Inferrer<'_> {
                         let modelled = !receiver_type.is_unknown()
                             && !matches!(receiver_type, Ty::Function(_));
                         if modelled {
-                            self.record_unresolved(name_node);
+                            self.record_unresolved(
+                                name_node,
+                                NameSite::Member(receiver_type.clone()),
+                            );
                         }
                         Typed::Value(Ty::Unknown)
                     }
@@ -375,6 +423,36 @@ impl Inferrer<'_> {
             Typed::Class(class) => self.static_member(class, name_node, name),
             Typed::Package(package) => self.package_member(package, name_node, name),
         }
+    }
+
+    /// `value::name` / `Class::name` as the grammar sometimes splits it (a
+    /// navigation with a `::` suffix): the members named so.
+    fn member_reference(&mut self, receiver: &Typed, name_node: SyntaxNode<'_>, name: Name) -> Ty {
+        let receiver_type = match receiver {
+            Typed::Value(ty) => ty.clone(),
+            Typed::Class(class) => Ty::Class(self.types.self_type(*class)),
+            Typed::Package(_) => return Ty::Unknown,
+        };
+        let members: Vec<ItemLocation> = self
+            .types
+            .members_named(&receiver_type, name)
+            .into_iter()
+            .map(|member| member.location)
+            .collect();
+        match &members[..] {
+            [] => {
+                if !receiver_type.is_unknown() && !matches!(receiver_type, Ty::Function(_)) {
+                    self.record_unresolved(name_node, NameSite::Member(receiver_type));
+                }
+            }
+            [only] => self.record(name_node, Reference::Declaration(*only), Ty::Unknown),
+            several => self.record(
+                name_node,
+                Reference::Candidates(several.into()),
+                Ty::Unknown,
+            ),
+        }
+        Ty::Unknown
     }
 
     /// `Class.name`: a nested class, an enum entry, a Java static, or a
@@ -407,7 +485,7 @@ impl Inferrer<'_> {
             self.record(name_node, Reference::Declaration(class), entries.clone());
             return Typed::Value(entries);
         }
-        self.record_unresolved(name_node);
+        self.record_unresolved(name_node, NameSite::Static);
         Typed::Value(Ty::Unknown)
     }
 
@@ -471,7 +549,7 @@ impl Inferrer<'_> {
         if hir_def::def_map::package_prefix_exists(self.db, self.file, &subpackage) {
             return Typed::Package(subpackage);
         }
-        self.record_unresolved(name_node);
+        self.record_unresolved(name_node, NameSite::Package);
         Typed::Value(Ty::Unknown)
     }
 
@@ -676,7 +754,10 @@ impl Inferrer<'_> {
                         }
                         None => {
                             if !receiver_type.is_unknown() {
-                                self.record_unresolved(name_node);
+                                self.record_unresolved(
+                                    name_node,
+                                    NameSite::Member(receiver_type.clone()),
+                                );
                             }
                             Ty::Unknown
                         }
@@ -811,6 +892,9 @@ impl Inferrer<'_> {
             }
         }
         self.pop_scope();
+        if let (false, Some(subject_type)) = (has_else, &subject_type) {
+            self.check_exhaustive(node, subject_type);
+        }
         let exhaustive_enough = has_else || expected.is_some();
         if branches.is_empty() || !exhaustive_enough && subject_type.is_none() {
             return self.types.builtin("Unit");
@@ -1082,6 +1166,12 @@ impl Inferrer<'_> {
             Some(Ty::Class(class)) => self.types.functional_interface_type(class),
             _ => None,
         };
+        // Without its function type the lambda may have a receiver whose
+        // members its body uses: misses inside are uncertain.
+        let shape_unknown = expected_function.is_none();
+        if shape_unknown {
+            self.enter_uncertain_scope();
+        }
         self.push_scope();
         let receiver = expected_function
             .as_ref()
@@ -1150,6 +1240,9 @@ impl Inferrer<'_> {
         };
         if receiver.is_some() {
             self.pop_receiver();
+        }
+        if shape_unknown {
+            self.leave_uncertain_scope();
         }
         self.pop_scope();
         Ty::Function(Box::new(FunctionType {

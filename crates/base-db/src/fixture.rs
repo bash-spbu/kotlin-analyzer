@@ -67,6 +67,7 @@ impl Fixture {
                 text: Some(Arc::from(text.as_str())),
                 language: Language::of_path(&file.path).unwrap_or(Language::Kotlin),
                 source_set: model.source_set_of(&file.path),
+                directory_package: model.directory_package(&file.path),
             });
         }
         let mut database = RootDatabase::default();
@@ -256,6 +257,9 @@ fun <T> T.also(block: (T) -> Unit): T = TODO()
 fun <T, R> T.let(block: (T) -> R): R = TODO()
 fun <T> T.apply(block: T.() -> Unit): T = TODO()
 fun TODO(): Nothing = TODO()
+fun <T, R> with(receiver: T, block: T.() -> R): R = TODO()
+fun <T : Any> requireNotNull(value: T?): T = TODO()
+fun require(value: Boolean) {}
 fun println(message: Any?) {}
 fun println(message: Int) {}
 data class Pair<out A, out B>(val first: A, val second: B)

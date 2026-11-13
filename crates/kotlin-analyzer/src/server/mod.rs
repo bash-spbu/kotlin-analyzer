@@ -9,6 +9,7 @@
 mod convert;
 mod handlers;
 mod library_sources;
+mod settings;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,7 @@ pub fn run() -> Result<(), String> {
         .and_then(|options| options.get("projectJson"))
         .and_then(|path| path.as_str())
         .map(PathBuf::from);
+    let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
     let result = InitializeResult {
         capabilities: capabilities(),
         server_info: Some(ServerInfo {
@@ -60,6 +62,7 @@ pub fn run() -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     let mut state = GlobalState::new(connection.sender.clone(), root, project_json);
+    state.diagnostics_config = Arc::new(diagnostics_config);
     state.start_loading();
     state.main_loop(&connection.receiver)?;
     drop(state);
@@ -72,6 +75,7 @@ fn capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         definition_provider: Some(OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -124,6 +128,8 @@ struct GlobalState {
     paths: Arc<Vec<PathBuf>>,
     next_request: i32,
     shutdown_requested: bool,
+    /// Which checks run, from the client's settings.
+    diagnostics_config: Arc<ide::DiagnosticsConfig>,
 }
 
 impl GlobalState {
@@ -151,6 +157,7 @@ impl GlobalState {
             paths: Arc::default(),
             next_request: 0,
             shutdown_requested: false,
+            diagnostics_config: Arc::default(),
         }
     }
 
@@ -236,6 +243,7 @@ impl GlobalState {
                             text: Some(text),
                             language,
                             source_set: self.model.source_set_of(&path),
+                            directory_package: self.model.directory_package(&path),
                         }]);
                     }
                 }
@@ -293,6 +301,7 @@ impl GlobalState {
             paths: self.paths.clone(),
             loaded: self.loaded,
             request_file: self.request_file_of(&request),
+            diagnostics_config: self.diagnostics_config.clone(),
         };
         let sender = self.task_sender.clone();
         self.pool.spawn(move || {
@@ -349,6 +358,17 @@ impl GlobalState {
                 }
                 Err(notification) => notification,
             };
+        let notification =
+            match cast_notification::<notification::DidChangeConfiguration>(notification) {
+                Ok(params) => {
+                    if let Some(config) = settings::changed_diagnostics_config(&params.settings) {
+                        self.diagnostics_config = Arc::new(config);
+                        self.update_diagnostics(self.open_documents.keys().copied().collect());
+                    }
+                    return;
+                }
+                Err(notification) => notification,
+            };
         if let Ok(params) = cast_notification::<notification::DidCloseTextDocument>(notification) {
             let Some(path) = convert::path_of(&params.text_document.uri) else {
                 return;
@@ -390,8 +410,17 @@ impl GlobalState {
             };
             let analysis = self.host.analysis();
             let sender = self.task_sender.clone();
+            // Until the workspace is loaded only syntax is known for sure.
+            let config = if self.loaded {
+                self.diagnostics_config.clone()
+            } else {
+                Arc::new(ide::DiagnosticsConfig {
+                    only: vec![ide::Check::Syntax],
+                    ..ide::DiagnosticsConfig::default()
+                })
+            };
             self.pool.spawn(move || {
-                let Ok(diagnostics) = handlers::syntax_diagnostics(&analysis, file) else {
+                let Ok(diagnostics) = handlers::diagnostics(&analysis, file, &config) else {
                     return;
                 };
                 let _ = sender.send(Task::Diagnostics {

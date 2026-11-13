@@ -222,6 +222,7 @@ pub fn file_changes(vfs: &mut Vfs, model: &ProjectModel) -> Vec<hir::FileChange>
                 text,
                 language,
                 source_set: model.source_set_of(&path),
+                directory_package: model.directory_package(&path),
             })
         })
         .collect()

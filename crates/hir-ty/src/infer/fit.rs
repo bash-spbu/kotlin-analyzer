@@ -170,9 +170,17 @@ impl Types<'_> {
                 if matches!(value, Ty::Nothing { .. }) {
                     return;
                 }
-                let bound = match nullability {
-                    Nullability::Nullable => value.clone().non_null(),
-                    _ => value.clone(),
+                // `T?` given `X?` binds `T` to `X`; so does `T : Any` (a
+                // parameter with only non-null bounds is never nullable).
+                let bounds = self.type_parameter_bounds(*parameter);
+                let never_nullable = !bounds.is_empty()
+                    && bounds
+                        .iter()
+                        .all(|bound| bound.nullability() == Nullability::NotNull);
+                let bound = if nullability == &Nullability::Nullable || never_nullable {
+                    value.clone().non_null()
+                } else {
+                    value.clone()
                 };
                 substitution.bind(*parameter, bound);
             }

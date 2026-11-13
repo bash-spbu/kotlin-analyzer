@@ -2,11 +2,28 @@
 //! when it doesn't (`x != null`, `x is String`, combined with `&&`, `||`,
 //! `!`).
 
-use syntax::{SyntaxNode, has_token, named_children};
+use hir_def::ItemLocation;
+use hir_def::item_tree::Signature;
+use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
-use super::LocalId;
 use super::declarations::Inferrer;
-use crate::ty::Ty;
+use super::{LocalId, UnsafeCall};
+use crate::ty::{Nullability, Ty};
+
+/// Members every value has, which Kotlin also offers on a nullable
+/// receiver (`Any?.toString()`, `Any?.hashCode()`).
+const NULL_SAFE_MEMBERS: &[&str] = &["equals", "hashCode", "toString"];
+
+/// Calls that assert their argument isn't null, or a condition about it.
+const ASSERTIONS: &[&str] = &[
+    "require",
+    "requireNotNull",
+    "check",
+    "checkNotNull",
+    "assert",
+    "assertNotNull",
+    "assertThat",
+];
 
 /// The locals a condition narrows, and to what.
 #[derive(Default)]
@@ -170,4 +187,148 @@ impl Inferrer<'_> {
             }
         }
     }
+}
+
+impl Inferrer<'_> {
+    /// Records `receiver.member` (with a plain `.`) as unsafe when the
+    /// receiver's type is nullable, the member is the class's own (not an
+    /// extension, which may take a nullable receiver), and nothing in the
+    /// declaration around could have smart-cast the receiver: it's never
+    /// compared with `null`, type-checked, asserted, assigned or used with
+    /// `?.`, `!!` or `?:` there.
+    pub(super) fn check_receiver_not_null(
+        &mut self,
+        receiver: SyntaxNode<'_>,
+        receiver_type: &Ty,
+        name: SyntaxNode<'_>,
+        member: ItemLocation,
+    ) {
+        if receiver_type.nullability() != Nullability::Nullable
+            || matches!(receiver_type, Ty::Nothing { .. })
+        {
+            return;
+        }
+        if NULL_SAFE_MEMBERS.contains(&self.text(name)) || !self.is_own_member(member) {
+            return;
+        }
+        let path = stable_path(self.text(receiver));
+        if self.null_guarded(receiver, &path) {
+            return;
+        }
+        self.record_unsafe_call(UnsafeCall {
+            range: TextRange::of(name),
+            receiver: receiver_type.clone(),
+        });
+    }
+
+    /// A member of a class (not a top-level or extension declaration).
+    fn is_own_member(&self, location: ItemLocation) -> bool {
+        let tree = hir_def::item_tree(self.db, location.container);
+        let item = tree.item(location.item);
+        let is_extension = matches!(
+            &item.signature,
+            Signature::Function {
+                receiver: Some(_),
+                ..
+            } | Signature::Property {
+                receiver: Some(_),
+                ..
+            }
+        );
+        item.parent.is_some() && !is_extension
+    }
+
+    /// Whether the expression spelled `path` is checked for `null` (or
+    /// asserted, assigned, used null-safely) anywhere in the declaration
+    /// around `node`.
+    fn null_guarded(&self, node: SyntaxNode<'_>, path: &str) -> bool {
+        let scope = enclosing_declaration(node);
+        syntax::descendants(scope).any(|candidate| self.guards(candidate, path))
+    }
+
+    fn guards(&self, node: SyntaxNode<'_>, path: &str) -> bool {
+        let spelled = |child: Option<SyntaxNode<'_>>| {
+            child.is_some_and(|child| stable_path(self.text(child)) == path)
+        };
+        let mut children = named_children(node);
+        match node.kind() {
+            "equality_expression" => {
+                let operands: Vec<SyntaxNode<'_>> = named_children(node).collect();
+                let has_null = operands
+                    .iter()
+                    .any(|operand| operand.kind() == "null_literal");
+                has_null && operands.iter().any(|operand| spelled(Some(*operand)))
+            }
+            "check_expression" | "postfix_expression" | "elvis_expression" | "when_subject"
+            | "assignment" => spelled(children.next()),
+            "directly_assignable_expression" => stable_path(self.text(node)) == path,
+            "navigation_expression" => {
+                let receiver = children.next();
+                let suffix = children.next();
+                let null_safe = suffix.is_some_and(|suffix| {
+                    has_token(suffix, "?.")
+                        || named_children(suffix).any(|name| {
+                            self.text(name).starts_with("isNull") || self.text(name) == "orEmpty"
+                        })
+                });
+                null_safe && spelled(receiver)
+            }
+            "call_expression" => {
+                let callee = children
+                    .next()
+                    .map(|callee| self.text(callee))
+                    .unwrap_or("");
+                let asserts = ASSERTIONS.contains(&callee) || callee.starts_with("assert");
+                asserts
+                    && self
+                        .text(node)
+                        .replace(char::is_whitespace, "")
+                        .contains(path)
+            }
+            "variable_declaration" => {
+                // `var x: T? = value`: what was assigned may have been
+                // non-null.
+                named_children(node)
+                    .next()
+                    .is_some_and(|name| self.text(name) == path)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// An expression's text without whitespace, to compare paths like
+/// `this.user` and `account.owner.name`.
+fn stable_path(text: &str) -> String {
+    text.chars().filter(|char| !char.is_whitespace()).collect()
+}
+
+/// The member-level declaration around `node` (a function, an accessor,
+/// an initializer, a property), or the file.
+fn enclosing_declaration(node: SyntaxNode<'_>) -> SyntaxNode<'_> {
+    let mut current = node;
+    let mut found = node;
+    while let Some(parent) = current.parent() {
+        let is_declaration = matches!(
+            parent.kind(),
+            "function_declaration"
+                | "getter"
+                | "setter"
+                | "anonymous_initializer"
+                | "secondary_constructor"
+                | "property_declaration"
+        );
+        let at_member_level = parent.parent().is_some_and(|grandparent| {
+            matches!(
+                grandparent.kind(),
+                "class_body" | "source_file" | "enum_class_body"
+            )
+        });
+        if is_declaration && at_member_level {
+            return parent;
+        }
+        found = parent;
+        current = parent;
+    }
+    found
 }

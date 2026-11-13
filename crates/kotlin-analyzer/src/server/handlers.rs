@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest, Request as _,
-    WorkspaceSymbolRequest,
+    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest,
+    Request as _, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -26,6 +26,7 @@ pub(super) struct Snapshot {
     pub(super) loaded: bool,
     /// The file the request is about, when it names one the server knows.
     pub(super) request_file: Option<FileId>,
+    pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
 }
 
 /// How many results `workspace/symbol` returns at most.
@@ -39,6 +40,9 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
         }
         HoverRequest::METHOD => {
             params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
+        }
+        CodeActionRequest::METHOD => {
+            params::<CodeActionRequest>(request).map(|params| code_actions(&snapshot, params))
         }
         InlayHintRequest::METHOD => {
             params::<InlayHintRequest>(request).map(|params| inlay_hints(&snapshot, params))
@@ -244,26 +248,104 @@ fn workspace_symbols(snapshot: &Snapshot, query: &str) -> Cancellable<serde_json
     Ok(serde_json::to_value(WorkspaceSymbolResponse::Nested(symbols)).unwrap_or_default())
 }
 
-pub(super) fn syntax_diagnostics(
+/// A file's diagnostics, as LSP has them.
+pub(super) fn diagnostics(
     analysis: &Analysis,
     file: FileId,
+    config: &ide::DiagnosticsConfig,
 ) -> Cancellable<Vec<Diagnostic>> {
     let Some(text) = analysis.file_text(file)? else {
         return Ok(Vec::new());
     };
     let index = LineIndex::new(&text);
-    let errors = analysis.syntax_errors(file)?;
-    Ok(errors
+    Ok(analysis
+        .diagnostics(file, config)?
         .into_iter()
-        .map(|error| Diagnostic {
-            range: convert::range(&index, &text, error.range),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(lsp_types::NumberOrString::String("syntax".to_owned())),
-            source: Some("kotlin-analyzer".to_owned()),
-            message: error.message,
-            ..Diagnostic::default()
-        })
+        .map(|diagnostic| to_lsp(&index, &text, &diagnostic))
         .collect())
+}
+
+fn to_lsp(index: &LineIndex, text: &str, diagnostic: &ide::Diagnostic) -> Diagnostic {
+    let (severity, tags) = match diagnostic.check.severity() {
+        ide::Severity::Error => (DiagnosticSeverity::ERROR, None),
+        ide::Severity::Warning => (DiagnosticSeverity::WARNING, None),
+        ide::Severity::Unnecessary => (
+            DiagnosticSeverity::HINT,
+            Some(vec![lsp_types::DiagnosticTag::UNNECESSARY]),
+        ),
+    };
+    Diagnostic {
+        range: convert::range(index, text, diagnostic.range),
+        severity: Some(severity),
+        code: Some(lsp_types::NumberOrString::String(
+            diagnostic.check.name().to_owned(),
+        )),
+        source: Some("kotlin-analyzer".to_owned()),
+        message: diagnostic.message.clone(),
+        tags,
+        ..Diagnostic::default()
+    }
+}
+
+/// The fixes of the diagnostics overlapping the requested range.
+fn code_actions(
+    snapshot: &Snapshot,
+    params: lsp_types::CodeActionParams,
+) -> Cancellable<serde_json::Value> {
+    let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(text) = snapshot.analysis.file_text(file)? else {
+        return Ok(serde_json::Value::Null);
+    };
+    let index = LineIndex::new(&text);
+    let start = convert::offset(&text, params.range.start) as u32;
+    let end = convert::offset(&text, params.range.end) as u32;
+    let mut actions = Vec::new();
+    for diagnostic in snapshot
+        .analysis
+        .diagnostics(file, &snapshot.diagnostics_config)?
+    {
+        let overlaps = diagnostic.range.start <= end && start <= diagnostic.range.end;
+        if !overlaps {
+            continue;
+        }
+        let lsp_diagnostic = to_lsp(&index, &text, &diagnostic);
+        for fix in diagnostic.fixes {
+            let edits = fix
+                .edits
+                .iter()
+                .map(|edit| {
+                    lsp_types::OneOf::Left(lsp_types::TextEdit {
+                        range: convert::range(&index, &text, edit.range),
+                        new_text: edit.new_text.clone(),
+                    })
+                })
+                .collect();
+            let document_edit = lsp_types::TextDocumentEdit {
+                text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                    uri: params.text_document.uri.clone(),
+                    version: None,
+                },
+                edits,
+            };
+            actions.push(lsp_types::CodeActionOrCommand::CodeAction(
+                lsp_types::CodeAction {
+                    title: fix.label,
+                    kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![lsp_diagnostic.clone()]),
+                    edit: Some(lsp_types::WorkspaceEdit {
+                        document_changes: Some(lsp_types::DocumentChanges::Edits(vec![
+                            document_edit,
+                        ])),
+                        ..lsp_types::WorkspaceEdit::default()
+                    }),
+                    ..lsp_types::CodeAction::default()
+                },
+            ));
+        }
+    }
+    Ok(serde_json::to_value(actions).unwrap_or_default())
 }
 
 fn symbol_kind(kind: SymbolKind) -> lsp_types::SymbolKind {

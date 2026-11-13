@@ -11,10 +11,10 @@ use hir_def::resolver::{Resolution, resolve_type_path};
 use intern::{Name, Path};
 use syntax::{SyntaxNode, has_token, named_children};
 
-use super::Reference;
 use super::declarations::Inferrer;
 use super::expressions::Typed;
 use super::fit::Fit;
+use super::{ArgumentMismatch, Certainty, NameSite, Reference};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::{Member, class_substitution};
 use crate::signature::{Callable, CallableSignature, ParameterSignature};
@@ -78,6 +78,10 @@ struct Shaped {
 enum Level {
     /// Member functions of a receiver's type.
     Members(Ty),
+    /// Extension functions on a receiver's type declared as members of an
+    /// implicit receiver's class (`private fun Map<…>.toList()` in a
+    /// class, used inside it).
+    MemberExtensions(Ty),
     /// Extension functions on a receiver's type from one of the file's
     /// top-level levels.
     Extensions { receiver: Ty, level: usize },
@@ -143,6 +147,7 @@ impl<'db> Inferrer<'db> {
         if let Some(result) = self.resolve(
             Some(callee),
             name,
+            NameSite::Scope,
             levels,
             arguments,
             type_arguments,
@@ -180,6 +185,13 @@ impl<'db> Inferrer<'db> {
             return Ty::Unknown;
         };
         let name = self.name(name_node);
+        // `block.invoke(…)` / `block?.invoke(…)` calls the function value.
+        if let Typed::Value(Ty::Function(function)) = &receiver
+            && name.as_str() == "invoke"
+        {
+            let result = self.invoke(Some((**function).clone()), arguments);
+            return if safe { result.nullable() } else { result };
+        }
         let levels = match &receiver {
             Typed::Value(Ty::Unknown) => {
                 self.type_remaining(arguments);
@@ -192,14 +204,27 @@ impl<'db> Inferrer<'db> {
                 vec![Level::Declarations(found)]
             }
         };
+        let site = match &receiver {
+            Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
+            Typed::Class(_) => NameSite::Static,
+            Typed::Package(_) => NameSite::Package,
+        };
         let result = self.resolve(
             Some(name_node),
             name,
+            site,
             levels,
             arguments,
             type_arguments,
             expected,
         );
+        if !safe
+            && let Typed::Value(receiver_type) = &receiver
+            && let Some(resolved) = self.recorded_at(name_node)
+            && let Reference::Declaration(location) = resolved.reference
+        {
+            self.check_receiver_not_null(receiver_node, receiver_type, name_node, location);
+        }
         let result = match result {
             Some(result) => result,
             None => {
@@ -215,9 +240,16 @@ impl<'db> Inferrer<'db> {
                     }
                     _ => {
                         self.type_remaining(arguments);
-                        let modelled = !matches!(receiver, Typed::Value(Ty::Function(_)));
-                        if modelled {
-                            self.record_unresolved(name_node);
+                        let site = match &receiver {
+                            Typed::Value(Ty::Function(_)) => None,
+                            Typed::Value(receiver_type) => {
+                                Some(NameSite::Member(receiver_type.clone()))
+                            }
+                            Typed::Class(_) => Some(NameSite::Static),
+                            Typed::Package(_) => Some(NameSite::Package),
+                        };
+                        if let Some(site) = site {
+                            self.record_unresolved(name_node, site);
                         }
                         Ty::Unknown
                     }
@@ -246,11 +278,20 @@ impl<'db> Inferrer<'db> {
             return Ty::Unknown;
         }
         let levels = self.receiver_levels(&receiver);
-        match self.resolve(Some(function), name, levels, &mut arguments, &[], None) {
+        let site = NameSite::Member(receiver.clone());
+        match self.resolve(
+            Some(function),
+            name,
+            site,
+            levels,
+            &mut arguments,
+            &[],
+            None,
+        ) {
             Some(result) => result,
             None => {
                 self.type_remaining(&mut arguments);
-                self.record_unresolved(function);
+                self.record_unresolved(function, NameSite::Member(receiver));
                 Ty::Unknown
             }
         }
@@ -272,7 +313,8 @@ impl<'db> Inferrer<'db> {
         let mut arguments: Vec<Argument<'_>> =
             argument_types.into_iter().map(Argument::typed).collect();
         let levels = self.receiver_levels(receiver);
-        let result = self.resolve(None, name, levels, &mut arguments, &[], None);
+        let site = NameSite::Member(receiver.clone());
+        let result = self.resolve(None, name, site, levels, &mut arguments, &[], None);
         result.or_else(|| self.data_class_component(receiver, name))
     }
 
@@ -331,7 +373,10 @@ impl<'db> Inferrer<'db> {
     }
 
     fn receiver_levels(&self, receiver: &Ty) -> Vec<Level> {
-        let mut levels = vec![Level::Members(receiver.clone())];
+        let mut levels = vec![
+            Level::Members(receiver.clone()),
+            Level::MemberExtensions(receiver.clone()),
+        ];
         for level in 0..TOP_LEVEL_LEVELS {
             levels.push(Level::Extensions {
                 receiver: receiver.clone(),
@@ -358,7 +403,7 @@ impl<'db> Inferrer<'db> {
                 let mut candidates: Vec<Candidate> = members
                     .into_iter()
                     .filter(|member| self.item_kind(member.location) == ItemKind::Function)
-                    .filter_map(|member| self.member_candidate(member))
+                    .filter_map(|member| self.member_candidate(member, receiver))
                     .collect();
                 if candidates.is_empty()
                     && let Some(class_type) = receiver.class()
@@ -378,6 +423,36 @@ impl<'db> Inferrer<'db> {
                 }
                 candidates
             }
+            Level::MemberExtensions(receiver) => {
+                let mut candidates = Vec::new();
+                for index in (0..self.receivers.len()).rev() {
+                    let dispatch = self.receivers[index].ty.clone();
+                    for member in self.types.members_named(&dispatch, name) {
+                        if self.item_kind(member.location) != ItemKind::Function {
+                            continue;
+                        }
+                        let Some(signature) =
+                            self.types.signature(Callable::Function(member.location))
+                        else {
+                            continue;
+                        };
+                        let Some(declared) = &signature.receiver else {
+                            continue;
+                        };
+                        let declared = declared.substitute(&member.substitution);
+                        if self.types.fits(&receiver.clone().non_null(), &declared) == Fit::No {
+                            continue;
+                        }
+                        candidates.push(Candidate {
+                            callable: Callable::Function(member.location),
+                            signature: signature.clone(),
+                            substitution: member.substitution,
+                            receiver: Some(receiver.clone()),
+                        });
+                    }
+                }
+                candidates
+            }
             Level::Extensions { receiver, level } => {
                 let levels = self.top_level(name);
                 let Some(declarations) = levels.get(*level) else {
@@ -388,7 +463,11 @@ impl<'db> Inferrer<'db> {
                     .filter_map(|location| self.extension_candidate(*location, receiver))
                     .collect()
             }
-            Level::Constructors(class) => self.constructor_candidates(*class),
+            Level::Constructors(class) => {
+                let mut candidates = self.constructor_candidates(*class);
+                candidates.extend(self.invoke_candidates(*class));
+                candidates
+            }
             Level::TopLevelFunctions(level) => {
                 let levels = self.top_level(name);
                 let Some(declarations) = levels.get(*level) else {
@@ -450,11 +529,20 @@ impl<'db> Inferrer<'db> {
         candidates
     }
 
-    fn member_candidate(&self, member: Member) -> Option<Candidate> {
-        let signature = self.types.signature(Callable::Function(member.location))?;
+    fn member_candidate(&self, member: Member, receiver: &Ty) -> Option<Candidate> {
+        let mut signature = self.types.signature(Callable::Function(member.location))?;
         if signature.receiver.is_some() {
             // A member extension needs both receivers; not modelled.
             return None;
+        }
+        // An override takes its default values from what it overrides.
+        let inherited = self.types.inherited_defaults(receiver, member.location);
+        if inherited.iter().any(|has_default| *has_default) {
+            let mut with_defaults = (*signature).clone();
+            for (parameter, inherited) in with_defaults.parameters.iter_mut().zip(inherited) {
+                parameter.has_default |= inherited;
+            }
+            signature = Rc::new(with_defaults);
         }
         Some(Candidate {
             callable: Callable::Function(member.location),
@@ -486,6 +574,21 @@ impl<'db> Inferrer<'db> {
             substitution: Substitution::default(),
             receiver: Some(value),
         })
+    }
+
+    /// `Name(…)` of an object, or of a class with a companion, that has an
+    /// `operator fun invoke`: calls that.
+    fn invoke_candidates(&self, class: ItemLocation) -> Vec<Candidate> {
+        let Some(instance) = self.types.object_instance(class) else {
+            return Vec::new();
+        };
+        let instance = Ty::Class(instance);
+        self.types
+            .members_named(&instance, Name::new("invoke"))
+            .into_iter()
+            .filter(|member| self.item_kind(member.location) == ItemKind::Function)
+            .filter_map(|member| self.member_candidate(member, &instance))
+            .collect()
     }
 
     /// The constructors of `class` (a type alias's class's, through the
@@ -525,10 +628,12 @@ impl<'db> Inferrer<'db> {
     /// with a candidate that fits wins. Records what `name_node` means and
     /// returns the call's type; `None` when nothing has the name (the
     /// arguments are then left untyped).
+    #[allow(clippy::too_many_arguments)]
     fn resolve(
         &mut self,
         name_node: Option<SyntaxNode<'_>>,
         name: Name,
+        site: NameSite,
         levels: Vec<Level>,
         arguments: &mut [Argument<'_>],
         type_arguments: &[Ty],
@@ -606,7 +711,17 @@ impl<'db> Inferrer<'db> {
         if seen.is_empty() {
             return None;
         }
+        let no_shape_fits = !arguments_typed;
         self.type_remaining(arguments);
+        if let Some(name_node) = name_node
+            && no_shape_fits
+            && self.lookup_certainty(name, &site) == Certainty::Certain
+        {
+            self.record_argument_mismatch(ArgumentMismatch {
+                range: syntax::TextRange::of(name_node),
+                candidates: seen.clone().into_boxed_slice(),
+            });
+        }
         self.record_callee(
             name_node,
             Reference::Candidates(seen.into_boxed_slice()),
@@ -1192,7 +1307,11 @@ impl<'db> Inferrer<'db> {
         };
         match &declarations[..] {
             [] => {
-                self.record_unresolved(name_node);
+                let site = match &receiver_type {
+                    Some(receiver_type) => NameSite::Member(receiver_type.clone()),
+                    None => NameSite::Scope,
+                };
+                self.record_unresolved(name_node, site);
                 Ty::Unknown
             }
             [only] => {
@@ -1299,9 +1418,15 @@ fn match_arguments(
             if signature.java {
                 return None;
             }
-            parameters
+            let index = parameters
                 .iter()
-                .position(|parameter| parameter.name == name)?
+                .position(|parameter| parameter.name == name)?;
+            // A named argument in its own position counts as positional for
+            // the ones after it (`f(a = 1, 2)`).
+            if index == position && !parameters[index].vararg {
+                position += 1;
+            }
+            index
         } else {
             let index = position;
             let parameter: &ParameterSignature = parameters.get(index)?;

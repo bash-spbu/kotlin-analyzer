@@ -31,6 +31,7 @@ pub struct Types<'db> {
     pub from: SourceFile,
     /// Each class's supertypes in terms of its own type parameters.
     hierarchies: RefCell<FxHashMap<ItemLocation, Rc<[ClassType]>>>,
+    complete_hierarchies: RefCell<FxHashMap<ItemLocation, bool>>,
     pub(crate) signatures: RefCell<
         FxHashMap<crate::signature::Callable, Option<Rc<crate::signature::CallableSignature>>>,
     >,
@@ -42,6 +43,7 @@ impl<'db> Types<'db> {
             db,
             from,
             hierarchies: RefCell::default(),
+            complete_hierarchies: RefCell::default(),
             signatures: RefCell::default(),
         }
     }
@@ -155,6 +157,33 @@ impl<'db> Types<'db> {
         hierarchy
     }
 
+    /// Whether every supertype written in `class`'s hierarchy resolves —
+    /// only then are its members all known.
+    pub fn hierarchy_complete(&self, class: ItemLocation) -> bool {
+        if let Some(known) = self.complete_hierarchies.borrow().get(&class) {
+            return *known;
+        }
+        let mut classes = vec![class];
+        classes.extend(
+            self.hierarchy(class)
+                .iter()
+                .map(|supertype| supertype.class),
+        );
+        let complete = classes.iter().all(|class| {
+            let tree = item_tree(self.db, class.container);
+            let Signature::Class { supertypes, .. } = &tree.item(class.item).signature else {
+                return true;
+            };
+            supertypes
+                .iter()
+                .all(|supertype| lower_supertype(self.db, self.from, *class, supertype).is_some())
+        });
+        self.complete_hierarchies
+            .borrow_mut()
+            .insert(class, complete);
+        complete
+    }
+
     /// `ty`'s supertype instance of `class`: `ArrayList<String>` seen as
     /// `List` is `List<String>`.
     pub fn as_supertype(&self, ty: &Ty, class: ItemLocation) -> Option<ClassType> {
@@ -245,6 +274,43 @@ impl<'db> Types<'db> {
             }
         }
         found.into_iter().map(|(member, _)| member).collect()
+    }
+
+    /// Which parameters of the member function `member` have a default
+    /// value declared by a function it overrides (same name, same number
+    /// of parameters, in a supertype of `receiver`'s).
+    pub fn inherited_defaults(&self, receiver: &Ty, member: ItemLocation) -> Vec<bool> {
+        let tree = item_tree(self.db, member.container);
+        let item = tree.item(member.item);
+        let Signature::Function { parameters, .. } = &item.signature else {
+            return Vec::new();
+        };
+        let mut defaults: Vec<bool> = parameters
+            .iter()
+            .map(|parameter| parameter.has_default)
+            .collect();
+        for holder in self.member_holders(receiver) {
+            for class_type in self.all_supertypes(&holder) {
+                let class_tree = item_tree(self.db, class_type.class.container);
+                for child in class_tree.item(class_type.class.item).children.iter() {
+                    let candidate = class_tree.item(*child);
+                    let Signature::Function {
+                        parameters: overridden,
+                        ..
+                    } = &candidate.signature
+                    else {
+                        continue;
+                    };
+                    if candidate.name != item.name || overridden.len() != defaults.len() {
+                        continue;
+                    }
+                    for (has_default, parameter) in defaults.iter_mut().zip(overridden.iter()) {
+                        *has_default |= parameter.has_default;
+                    }
+                }
+            }
+        }
+        defaults
     }
 
     /// The getter a Java class has for the property `name` Kotlin lets you

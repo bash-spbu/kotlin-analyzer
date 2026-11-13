@@ -487,6 +487,7 @@ dependencies = [
 name = "project-model"
 version = "0.1.0"
 dependencies = [
+ "intern",
  "rustc-hash",
  "serde",
  "serde_json",

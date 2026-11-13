@@ -32,6 +32,9 @@ pub struct SourceFile {
     /// `None` for a file outside every source set (opened by itself).
     #[returns(copy)]
     pub source_set: Option<SourceSetId>,
+    /// The package its directory implies, under its source root.
+    #[returns(ref)]
+    pub directory_package: Option<intern::Path>,
 }
 
 /// One source set's files — the key of per-source-set queries.
@@ -133,6 +136,7 @@ pub struct FileChange {
     pub text: Option<Arc<str>>,
     pub language: Language,
     pub source_set: Option<SourceSetId>,
+    pub directory_package: Option<intern::Path>,
 }
 
 impl RootDatabase {
@@ -181,6 +185,10 @@ impl RootDatabase {
             match (existing, change.text) {
                 (Some(file), Some(text)) => {
                     file.set_text(self).to(text);
+                    if *file.directory_package(self) != change.directory_package {
+                        file.set_directory_package(self)
+                            .to(change.directory_package);
+                    }
                     if file.source_set(self) != change.source_set {
                         membership_changed.extend(file.source_set(self));
                         membership_changed.extend(change.source_set);
@@ -194,6 +202,7 @@ impl RootDatabase {
                         text,
                         change.language,
                         change.source_set,
+                        change.directory_package,
                     );
                     Arc::make_mut(&mut self.files).insert(change.file, file);
                     membership_changed.extend(change.source_set);

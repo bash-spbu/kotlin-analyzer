@@ -211,6 +211,25 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         vec!["T.apply(block: T.() -> kotlin.Unit): T"]
     );
 
+    // A function deprecated with level `HIDDEN` is left out: `Iterable.maxBy` once returned `T?`, now `T`.
+    let max_by: Vec<String> = top_level(&contents, "kotlin.collections", "maxBy")
+        .into_iter()
+        .filter(|member| {
+            member
+                .receiver
+                .as_ref()
+                .is_some_and(|receiver| render(receiver).starts_with("kotlin.collections.Iterable"))
+        })
+        .map(signature)
+        .collect();
+    assert!(
+        !max_by.is_empty() && max_by.iter().all(|signature| signature.ends_with(": T")),
+        "{max_by:?}"
+    );
+    // A file facade in `kotlin/time/jdk8/` declares package `kotlin.time`.
+    assert!(!top_level(&contents, "kotlin.time", "toKotlinDuration").is_empty());
+    assert!(top_level(&contents, "kotlin.time.jdk8", "toKotlinDuration").is_empty());
+
     // Built-in functions have no class file either: `arrayOf` is in the
     // `kotlin` package's built-ins.
     let array_of: Vec<String> = top_level(&contents, "kotlin", "arrayOf")

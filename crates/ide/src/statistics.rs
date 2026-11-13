@@ -265,11 +265,12 @@ pub(crate) fn body_statistics(db: &RootDatabase, files: &[hir::FileId]) -> BodyS
                 }
             }
         }
-        for (start, name) in inference.unresolved() {
+        for unresolved in inference.unresolved() {
+            let name = unresolved.name;
             statistics
                 .examples
                 .entry(name.to_string())
-                .or_insert((*file_id, *start));
+                .or_insert((*file_id, unresolved.range.start));
             statistics.unresolved += 1;
             *statistics
                 .unresolved_names
@@ -315,9 +316,9 @@ pub(crate) fn unsettled_names(db: &RootDatabase, file: hir::FileId) -> Vec<Unset
             inference
                 .unresolved()
                 .iter()
-                .map(|(start, name)| UnsettledName {
-                    offset: *start,
-                    name: name.to_string(),
+                .map(|unresolved| UnsettledName {
+                    offset: unresolved.range.start,
+                    name: unresolved.name.to_string(),
                     candidates: None,
                 }),
         )

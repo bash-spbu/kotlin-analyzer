@@ -42,6 +42,8 @@ pub(crate) struct Member {
     /// From the `MethodParameters` attribute, when compiled with `-parameters`.
     pub(crate) parameter_names: Vec<String>,
     pub(crate) deprecated: bool,
+    /// `@kotlin.Deprecated(level = HIDDEN)`: Kotlin code can't call it.
+    pub(crate) hidden: bool,
 }
 
 /// What `InnerClasses` says about one nested class.
@@ -63,6 +65,9 @@ pub(crate) struct KotlinMetadata {
     pub(crate) kind: i32,
     pub(crate) data1: Vec<String>,
     pub(crate) data2: Vec<String>,
+    /// `pn`: the Kotlin package of a file facade, when it differs from the
+    /// class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
+    pub(crate) package_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -294,6 +299,7 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             signature: None,
             parameter_names: Vec::new(),
             deprecated: false,
+            hidden: false,
         };
         let attribute_count = bytes.u16()?;
         for _ in 0..attribute_count {
@@ -320,8 +326,10 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
                         member.parameter_names.push(name);
                     }
                 }
-                "RuntimeVisibleAnnotations" if read_annotations(&mut body, pool)?.deprecated => {
-                    member.deprecated = true;
+                "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
+                    let annotations = read_annotations(&mut body, pool)?;
+                    member.deprecated |= annotations.deprecated;
+                    member.hidden |= annotations.hidden;
                 }
                 _ => {}
             }
@@ -356,6 +364,8 @@ fn read_inner_classes(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<In
 #[derive(Default)]
 struct Annotations {
     deprecated: bool,
+    /// `@kotlin.Deprecated(level = HIDDEN)`.
+    hidden: bool,
     kotlin_metadata: Option<KotlinMetadata>,
 }
 
@@ -366,9 +376,18 @@ fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotati
         let type_name = utf8(pool, bytes.u16()?)?.to_owned();
         match type_name.as_str() {
             "Lkotlin/Metadata;" => found.kotlin_metadata = Some(read_metadata(bytes, pool)?),
-            "Ljava/lang/Deprecated;" | "Lkotlin/Deprecated;" => {
+            "Ljava/lang/Deprecated;" => {
                 found.deprecated = true;
                 skip_element_pairs(bytes)?;
+            }
+            "Lkotlin/Deprecated;" => {
+                found.deprecated = true;
+                found.hidden |= deprecation_is_hidden(bytes, pool)?;
+            }
+            "Lkotlin/DeprecatedSinceKotlin;" => {
+                // `hiddenSince`: hidden from that language version on — which
+                // the code this reads for is past.
+                found.hidden |= has_element(bytes, pool, "hiddenSince")?;
             }
             _ => skip_element_pairs(bytes)?,
         }
@@ -389,6 +408,13 @@ fn read_metadata(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<KotlinMetad
                     && let Some(Constant::Integer(kind)) = pool.get(index as usize)
                 {
                     metadata.kind = *kind;
+                }
+            }
+            "pn" => {
+                let tag = bytes.u8()?;
+                let index = bytes.u16()?;
+                if tag == b's' {
+                    metadata.package_name = utf8(pool, index).map(str::to_owned);
                 }
             }
             "d1" | "d2" => {
@@ -420,6 +446,34 @@ fn read_string_array(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Str
         strings.push(utf8(pool, index)?.to_owned());
     }
     Some(strings)
+}
+
+/// Reads `@kotlin.Deprecated`'s arguments: whether `level` is `HIDDEN`.
+fn deprecation_is_hidden(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<bool> {
+    let mut hidden = false;
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        let element = utf8(pool, bytes.u16()?)?.to_owned();
+        if element == "level" && bytes.data.get(bytes.position) == Some(&b'e') {
+            bytes.u8()?;
+            bytes.u16()?;
+            hidden = utf8(pool, bytes.u16()?)? == "HIDDEN";
+        } else {
+            skip_element_value(bytes)?;
+        }
+    }
+    Some(hidden)
+}
+
+/// Whether an annotation's arguments include `name`.
+fn has_element(bytes: &mut Bytes<'_>, pool: &[Constant], name: &str) -> Option<bool> {
+    let mut found = false;
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        found |= utf8(pool, bytes.u16()?)? == name;
+        skip_element_value(bytes)?;
+    }
+    Some(found)
 }
 
 fn skip_element_pairs(bytes: &mut Bytes<'_>) -> Option<()> {

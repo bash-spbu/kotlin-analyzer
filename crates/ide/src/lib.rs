@@ -5,6 +5,7 @@
 //! while a snapshot is still computing, that computation is cancelled and
 //! its call returns `Err(Cancelled)` — the editor asks again.
 
+mod diagnostics;
 mod document_symbols;
 mod goto_definition;
 mod hover;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use hir::{FileChange, FileId, ProjectModel, RootDatabase, SourceDatabase};
 use syntax::{SyntaxError, TextRange};
 
+pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stability, TextEdit};
 pub use document_symbols::DocumentSymbol;
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
@@ -55,6 +57,15 @@ impl AnalysisHost {
         self.db.set_libraries(libraries, by_source_set, jdk);
     }
 
+    /// Drops results beyond each query's limit. Salsa does so only between
+    /// revisions on its own; a pass over every file calls this between
+    /// batches so it doesn't keep all files' results. Waits for snapshots
+    /// to be dropped.
+    pub fn trigger_lru_eviction(&mut self) {
+        use hir::salsa::Database;
+        self.db.trigger_lru_eviction();
+    }
+
     /// A snapshot to answer questions with, possibly on another thread.
     pub fn analysis(&self) -> Analysis {
         Analysis {
@@ -83,6 +94,15 @@ impl Analysis {
             Some(source) => hir::parse(db, source).errors(),
             None => Vec::new(),
         })
+    }
+
+    /// The diagnostics of `file` the configuration enables.
+    pub fn diagnostics(
+        &self,
+        file: FileId,
+        config: &DiagnosticsConfig,
+    ) -> Cancellable<Vec<Diagnostic>> {
+        self.with_db(|db| diagnostics::diagnostics(db, file, config))
     }
 
     /// The file's declarations as a tree.

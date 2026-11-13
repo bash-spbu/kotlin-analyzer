@@ -48,6 +48,13 @@ impl DefMap {
         self.packages.keys()
     }
 
+    /// Every package with its top-level names.
+    pub fn names(&self) -> impl Iterator<Item = (&Path, Name)> {
+        self.packages
+            .iter()
+            .flat_map(|(package, scope)| scope.keys().map(move |name| (package, *name)))
+    }
+
     /// Whether `path` is a package or the start of one.
     pub fn has_package_prefix(&self, path: &Path) -> bool {
         self.package_prefixes.contains(path)
@@ -90,9 +97,8 @@ pub fn visible_top_level(
     name: Name,
 ) -> Vec<ItemLocation> {
     let mut found: Vec<ItemLocation> = match source_set_input(db, from) {
-        Some(source_set) => workspace_top_level(db, source_set, package.clone(), name)
-            .iter()
-            .copied()
+        Some(source_set) => workspace_top_level(db, source_set, package, name)
+            .into_iter()
             .filter(|location| is_visible(db, from, *location))
             .collect(),
         None => Vec::new(),
@@ -132,23 +138,30 @@ pub fn visible_top_level(
     Vec::new()
 }
 
+/// The def maps of the source sets `source_set` sees, its own first —
+/// fetched once, so a lookup is plain hashing rather than a query per
+/// source set. (Memoising lookups by package and name instead would intern
+/// every combination ever asked, which Salsa never frees.)
+#[salsa::tracked(returns(clone))]
+pub fn visible_def_maps(db: &dyn SourceDatabase, source_set: SourceSet) -> Arc<[Arc<DefMap>]> {
+    source_set_visibility(db, source_set)
+        .iter()
+        .map(|visible| source_set_def_map(db, *visible))
+        .collect()
+}
+
 /// The top-level declarations named `name` in `package` of the source sets
 /// `source_set` sees, before visibility (which depends on the asking file)
-/// filters them. Remembered: the same names are looked up over and over.
-#[salsa::tracked(returns(clone))]
+/// filters them.
 pub fn workspace_top_level(
     db: &dyn SourceDatabase,
     source_set: SourceSet,
-    package: Path,
+    package: &Path,
     name: Name,
-) -> Arc<[ItemLocation]> {
-    source_set_visibility(db, source_set)
+) -> Vec<ItemLocation> {
+    visible_def_maps(db, source_set)
         .iter()
-        .flat_map(|visible| {
-            source_set_def_map(db, *visible)
-                .declarations(&package, name)
-                .to_vec()
-        })
+        .flat_map(|def_map| def_map.declarations(package, name).iter().copied())
         .collect()
 }
 
@@ -184,6 +197,62 @@ pub fn library_packages(db: &dyn SourceDatabase) -> Arc<LibraryPackages> {
         }
     }
     Arc::new(index)
+}
+
+/// Every library's top-level names, with the packages declaring each.
+#[salsa::tracked(returns(clone))]
+pub fn library_names(db: &dyn SourceDatabase) -> Arc<FxHashMap<Name, Vec<LibraryPackage>>> {
+    let index = library_packages(db);
+    let mut names: FxHashMap<Name, Vec<LibraryPackage>> = FxHashMap::default();
+    for declaring in index.by_package.values() {
+        for library_package in declaring {
+            for name in library_package.names(db).iter() {
+                names.entry(*name).or_default().push(*library_package);
+            }
+        }
+    }
+    Arc::new(names)
+}
+
+/// The top-level names of the source sets `source_set` sees, with the
+/// packages declaring each.
+#[salsa::tracked(returns(clone))]
+pub fn workspace_names(
+    db: &dyn SourceDatabase,
+    source_set: SourceSet,
+) -> Arc<FxHashMap<Name, Vec<Path>>> {
+    let mut names: FxHashMap<Name, Vec<Path>> = FxHashMap::default();
+    for visible in source_set_visibility(db, source_set).iter() {
+        for (package, name) in source_set_def_map(db, *visible).names() {
+            let packages = names.entry(name).or_default();
+            if !packages.contains(package) {
+                packages.push(package.clone());
+            }
+        }
+    }
+    Arc::new(names)
+}
+
+/// The packages with a top-level `name` that `from` sees — what an import
+/// of the name could import.
+pub fn packages_declaring(db: &dyn SourceDatabase, from: SourceFile, name: Name) -> Vec<Path> {
+    let mut packages: Vec<Path> = Vec::new();
+    if let Some(source_set) = source_set_input(db, from) {
+        if let Some(declaring) = workspace_names(db, source_set).get(&name) {
+            packages.extend(declaring.iter().cloned());
+        }
+        let positions = classpath_positions(db, source_set);
+        if let Some(declaring) = library_names(db).get(&name) {
+            for library_package in declaring {
+                let on_classpath = positions.contains_key(&library_package.library(db));
+                let package = library_package.package(db);
+                if on_classpath && !packages.contains(package) {
+                    packages.push(package.clone());
+                }
+            }
+        }
+    }
+    packages
 }
 
 /// Where each library is on a source set's classpath (the JDK first).
@@ -270,17 +339,21 @@ fn add_prefixes(prefixes: &mut FxHashSet<Path>, package: &Path) {
 /// Whether `path` is a package `from` sees, or the start of one — what a
 /// qualified name's leading segments (`java` in `java.time.Instant`) are.
 pub fn package_prefix_exists(db: &dyn SourceDatabase, from: SourceFile, path: &Path) -> bool {
-    let in_sources = visible_source_sets(db, from)
-        .iter()
-        .any(|source_set| source_set_def_map(db, *source_set).has_package_prefix(path));
+    let in_sources = source_set_input(db, from).is_some_and(|source_set| {
+        visible_def_maps(db, source_set)
+            .iter()
+            .any(|def_map| def_map.has_package_prefix(path))
+    });
     in_sources || library_packages(db).prefixes.contains(path)
 }
 
 /// Whether any source set or library `from` sees declares the package.
 pub fn package_exists(db: &dyn SourceDatabase, from: SourceFile, package: &Path) -> bool {
-    let in_sources = visible_source_sets(db, from)
-        .iter()
-        .any(|source_set| source_set_def_map(db, *source_set).has_package(package));
+    let in_sources = source_set_input(db, from).is_some_and(|source_set| {
+        visible_def_maps(db, source_set)
+            .iter()
+            .any(|def_map| def_map.has_package(package))
+    });
     in_sources || !classpath_packages(db, from, package).is_empty()
 }
 

@@ -185,6 +185,22 @@ impl ProjectModel {
             .find_map(|ancestor| self.directory_index.get(ancestor).copied())
     }
 
+    /// The package a file's directory implies: its directory relative to
+    /// the source root it's under (`src/main/kotlin/a/b/X.kt` → `a.b`);
+    /// `None` outside every source root.
+    pub fn directory_package(&self, path: &Path) -> Option<intern::Path> {
+        let root = path
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| self.directory_index.contains_key(*ancestor))?;
+        let directory = path.parent()?.strip_prefix(root).ok()?;
+        let segments: Option<Vec<intern::Name>> = directory
+            .components()
+            .map(|component| component.as_os_str().to_str().map(intern::Name::new))
+            .collect();
+        Some(intern::Path::new(segments?))
+    }
+
     /// `id` and every source set it sees.
     pub fn visible_source_sets(&self, id: SourceSetId) -> Vec<SourceSetId> {
         let mut visible = vec![id];

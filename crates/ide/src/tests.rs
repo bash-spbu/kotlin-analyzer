@@ -315,3 +315,95 @@ fun use() {
         word: String"#]]
     .assert_eq(&rendered.join("\n"));
 }
+
+/// Each diagnostic of `/app/b/Use.kt` as `[check] line: message`, with the
+/// first fix's edit when it has one.
+fn check_diagnostics(fixture: &str, config: crate::DiagnosticsConfig, expected: Expect) {
+    let fixture = Fixture::with_mini_stdlib(fixture);
+    let file = fixture.file("/app/b/Use.kt");
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let diagnostics = analysis(&fixture).diagnostics(file, &config).unwrap();
+    let rendered: Vec<String> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let line = text[..diagnostic.range.start as usize]
+                .matches('\n')
+                .count()
+                + 1;
+            let fix = diagnostic
+                .fixes
+                .first()
+                .map(|fix| format!(" | {}: {:?}", fix.label, fix.edits[0].new_text))
+                .unwrap_or_default();
+            format!(
+                "[{}] {line}: {}{fix}",
+                diagnostic.check.name(),
+                diagnostic.message
+            )
+        })
+        .collect();
+    expected.assert_eq(&rendered.join("\n"));
+}
+
+#[test]
+fn diagnostics_for_imports_and_packages() {
+    check_diagnostics(
+        r#"
+//- /app/a/Money.kt
+package a
+class Money(val amount: Long)
+fun format(money: Money): String = TODO()
+operator fun Money.plus(other: Money): Money = TODO()
+//- /app/c/Price.kt
+package c
+class Price
+//- /app/b/Use.kt
+package b
+
+import a.plus
+import a.Money
+import a.format
+import x.y.Gone
+import kotlin.collections.List
+
+/** Formats with [format]. */
+fun use(money: Money, gone: Gone): Price {
+    val sum = money + money
+    return TODO()
+}
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[r#"
+            [unused-import] 7: Unused import `List` | Remove the unused import: ""
+            [missing-import] 10: `Price` isn't imported: `import c.Price` | Import `c.Price`: "import c.Price\n""#]],
+    );
+}
+
+#[test]
+fn diagnostics_for_calls_nullability_and_when() {
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+
+enum class Side { BUY, SELL }
+class Order(val note: String?)
+fun place(amount: Long, side: Side = Side.BUY) {}
+fun use(order: Order, side: Side) {
+    place()
+    order.note.length
+    when (side) { Side.BUY -> 1 }
+    missing()
+}
+"#,
+        crate::DiagnosticsConfig {
+            experimental: true,
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [argument-mismatch] 7: No `place` takes these arguments
+            [unsafe-call] 8: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `String?`
+            [non-exhaustive-when] 9: `when` must be exhaustive: add the missing `SELL` or an `else` branch
+            [unresolved-reference] 10: Unresolved reference `missing`"#]],
+    );
+}

@@ -7,13 +7,24 @@ whenever something it would need is `Unknown`, it stays silent.
 | name | severity | reports |
 |---|---|---|
 | `syntax` | error | a syntax error (parse error or missing token) |
-| `unresolved-reference` | error | a name that no visible declaration matches, when every level of the scope tower is known completely (see resolution.md) |
-| `missing-import` | warning | an unresolved name for which importable declarations exist; offers "Import" actions |
-| `argument-mismatch` | error | a call no candidate accepts: wrong number of arguments, an unknown named argument, a missing argument without a default |
-| `unsafe-call` | error | `x.f()` with a plain `.` where `x`'s type is nullable, the flow analysis says it may be null here, and `f` needs a non-null receiver |
-| `non-exhaustive-when` | error | a `when` over an enum, sealed type or `Boolean` that misses cases, has no `else`, and is not narrowed by earlier checks of the same subject (Kotlin 2.x data-flow exhaustiveness) |
-| `unused-import` | hint (unnecessary) | an import nothing in the file uses |
-| `missing-package` | warning | a file that declares something but has no `package` line while its directory implies one |
+| `unresolved-reference` | error, **experimental** | a name that no visible declaration matches, when every level of the scope tower is known completely (see resolution.md) |
+| `missing-import` | warning | an unresolved name for which importable declarations exist (a class, a function or property, or an extension the receiver can use); offers "Import" actions |
+| `argument-mismatch` | error | a call no candidate accepts: wrong number of arguments, an unknown named argument, a missing argument without a default (argument types aren't judged) |
+| `unsafe-call` | error | `x.f` / `x.f()` with a plain `.` where `x`'s type is nullable, `f` is a member of the class (not an extension, not `equals`/`hashCode`/`toString`), and nothing in the enclosing declaration could have smart-cast `x` (it's never compared with `null`, type-checked, asserted, assigned, or used with `?.`, `!!`, `?:`) |
+| `non-exhaustive-when` | error | a `when` over an enum, sealed type or `Boolean` that misses cases and has no `else` — unless a condition isn't modelled (ranges, `!is`, guards, arbitrary values) or the subject was compared before it in the same declaration (Kotlin 2.x data flow may already exclude cases) |
+| `unused-import` | hint (unnecessary) | an import whose name appears nowhere else in the file — not in code, not in comments — and isn't an operator or convention function (`plus`, `getValue`, `componentN`, …); offers "Remove" |
+| `missing-package` | warning | a file that declares something but has no `package` line while its directory under the source root implies one; offers "Add package" |
+
+### What "known completely" means
+
+A lookup's miss is a fact only when everything it searched was modelled:
+no implicit receiver of unknown type around, no lambda whose function type
+is unknown (it may have a receiver), every class in the receivers'
+hierarchies resolves all its supertypes, the file isn't a script, and the
+name isn't one compiler plugins generate (`serializer`). A name an explicit
+import names, or any name in a file with an unresolved star import, is never
+reported as missing — the import is what's broken. A file with syntax
+errors gets only `syntax` diagnostics.
 
 ## Pipeline
 
@@ -23,7 +34,10 @@ whenever something it would need is `Unknown`, it stays silent.
 - Published with the document version it was computed for.
 - Checks that need the whole workspace or libraries wait until loading has
   finished.
-- `diagnostics.disabled` in settings turns checks off by name.
+- Settings (`initializationOptions` or `workspace/didChangeConfiguration`,
+  at the top or under `kotlin-analyzer`): `diagnostics.disabled` turns checks
+  off by name, `diagnostics.experimental: true` turns experimental ones on.
+- Before the workspace has loaded, only `syntax` runs.
 - A check starts as *experimental* (off unless enabled) and becomes *stable*
   only after the corpus gate passes.
 
@@ -35,3 +49,13 @@ over every workspace file and exits non-zero on any finding; the gate is zero
 findings on `finops-mono` and `crypto-gateway-be`. Known exceptions are
 findings against generated code that is stale on disk (its source spec newer
 than the generated file) — these are true.
+
+Status (2026-11-13), stable checks:
+
+| corpus | files | errors and warnings | which |
+|---|---|---|---|
+| finops-mono | 3677 | 1 | `argument-mismatch` against a stale generated client |
+| crypto-gateway-be | 8364 | 2 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none |
+
+The pass checks files in batches of 128 and evicts cached results between
+them: peak RSS ≈ 260 MB (finops-mono), ≈ 400 MB (crypto-gateway-be).

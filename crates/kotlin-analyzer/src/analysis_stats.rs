@@ -238,7 +238,7 @@ fn distinct_libraries(model: &project_model::ProjectModel) -> usize {
     jars.len()
 }
 
-fn resident_memory() -> Option<usize> {
+pub(crate) fn resident_memory() -> Option<usize> {
     memory_stats::memory_stats().map(|stats| stats.physical_mem)
 }
 

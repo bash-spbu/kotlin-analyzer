@@ -16,9 +16,10 @@ use crate::item_tree::{
     TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
 };
 
-/// Where an archive entry's declarations belong.
+/// Where an archive entry's declarations belong (their package is the one
+/// they declare).
 struct EntryPlace {
-    package: Path,
+    /// The JDK module, for `ct.sym` entries.
     module: Option<Name>,
 }
 
@@ -37,31 +38,16 @@ fn place_of(kind: &ArchiveKind, name: &str) -> Option<EntryPlace> {
         return None;
     }
     match kind {
-        ArchiveKind::Jar => {
-            let directory = name
-                .rsplit_once('/')
-                .map(|(directory, _)| directory)
-                .unwrap_or("");
-            Some(EntryPlace {
-                package: Path::parse(&directory.replace('/', ".")),
-                module: None,
-            })
-        }
+        ArchiveKind::Jar => Some(EntryPlace { module: None }),
         ArchiveKind::JdkSymbols { release } => {
             // `<releases>/<module>/<package path>/<Class>.sig`
             let mut parts = name.splitn(3, '/');
             let releases = parts.next()?;
             let module = parts.next()?;
-            let rest = parts.next()?;
             if !releases.contains(*release) {
                 return None;
             }
-            let directory = rest
-                .rsplit_once('/')
-                .map(|(directory, _)| directory)
-                .unwrap_or("");
             Some(EntryPlace {
-                package: Path::parse(&directory.replace('/', ".")),
                 module: Some(Name::new(module)),
             })
         }
@@ -84,37 +70,42 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
         let Some(bytes) = archive.read(index) else {
             continue;
         };
-        let package = packages
-            .entry(place.package.clone())
-            .or_insert_with(|| IndexedPackage {
-                package: place.package.clone(),
-                names: Vec::new(),
-                entries: Vec::new(),
-                module: place.module,
-            });
-        let mut declares_something = false;
+        // An entry's declarations go to the package they declare, which
+        // for a Kotlin file facade may differ from the entry's directory.
         for contents in classfile::read_entry(&name, &bytes) {
-            match contents {
+            let (declared_package, names): (Path, Vec<Name>) = match contents {
                 ClassContents::Class(class) => {
-                    declares_something = true;
-                    if class.name.classes.len() == 1 {
-                        package.names.push(class.name.simple_name());
-                    }
+                    let names = if class.name.classes.len() == 1 {
+                        vec![class.name.simple_name()]
+                    } else {
+                        Vec::new()
+                    };
+                    (class.name.package.clone(), names)
                 }
                 ClassContents::PackageMembers(members) => {
-                    declares_something = true;
-                    package
-                        .names
-                        .extend(members.members.iter().map(|member| member.name));
-                    package
-                        .names
-                        .extend(members.type_aliases.iter().map(|alias| alias.name));
+                    let names = members
+                        .members
+                        .iter()
+                        .map(|member| member.name)
+                        .chain(members.type_aliases.iter().map(|alias| alias.name))
+                        .collect();
+                    (members.package.clone(), names)
                 }
-                ClassContents::Nothing => {}
+                ClassContents::Nothing => continue,
+            };
+            let package =
+                packages
+                    .entry(declared_package.clone())
+                    .or_insert_with(|| IndexedPackage {
+                        package: declared_package,
+                        names: Vec::new(),
+                        entries: Vec::new(),
+                        module: place.module,
+                    });
+            package.names.extend(names);
+            if package.entries.last() != Some(&(index as u32)) {
+                package.entries.push(index as u32);
             }
-        }
-        if declares_something {
-            package.entries.push(index as u32);
         }
     }
     let mut packages: Vec<IndexedPackage> = packages
@@ -148,10 +139,13 @@ pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) ->
             continue;
         };
         let is_builtins = name.ends_with(".kotlin_builtins");
+        let own_package = package.package(db);
         for contents in classfile::read_entry(&name, &bytes) {
             match contents {
+                ClassContents::Class(class) if class.name.package != *own_package => {}
                 ClassContents::Class(class) if is_builtins => builtins.push(class),
                 ClassContents::Class(class) => classes.push(class),
+                ClassContents::PackageMembers(part) if part.package != *own_package => {}
                 ClassContents::PackageMembers(part) => members.push(part),
                 ClassContents::Nothing => {}
             }

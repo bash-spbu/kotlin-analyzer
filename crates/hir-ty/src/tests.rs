@@ -271,8 +271,12 @@ fn check_inference(fixture: &str, expected: Expect) {
             )
         })
         .collect();
-    for (start, name) in inference.unresolved() {
-        lines.push((*start, format!("{name}@{} -> ?", line_of(*start))));
+    for unresolved in inference.unresolved() {
+        let start = unresolved.range.start;
+        lines.push((
+            start,
+            format!("{}@{} -> ?", unresolved.name, line_of(start)),
+        ));
     }
     lines.sort();
     let lines: Vec<String> = lines.into_iter().map(|(_, line)| line).collect();
@@ -305,11 +309,11 @@ fun use(account: Account) {
         expect![[r#"
             prefix@4 -> app.prefix: String
             id@4 -> local id@3: Int
-            owner@6 -> local owner@3: String?
+            owner@6 -> app.Account.owner: String?
             name@7 -> local name@6: String?
             name@8 -> local name@6: String
             label@10 -> app.Account.label: String
-            id@12 -> local id@3: Int
+            id@12 -> app.Account.id: Int
             extra@12 -> local extra@12: Int
             account@15 -> local account@14: Account
             total@15 -> app.Account.total: Int
@@ -712,5 +716,212 @@ fun use(names: List<String>, category: Category) {
             Checks@5 -> app.Checks: {unknown}
             check@5 -> app.Checks.check: ObjectCheck!
             category@5 -> local category@3: Category"#]],
+    );
+}
+
+/// The facts checks report from, one per line: `kind@line detail`.
+fn check_facts(fixture: &str, expected: Expect) {
+    let fixture = with_stdlib(fixture);
+    let db = &fixture.database;
+    let file = db.source_file(fixture.file("/app/Use.kt")).unwrap();
+    let text = file.text(db).clone();
+    let inference = infer_file(db, file);
+    let line_of = |offset: u32| text[..offset as usize].matches('\n').count() + 1;
+    let mut lines: Vec<(u32, String)> = Vec::new();
+    for unresolved in inference.unresolved() {
+        lines.push((
+            unresolved.range.start,
+            format!(
+                "unresolved@{} {} {:?}",
+                line_of(unresolved.range.start),
+                unresolved.name,
+                unresolved.certainty
+            ),
+        ));
+    }
+    for mismatch in inference.argument_mismatches() {
+        lines.push((
+            mismatch.range.start,
+            format!(
+                "arguments@{} {} candidates",
+                line_of(mismatch.range.start),
+                mismatch.candidates.len()
+            ),
+        ));
+    }
+    for call in inference.unsafe_calls() {
+        lines.push((
+            call.range.start,
+            format!(
+                "unsafe@{} {}",
+                line_of(call.range.start),
+                display(db, &call.receiver)
+            ),
+        ));
+    }
+    for when in inference.non_exhaustive_whens() {
+        lines.push((
+            when.range.start,
+            format!(
+                "when@{} missing {}",
+                line_of(when.range.start),
+                when.missing.join(", ")
+            ),
+        ));
+    }
+    lines.sort();
+    let lines: Vec<String> = lines.into_iter().map(|(_, line)| line).collect();
+    expected.assert_eq(&lines.join("\n"));
+}
+
+#[test]
+fn facts_for_unresolved_names_and_argument_mismatches() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+fun pay(amount: Long, currency: String = "USD") {}
+fun <T> unknownShape(block: T) {}
+fun use() {
+    pay(1, "EUR")
+    pay()
+    pay(1, "EUR", true)
+    pay(1, note = "x")
+    missing()
+    with(1) { alsoMissing() }
+}
+"#,
+        expect![[r#"
+            arguments@6 1 candidates
+            arguments@7 1 candidates
+            arguments@8 1 candidates
+            unresolved@9 missing Certain
+            unresolved@10 alsoMissing Certain"#]],
+    );
+}
+
+#[test]
+fn facts_for_unsafe_calls_skip_anything_that_could_be_smart_cast() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+class Account(val owner: String?, val backup: String?, val note: String?)
+fun String?.orBlank(): String = this ?: ""
+fun use(account: Account) {
+    account.owner.length
+    if (account.backup != null) {
+        account.backup.length
+    }
+    account.note.orBlank()
+    account.note.toString()
+}
+fun other(text: String?) {
+    requireNotNull(text)
+    text.length
+}
+"#,
+        expect!["unsafe@5 String?"],
+    );
+}
+
+#[test]
+fn facts_for_when_over_enums_sealed_types_and_booleans() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+enum class Color { RED, GREEN, BLUE }
+sealed interface Shape
+class Circle : Shape
+object Dot : Shape
+sealed class Polygon : Shape
+class Square : Polygon()
+fun use(color: Color, shape: Shape, flag: Boolean, maybe: Color?) {
+    when (color) { Color.RED -> 1; Color.GREEN -> 2 }
+    when (color) { Color.RED -> 1; else -> 2 }
+    when (shape) { is Circle -> 1; Dot -> 2 }
+    when (shape) { is Circle -> 1; Dot -> 2; is Polygon -> 3 }
+    when (flag) { true -> 1 }
+    when (maybe) { Color.RED, Color.GREEN, Color.BLUE -> 1 }
+}
+fun narrowed(color: Color) {
+    if (color == Color.BLUE) return
+    when (color) { Color.RED -> 1; Color.GREEN -> 2 }
+}
+"#,
+        expect![[r#"
+            when@9 missing BLUE
+            when@11 missing is Square
+            when@13 missing false
+            when@14 missing null"#]],
+    );
+}
+
+#[test]
+fn named_arguments_in_their_own_positions_let_positional_ones_follow() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+fun record(name: String, duration: Long, vararg tags: String) {}
+fun use() {
+    record(name = "call", duration = 1, "a", "b")
+    record(duration = 1, name = "call", "a")
+}
+"#,
+        expect!["arguments@5 1 candidates"],
+    );
+}
+
+#[test]
+fn constructor_parameters_stay_out_of_functions_and_member_extensions_resolve() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+open class Client { fun base(): Int = 1 }
+class Impl : Client() { fun extra(): Int = 2 }
+class Service(client: Client, private val values: Map<String, String>) {
+    private val client = client as Impl
+    val first = client.base()
+    fun use() {
+        client.extra()
+        values.pick("key")
+    }
+    private fun Map<String, String>.pick(key: String): String = TODO()
+}
+"#,
+        expect![[r#"
+            client@5 -> local client@4: Client
+            client@6 -> local client@4: Client
+            base@6 -> app.Client.base: Int
+            client@8 -> app.Service.client: Impl
+            extra@8 -> app.Impl.extra: Int
+            values@9 -> app.Service.values: Map<String, String>
+            pick@9 -> app.Service.pick: String
+            TODO@11 -> kotlin.TODO: Nothing"#]],
+    );
+}
+
+#[test]
+fn a_type_parameter_bounded_by_any_binds_the_non_null_type() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Gas(val price: Long)
+fun <T : Any> match(matcher: (T) -> Boolean): T = TODO()
+fun prepare(gas: Gas?) {}
+fun use() {
+    prepare(match { it.price > 0 })
+}
+"#,
+        expect![[r#"
+            TODO@3 -> kotlin.TODO: Nothing
+            prepare@6 -> app.prepare: Unit
+            match@6 -> app.match: Gas
+            it@6 -> local it@6: Gas
+            price@6 -> app.Gas.price: Long"#]],
     );
 }

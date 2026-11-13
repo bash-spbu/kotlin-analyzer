@@ -6,6 +6,7 @@
 //! `BitEncoding` and the string table of `JvmNameResolverBase`.
 
 use intern::{Name, Path};
+use rustc_hash::FxHashSet;
 
 use crate::class_file::{ClassFile, KotlinMetadata, latin1_bytes};
 use crate::protobuf::Reader;
@@ -76,19 +77,30 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
     };
     let names = NameTable::jvm(string_table, &metadata.data2);
     let message = reader.rest();
+    let hidden: FxHashSet<String> = class
+        .methods
+        .iter()
+        .filter(|method| method.hidden)
+        .map(|method| format!("{}{}", method.name, method.descriptor))
+        .collect();
     match metadata.kind {
-        CLASS => match read_class(message, &names, class.source_file.clone()) {
+        CLASS => match read_class(message, &names, &hidden, class.source_file.clone()) {
             Some(library_class) => ClassContents::Class(library_class),
             None => ClassContents::Nothing,
         },
         FILE_FACADE | MULTI_FILE_CLASS_PART => {
-            let package = match class.name.rsplit_once('/') {
+            let directory = || match class.name.rsplit_once('/') {
                 Some((package, _)) => Path::parse(&package.replace('/', ".")),
                 None => Path::default(),
+            };
+            let package = match &metadata.package_name {
+                Some(declared) if !declared.is_empty() => Path::parse(declared),
+                _ => directory(),
             };
             ClassContents::PackageMembers(read_package(
                 message,
                 &names,
+                &hidden,
                 package,
                 class.source_file.clone(),
             ))
@@ -130,12 +142,12 @@ pub(crate) fn read_builtins(bytes: &[u8], package: Path) -> Vec<ClassContents> {
     };
     let mut contents: Vec<ClassContents> = classes
         .into_iter()
-        .filter_map(|class| read_class(class, &names, None))
+        .filter_map(|class| read_class(class, &names, &FxHashSet::default(), None))
         .map(ClassContents::Class)
         .collect();
     // The package's own functions and properties (`arrayOf`, `emptyArray`).
     if let Some(message) = package_message {
-        let members = read_package(message, &names, package, None);
+        let members = read_package(message, &names, &FxHashSet::default(), package, None);
         if !members.members.is_empty() || !members.type_aliases.is_empty() {
             contents.push(ClassContents::PackageMembers(members));
         }
@@ -425,6 +437,7 @@ fn is_fake_override(flags: i32) -> bool {
 fn read_class(
     bytes: &[u8],
     names: &NameTable,
+    hidden: &FxHashSet<String>,
     source_file: Option<String>,
 ) -> Option<LibraryClass> {
     let mut flags = 6;
@@ -472,6 +485,7 @@ fn read_class(
         names,
         table: &table,
         scopes: Vec::new(),
+        hidden,
     };
     let (class_type_parameters, scope) = read_type_parameters(&type_parameters, &outer);
     let context = outer.with_scope(scope);
@@ -538,6 +552,7 @@ fn read_class(
 fn read_package(
     bytes: &[u8],
     names: &NameTable,
+    hidden: &FxHashSet<String>,
     package: Path,
     source_file: Option<String>,
 ) -> PackageMembers {
@@ -560,6 +575,7 @@ fn read_package(
         names,
         table: &table,
         scopes: Vec::new(),
+        hidden,
     };
     let mut members = Vec::new();
     for function in functions {
@@ -644,9 +660,11 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     let mut type_parameters = Vec::new();
     let mut parameters = Vec::new();
     let mut own_table = None;
+    let mut jvm_signature = None;
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
+            100 => jvm_signature = value.as_bytes(),
             9 => flags = value.as_i32().unwrap_or(6),
             2 => name = value.as_i32(),
             3 => return_type = value.as_bytes().map(RawType::read),
@@ -659,7 +677,7 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
             _ => {}
         }
     }
-    if is_fake_override(flags) {
+    if is_fake_override(flags) || is_hidden(jvm_signature, name, context) {
         return None;
     }
     let visibility = visibility_of(flags)?;
@@ -671,6 +689,7 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
                 names: context.names,
                 table: &table,
                 scopes: context.scopes.clone(),
+                hidden: context.hidden,
             }
         }
         None => context.with_scope(Vec::new()),
@@ -945,11 +964,46 @@ impl TypeTable {
 
 /// What reading a type needs: names, the type table, and the type
 /// parameters in scope (outermost first).
+/// Whether a function's JVM method (`JvmMethodSignature`: name 1, descriptor
+/// 2; the name defaults to the Kotlin one) is deprecated as hidden.
+fn is_hidden(
+    jvm_signature: Option<&[u8]>,
+    kotlin_name: Option<i32>,
+    context: &TypeContext<'_>,
+) -> bool {
+    if context.hidden.is_empty() {
+        return false;
+    }
+    let Some(bytes) = jvm_signature else {
+        return false;
+    };
+    let mut name = kotlin_name;
+    let mut descriptor = None;
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        match number {
+            1 => name = value.as_i32(),
+            2 => descriptor = value.as_i32(),
+            _ => {}
+        }
+    }
+    let (Some(name), Some(descriptor)) = (
+        name.and_then(|index| context.names.string(index)),
+        descriptor.and_then(|index| context.names.string(index)),
+    ) else {
+        return false;
+    };
+    context.hidden.contains(&format!("{name}{descriptor}"))
+}
+
 struct TypeContext<'table> {
     names: &'table NameTable,
     table: &'table TypeTable,
     /// Type parameters in scope by id, outermost scope first.
     scopes: Vec<Vec<(i32, Name)>>,
+    /// The class file's methods deprecated with level `HIDDEN` (`name` +
+    /// descriptor), which Kotlin code can't call.
+    hidden: &'table FxHashSet<String>,
 }
 
 impl<'table> TypeContext<'table> {
@@ -960,6 +1014,7 @@ impl<'table> TypeContext<'table> {
             names: self.names,
             table: self.table,
             scopes,
+            hidden: self.hidden,
         }
     }
 
