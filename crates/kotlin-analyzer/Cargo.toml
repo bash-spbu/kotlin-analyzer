@@ -22,6 +22,15 @@ hir-ty.workspace = true
 hir.workspace = true
 ide.workspace = true
 sidecar.workspace = true
+lsp-server.workspace = true
+lsp-types.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+memory-stats.workspace = true
+rustc-hash.workspace = true
 
 [lints]
 workspace = true

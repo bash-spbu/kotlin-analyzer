@@ -1,6 +1,11 @@
 //! `kotlin-analyzer`: the language server (LSP over stdio) and its command
 //! line tools for measuring it on a real workspace.
 
+mod analysis_stats;
+mod load;
+mod server;
+
+use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -8,6 +13,9 @@ kotlin-analyzer — a Kotlin language server
 
 USAGE:
     kotlin-analyzer             run the language server on stdin/stdout
+    kotlin-analyzer analysis-stats <root> [--project-json <file>]
+                                load a workspace and report sizes, times, memory
+                                and how many type names resolve
     kotlin-analyzer parse <file>
                                 print a Kotlin or Java file's syntax tree
     kotlin-analyzer --version   print the version
@@ -22,14 +30,18 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("parse") => parse_command(arguments.get(1)),
+        Some("analysis-stats") => analysis_stats_command(&arguments[1..]),
         Some("--help" | "-h") => {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        None => {
-            eprintln!("kotlin-analyzer: the language server isn't implemented yet");
-            ExitCode::FAILURE
-        }
+        None => match server::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("kotlin-analyzer: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Some(unknown) => {
             eprintln!("kotlin-analyzer: unknown argument `{unknown}`\n\n{USAGE}");
             ExitCode::FAILURE
@@ -66,4 +78,21 @@ fn parse_command(path: Option<&String>) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+fn analysis_stats_command(arguments: &[String]) -> ExitCode {
+    let mut root = None;
+    let mut project_json = None;
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        match argument.as_str() {
+            "--project-json" => project_json = remaining.next().map(Path::new),
+            other => root = Some(Path::new(other)),
+        }
+    }
+    let Some(root) = root else {
+        eprintln!("usage: kotlin-analyzer analysis-stats <root> [--project-json <file>]");
+        return ExitCode::FAILURE;
+    };
+    analysis_stats::run(root, project_json)
 }

@@ -70,6 +70,11 @@ impl Vfs {
         &self.paths[file.index()]
     }
 
+    /// Every interned path, indexed by `FileId`.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
     pub fn contents(&self, file: FileId) -> Option<&Arc<str>> {
         self.contents[file.index()].as_ref()
     }

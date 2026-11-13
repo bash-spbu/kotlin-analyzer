@@ -212,11 +212,11 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
             }
         }
     }
-    ProjectModel {
-        root: PathBuf::from("/"),
-        origin: ModelOrigin::GradleExport,
+    ProjectModel::new(
+        PathBuf::from("/"),
+        ModelOrigin::GradleExport,
         modules,
         source_sets,
-        jdk: None,
-    }
+        None,
+    )
 }

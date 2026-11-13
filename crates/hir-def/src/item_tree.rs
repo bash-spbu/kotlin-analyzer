@@ -14,6 +14,7 @@ use syntax::TextRange;
 
 pub(crate) use lower_java::lower_java;
 pub(crate) use lower_kotlin::lower_kotlin;
+pub use pretty::type_text;
 
 /// An item's position in its file's [`ItemTree`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

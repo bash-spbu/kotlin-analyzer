@@ -78,8 +78,8 @@ pub fn visible_top_level(
     name: Name,
 ) -> Vec<ItemLocation> {
     let mut found = Vec::new();
-    for source_set in visible_source_sets(db, from) {
-        for location in source_set_def_map(db, source_set).declarations(package, name) {
+    for source_set in visible_source_sets(db, from).iter() {
+        for location in source_set_def_map(db, *source_set).declarations(package, name) {
             if is_visible(db, from, *location) {
                 found.push(*location);
             }
@@ -105,20 +105,30 @@ pub fn visible_top_level(
 /// Whether any source set `from` sees declares the package `package`.
 pub fn package_exists(db: &dyn SourceDatabase, from: SourceFile, package: &Path) -> bool {
     visible_source_sets(db, from)
-        .into_iter()
-        .any(|source_set| source_set_def_map(db, source_set).has_package(package))
+        .iter()
+        .any(|source_set| source_set_def_map(db, *source_set).has_package(package))
 }
 
 /// The inputs of the source sets `from` sees, its own first.
-pub fn visible_source_sets(db: &dyn SourceDatabase, from: SourceFile) -> Vec<SourceSet> {
+pub fn visible_source_sets(db: &dyn SourceDatabase, from: SourceFile) -> Arc<[SourceSet]> {
     let Some(own) = from.source_set(db) else {
-        return Vec::new();
+        return Arc::new([]);
     };
+    match db.workspace().source_sets(db).get(own.0 as usize) {
+        Some(source_set) => source_set_visibility(db, *source_set),
+        None => Arc::new([]),
+    }
+}
+
+/// `source_set` and every source set it sees — computed once per source set
+/// rather than walked again for every name looked up.
+#[salsa::tracked(returns(clone))]
+pub fn source_set_visibility(db: &dyn SourceDatabase, source_set: SourceSet) -> Arc<[SourceSet]> {
     let workspace = db.workspace();
     let model = workspace.model(db);
     let inputs = workspace.source_sets(db);
     model
-        .visible_source_sets(own)
+        .visible_source_sets(source_set.id(db))
         .into_iter()
         .filter_map(|id| inputs.get(id.0 as usize).copied())
         .collect()
@@ -135,7 +145,7 @@ fn is_visible(db: &dyn SourceDatabase, from: SourceFile, location: ItemLocation)
 }
 
 fn same_module(db: &dyn SourceDatabase, left: SourceFile, right: SourceFile) -> bool {
-    let model = db.workspace().model(db).clone();
+    let model = db.workspace().model(db);
     let module = |file: SourceFile| file.source_set(db).map(|id| model.source_set(id).module);
     module(left).is_some() && module(left) == module(right)
 }

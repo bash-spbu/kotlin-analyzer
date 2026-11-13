@@ -2,8 +2,9 @@
 
 Over stdio, LSP 3.17. Text sync: full documents. Positions use UTF-16
 columns. While the workspace is being loaded, `$/progress` reports it under
-the token `kotlin-analyzer/loading`, created before `initialize` returns so
-clients can wait for it.
+the token `kotlin-analyzer/loading`, created (`window/workDoneProgress/create`)
+right after `initialize` returns. Requests that need the workspace answer
+empty until it has loaded.
 
 | request | answers |
 |---|---|

@@ -159,7 +159,8 @@ fn parameter_list(parameters: &[Parameter]) -> String {
     parameters.join(", ")
 }
 
-pub(crate) fn type_text(type_ref: &TypeRef) -> String {
+/// A type reference as Kotlin text: `Map<String, List<out T>>?`.
+pub fn type_text(type_ref: &TypeRef) -> String {
     match type_ref {
         TypeRef::Named {
             segments, nullable, ..

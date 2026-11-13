@@ -159,16 +159,17 @@ pub(crate) fn parse(root: &Path, text: &str) -> Result<ProjectModel, LoadError> 
     for (id, targets) in resolved {
         source_sets[id.0 as usize].dependencies = targets;
     }
-    Ok(ProjectModel {
-        root: root.to_path_buf(),
-        origin: ModelOrigin::GradleExport,
+    let jdk = file.jdk.map(|jdk| Jdk {
+        home: jdk.home,
+        release: jdk.release,
+    });
+    Ok(ProjectModel::new(
+        root.to_path_buf(),
+        ModelOrigin::GradleExport,
         modules,
         source_sets,
-        jdk: file.jdk.map(|jdk| Jdk {
-            home: jdk.home,
-            release: jdk.release,
-        }),
-    })
+        jdk,
+    ))
 }
 
 #[cfg(test)]

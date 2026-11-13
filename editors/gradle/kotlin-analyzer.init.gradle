@@ -1,0 +1,116 @@
+// kotlin-analyzer: exports the build's model for the language server.
+//
+//   ./gradlew --init-script kotlin-analyzer.init.gradle kotlinAnalyzerModel
+//
+// writes .kotlin-analyzer/project.json in the root project: every module, its
+// source sets (generated directories included), the source sets of other
+// modules each one sees, and the exact libraries the build resolves for it
+// (with sources JARs found next to them in the Gradle cache), plus the JDK.
+// `-PkotlinAnalyzerOutput=<file>` writes elsewhere.
+//
+// Each project resolves its own classpaths in its own task (Gradle 9 forbids
+// resolving another project's configurations); the root task merges them.
+
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+
+def partFile = { project -> new File(project.layout.buildDirectory.get().asFile, "kotlin-analyzer/module.json") }
+
+// A sources JAR next to a JAR in the Gradle cache (…/<version>/<hash>/name.jar)
+// or in a Maven repository (…/<version>/name.jar); never downloaded.
+def sourcesJarOf = { File jar ->
+    def sourcesName = jar.name.replaceAll(/\.jar$/, "-sources.jar")
+    def sibling = new File(jar.parentFile, sourcesName)
+    if (sibling.isFile()) return sibling.absolutePath
+    def versionDirectory = jar.parentFile?.parentFile
+    def found = versionDirectory?.listFiles()?.findResult { hashDirectory ->
+        def candidate = new File(hashDirectory, sourcesName)
+        candidate.isFile() ? candidate : null
+    }
+    return found?.absolutePath
+}
+
+def sourceSetExport = { project, sourceSet ->
+    def directories = new LinkedHashSet<String>()
+    sourceSet.java.srcDirs.each { directories << it.absolutePath }
+    def kotlinSources = sourceSet.extensions.findByName("kotlin")
+    if (kotlinSources != null) {
+        kotlinSources.srcDirs.each { directories << it.absolutePath }
+    }
+    def moduleDependencies = []
+    def libraries = []
+    def classpath = project.configurations.findByName(sourceSet.compileClasspathConfigurationName)
+    if (classpath != null && classpath.canBeResolved) {
+        def artifacts = classpath.incoming.artifactView { lenient(true) }.artifacts
+        artifacts.each { artifact ->
+            def component = artifact.id.componentIdentifier
+            if (component instanceof ProjectComponentIdentifier) {
+                def fixtures = artifact.variant.capabilities.any { it.name.endsWith("-test-fixtures") }
+                def dependency = [module: component.projectPath, sourceSet: fixtures ? "testFixtures" : "main"]
+                if (!moduleDependencies.contains(dependency)) moduleDependencies << dependency
+            } else if (component instanceof ModuleComponentIdentifier && artifact.file.name.endsWith(".jar")) {
+                libraries << [
+                    coordinates: "${component.group}:${component.module}:${component.version}",
+                    jar: artifact.file.absolutePath,
+                    sourcesJar: sourcesJarOf(artifact.file),
+                ]
+            }
+        }
+    }
+    return [
+        name: sourceSet.name,
+        sourceDirectories: directories.toList(),
+        moduleDependencies: moduleDependencies,
+        libraries: libraries,
+    ]
+}
+
+allprojects { project ->
+    def moduleTask = project.tasks.register("kotlinAnalyzerModule") {
+        group = "kotlin-analyzer"
+        description = "Writes this module's part of the kotlin-analyzer model."
+        doLast {
+            def sourceSets = project.extensions.findByName("sourceSets")
+            def exported = sourceSets == null ? [] : sourceSets.collect { sourceSetExport(project, it) }
+            def part = partFile(project)
+            part.parentFile.mkdirs()
+            part.text = JsonOutput.toJson([
+                path: project.path,
+                directory: project.projectDir.absolutePath,
+                sourceSets: exported,
+            ])
+        }
+    }
+    if (project == project.rootProject) {
+        project.tasks.register("kotlinAnalyzerModel") {
+            group = "kotlin-analyzer"
+            description = "Writes .kotlin-analyzer/project.json for the kotlin-analyzer language server."
+            dependsOn(project.rootProject.allprojects.collect { it.tasks.named("kotlinAnalyzerModule") })
+            doLast {
+                def slurper = new JsonSlurper()
+                def modules = project.rootProject.allprojects.collect { member ->
+                    def part = partFile(member)
+                    part.isFile() ? slurper.parse(part) : null
+                }.findAll { it != null }
+                def javaHome = System.getProperty("java.home")
+                def release = null
+                try {
+                    def javaExtension = project.extensions.findByName("java")
+                    def version = javaExtension?.toolchain?.languageVersion?.getOrNull()
+                    if (version != null) release = version.asInt()
+                } catch (ignored) {
+                }
+                def model = [version: 1, jdk: [home: javaHome, release: release], modules: modules]
+                def outputPath = project.findProperty("kotlinAnalyzerOutput")
+                def output = outputPath != null
+                    ? new File(outputPath.toString())
+                    : new File(project.rootDir, ".kotlin-analyzer/project.json")
+                output.parentFile.mkdirs()
+                output.text = JsonOutput.prettyPrint(JsonOutput.toJson(model))
+                println("kotlin-analyzer: wrote ${output} (${modules.size()} modules)")
+            }
+        }
+    }
+}

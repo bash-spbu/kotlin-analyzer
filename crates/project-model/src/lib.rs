@@ -11,6 +11,8 @@ mod project_json;
 
 use std::path::{Path, PathBuf};
 
+use rustc_hash::FxHashMap;
+
 pub use convention::is_excluded_directory;
 
 /// Where the model's facts came from — how far they can be trusted.
@@ -93,6 +95,9 @@ pub struct ProjectModel {
     pub modules: Vec<Module>,
     pub source_sets: Vec<SourceSet>,
     pub jdk: Option<Jdk>,
+    /// Source directory → its source set, for finding a file's source set
+    /// by walking up its ancestors.
+    directory_index: FxHashMap<PathBuf, SourceSetId>,
 }
 
 /// Why `project.json` couldn't be used.
@@ -136,22 +141,48 @@ impl ProjectModel {
         &self.modules[id.0 as usize]
     }
 
-    /// The source set whose directory contains `path` most closely.
-    pub fn source_set_of(&self, path: &Path) -> Option<SourceSetId> {
-        let mut best: Option<(usize, SourceSetId)> = None;
-        for source_set in &self.source_sets {
+    pub fn new(
+        root: PathBuf,
+        origin: ModelOrigin,
+        modules: Vec<Module>,
+        source_sets: Vec<SourceSet>,
+        jdk: Option<Jdk>,
+    ) -> ProjectModel {
+        let mut directory_index = FxHashMap::default();
+        for source_set in &source_sets {
             for directory in &source_set.directories {
-                if !path.starts_with(directory) {
-                    continue;
-                }
-                let depth = directory.components().count();
-                let deeper = best.is_none_or(|(best_depth, _)| depth > best_depth);
-                if deeper {
-                    best = Some((depth, source_set.id));
-                }
+                // The first source set to list a directory keeps it.
+                directory_index
+                    .entry(directory.clone())
+                    .or_insert(source_set.id);
             }
         }
-        best.map(|(_, id)| id)
+        ProjectModel {
+            root,
+            origin,
+            modules,
+            source_sets,
+            jdk,
+            directory_index,
+        }
+    }
+
+    /// A model of no modules: a workspace not loaded yet.
+    pub fn empty(root: PathBuf) -> ProjectModel {
+        ProjectModel::new(
+            root,
+            ModelOrigin::DirectoryConvention,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// The source set whose directory contains `path` most closely.
+    pub fn source_set_of(&self, path: &Path) -> Option<SourceSetId> {
+        path.ancestors()
+            .skip(1)
+            .find_map(|ancestor| self.directory_index.get(ancestor).copied())
     }
 
     /// `id` and every source set it sees.

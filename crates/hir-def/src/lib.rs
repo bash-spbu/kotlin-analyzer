@@ -27,12 +27,17 @@ pub struct ItemLocation {
 }
 
 /// The declarations of a file.
+///
+/// Parses the file itself instead of asking the `parse` query: a syntax tree
+/// is many times the size of its text, and the query would keep every one
+/// it produced until the next revision. Features that need a tree go through
+/// `parse`, which keeps only recently used ones.
 #[salsa::tracked(returns(clone))]
 pub fn file_item_tree(db: &dyn SourceDatabase, file: SourceFile) -> Arc<ItemTree> {
-    let parse = base_db::parse(db, file);
+    let parse = syntax::parse(file.text(db).clone(), file.language(db));
     let tree = match file.language(db) {
-        Language::Kotlin => item_tree::lower_kotlin(parse),
-        Language::Java => item_tree::lower_java(parse),
+        Language::Kotlin => item_tree::lower_kotlin(&parse),
+        Language::Java => item_tree::lower_java(&parse),
     };
     Arc::new(tree)
 }

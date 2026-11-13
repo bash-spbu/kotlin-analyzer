@@ -8,9 +8,10 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hir-ty.workspace = true
-hir-def.workspace = true
 base-db.workspace = true
+hir-def.workspace = true
+hir-ty.workspace = true
+intern.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 

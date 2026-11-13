@@ -9,8 +9,21 @@ editor features as pure functions of a snapshot.
 Kotlin gets the full feature set. Java — in the workspace, the JDK and
 libraries — is read for navigation, hover and types.
 
-**Status:** early development; not usable yet. See `docs/spec/` for what it
-is being built to do.
+**Status:** early development. Working so far (milestone M1): the project
+model from Gradle, declarations of every Kotlin and Java file, name resolution
+of types per module, and the LSP requests `documentSymbol`, `workspace/symbol`,
+`definition` (types and imports) with syntax diagnostics. See `docs/spec/` for
+what it is being built to do.
+
+## Project model
+
+Export the build's model once (and after dependency changes):
+
+```bash
+./gradlew --init-script /path/to/kotlin-analyzer/editors/gradle/kotlin-analyzer.init.gradle kotlinAnalyzerModel
+```
+
+Without it, modules and source sets are guessed from directory layout.
 
 ## Layout
 

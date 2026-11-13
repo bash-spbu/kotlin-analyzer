@@ -78,13 +78,13 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
             .map(|(id, _)| *id)
             .collect();
     }
-    ProjectModel {
-        root: root.to_path_buf(),
-        origin: ModelOrigin::DirectoryConvention,
+    ProjectModel::new(
+        root.to_path_buf(),
+        ModelOrigin::DirectoryConvention,
         modules,
         source_sets,
-        jdk: None,
-    }
+        None,
+    )
 }
 
 /// `src/<name>/{kotlin,java}` directories of a module, by source set name.

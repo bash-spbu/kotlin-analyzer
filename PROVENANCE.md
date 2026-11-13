@@ -16,7 +16,8 @@ Rules:
 
 | here | from (author's own work in the fork) | what was taken |
 |---|---|---|
-| — | — | nothing yet |
+| `editors/gradle/kotlin-analyzer.init.gradle` | `contrib/gradle/kmp-lsp-deps.init.gradle` (author's own) | the idea of an init-script task exporting the build's resolved dependencies and generated source roots; rewritten for the new `project.json` model (modules, source sets, module dependencies, per-source-set libraries with sources JARs, JDK) and Gradle 9's per-project resolution |
+| `crates/syntax/src/pointer.rs` (`SyntaxNodePtr`) | `src/indexer/file_model/syntax_ptr.rs` (author's own) | the design: a node remembered by kind and range, found again by climbing from the smallest node spanning the range; rewritten |
 
 ## Third-party code used as dependencies
 

@@ -181,16 +181,21 @@ impl RootDatabase {
             return;
         };
         let source_sets = workspace.source_sets(self).clone();
-        for id in membership_changed {
+        // One pass over the files groups them by source set.
+        let mut grouped: FxHashMap<SourceSetId, Vec<SourceFile>> = membership_changed
+            .iter()
+            .map(|id| (*id, Vec::new()))
+            .collect();
+        for file in self.files.values() {
+            let group = file.source_set(self).and_then(|id| grouped.get_mut(&id));
+            if let Some(group) = group {
+                group.push(*file);
+            }
+        }
+        for (id, mut files) in grouped {
             let Some(source_set) = source_sets.get(id.0 as usize).copied() else {
                 continue;
             };
-            let mut files: Vec<SourceFile> = self
-                .files
-                .values()
-                .copied()
-                .filter(|file| file.source_set(self) == Some(id))
-                .collect();
             files.sort_by_key(|file| file.file_id(self));
             source_set.set_files(self).to(files.into());
         }
