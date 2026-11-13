@@ -170,6 +170,15 @@ pub struct SyntaxError {
 /// Every node under `root` (itself included), in document order, walked
 /// with a cursor so deep trees don't grow the stack.
 pub fn descendants(root: SyntaxNode<'_>) -> impl Iterator<Item = SyntaxNode<'_>> {
+    descendants_pruned(root, |_| false)
+}
+
+/// Like [`descendants`], but a node `prune` takes is yielded without its
+/// subtree.
+pub fn descendants_pruned<'tree>(
+    root: SyntaxNode<'tree>,
+    prune: impl Fn(SyntaxNode<'tree>) -> bool,
+) -> impl Iterator<Item = SyntaxNode<'tree>> {
     let mut cursor = root.walk();
     let mut finished = false;
     std::iter::from_fn(move || {
@@ -177,7 +186,7 @@ pub fn descendants(root: SyntaxNode<'_>) -> impl Iterator<Item = SyntaxNode<'_>>
             return None;
         }
         let node = cursor.node();
-        if cursor.goto_first_child() {
+        if !prune(node) && cursor.goto_first_child() {
             return Some(node);
         }
         loop {
@@ -202,17 +211,41 @@ pub fn children_of_kind<'tree>(
 
 /// The named children of `node`.
 pub fn named_children(node: SyntaxNode<'_>) -> impl Iterator<Item = SyntaxNode<'_>> {
-    let count = node.named_child_count();
-    (0..count).filter_map(move |index| node.named_child(index as u32))
+    children(node).filter(|child| child.is_named())
+}
+
+/// Every child of `node`, named or not, walked with a cursor: asking for a
+/// child by index costs as much as walking to it.
+pub fn children(node: SyntaxNode<'_>) -> impl Iterator<Item = SyntaxNode<'_>> {
+    let mut cursor = node.walk();
+    let mut position = ChildPosition::BeforeFirst;
+    std::iter::from_fn(move || {
+        let moved = match position {
+            ChildPosition::BeforeFirst => cursor.goto_first_child(),
+            ChildPosition::At => cursor.goto_next_sibling(),
+            ChildPosition::Past => false,
+        };
+        if !moved {
+            position = ChildPosition::Past;
+            return None;
+        }
+        position = ChildPosition::At;
+        Some(cursor.node())
+    })
+}
+
+/// Where a walk over a node's children is.
+#[derive(Clone, Copy)]
+enum ChildPosition {
+    BeforeFirst,
+    At,
+    Past,
 }
 
 /// Whether `node` has an anonymous child token spelled `token`
 /// (`class`, `interface`, `enum`, …).
 pub fn has_token(node: SyntaxNode<'_>, token: &str) -> bool {
-    let count = node.child_count();
-    (0..count)
-        .filter_map(|index| node.child(index as u32))
-        .any(|child| !child.is_named() && child.kind() == token)
+    children(node).any(|child| !child.is_named() && child.kind() == token)
 }
 
 #[cfg(test)]

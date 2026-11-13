@@ -494,6 +494,30 @@ fun use(money: Int) {
 }
 
 #[test]
+fn completion_sees_the_scope_of_the_declaration_around_it_only() {
+    let fixture = r#"
+//- /app/b/Use.kt
+package b
+class Outer(val seed: Long, factor: Int) {
+    val tripled = factor * 3
+    var stored: Long = 0
+        get() = fi$0
+    inner class Inner(val depth: Int) {
+        fun walk(step: Int) = de
+    }
+}
+"#;
+    check_completions(fixture, 1, expect!["field Variable"]);
+    check_completions(
+        &fixture
+            .replace("get() = fi$0", "get() = field")
+            .replace("= de\n", "= de$0\n"),
+        1,
+        expect!["depth Field"],
+    );
+}
+
+#[test]
 fn completion_in_a_type_offers_classes_only_and_sees_smart_casts_elsewhere() {
     check_completions(
         r#"

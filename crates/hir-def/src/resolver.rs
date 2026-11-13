@@ -218,10 +218,8 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
         };
         let tree = item_tree(db, container.container);
         let members: Vec<ItemLocation> = tree
-            .item(container.item)
-            .children
+            .named(Some(container.item), *name)
             .iter()
-            .filter(|child| tree.item(**child).name == *name)
             .filter(|child| is_last || tree.item(**child).kind.is_classifier())
             .map(|child| ItemLocation {
                 container: container.container,
@@ -535,13 +533,9 @@ impl<'db> HierarchyWalk<'db> {
 /// The classifiers named `name` declared directly in `class`.
 fn own_classifiers(db: &dyn SourceDatabase, class: ItemLocation, name: Name) -> Vec<ItemLocation> {
     let tree = item_tree(db, class.container);
-    tree.item(class.item)
-        .children
+    tree.named(Some(class.item), name)
         .iter()
-        .filter(|child| {
-            let child = tree.item(**child);
-            child.name == name && child.kind.is_classifier()
-        })
+        .filter(|child| tree.item(**child).kind.is_classifier())
         .map(|child| ItemLocation {
             container: class.container,
             item: *child,

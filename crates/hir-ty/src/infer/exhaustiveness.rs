@@ -185,7 +185,9 @@ impl Inferrer<'_> {
             .workspace()
             .source_sets(self.db)
             .get(source_set_id.0 as usize)?;
-        let package = hir_def::file_item_tree(self.db, file).package.clone();
+        let sealed_tree = hir_def::file_item_tree(self.db, file);
+        let package = sealed_tree.package.clone();
+        let sealed_name = sealed_tree.item(sealed.item).name;
         let mut inheritors = Vec::new();
         for candidate_file in source_set.files(self.db).iter() {
             let tree = hir_def::file_item_tree(self.db, *candidate_file);
@@ -197,10 +199,18 @@ impl Inferrer<'_> {
                     continue;
                 };
                 let location = ItemLocation::in_file(*candidate_file, index);
-                let extends_sealed = supertypes.iter().any(|supertype| {
-                    lower_supertype(self.db, self.file, location, supertype)
-                        .is_some_and(|resolved| resolved.class == sealed)
-                });
+                // Only a supertype spelled with the sealed class's name is
+                // resolved (a type alias to it isn't followed: an inheritor
+                // missed that way leaves the check silent, never wrong).
+                let extends_sealed = supertypes
+                    .iter()
+                    .filter(|supertype| {
+                        supertype.path().and_then(|path| path.last()) == Some(sealed_name)
+                    })
+                    .any(|supertype| {
+                        lower_supertype(self.db, self.file, location, supertype)
+                            .is_some_and(|resolved| resolved.class == sealed)
+                    });
                 if extends_sealed {
                     inheritors.push(location);
                 }

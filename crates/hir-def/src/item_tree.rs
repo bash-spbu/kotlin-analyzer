@@ -65,12 +65,25 @@ pub struct ItemTree {
     items: Box<[Item]>,
     ids: Box<[ItemId]>,
     positions: FxHashMap<ItemId, u32>,
+    /// Items by parent (`None`: top level) and name, in document order —
+    /// a library package has thousands of top-level functions, a lookup
+    /// mustn't walk them.
+    named: FxHashMap<(Option<ItemId>, Name), Box<[ItemId]>>,
     pub top_level: Box<[ItemId]>,
 }
 
 impl ItemTree {
     pub fn item(&self, id: ItemId) -> &Item {
         &self.items[self.positions[&id] as usize]
+    }
+
+    /// The items named `name` declared in `parent` (`None`: at the top
+    /// level), in document order.
+    pub fn named(&self, parent: Option<ItemId>, name: Name) -> &[ItemId] {
+        self.named
+            .get(&(parent, name))
+            .map(|items| &items[..])
+            .unwrap_or_default()
     }
 
     /// Every item with its id, in document order.
@@ -481,6 +494,10 @@ impl ItemTreeBuilder {
         source_files: Vec<(ItemId, Box<str>)>,
     ) -> (ItemTree, ItemSourceMap) {
         let (imports, import_ranges): (Vec<Import>, Vec<TextRange>) = imports.into_iter().unzip();
+        let mut named: FxHashMap<(Option<ItemId>, Name), Vec<ItemId>> = FxHashMap::default();
+        for (id, item) in self.ids.iter().zip(self.items.iter()) {
+            named.entry((item.parent, item.name)).or_default().push(*id);
+        }
         let tree = ItemTree {
             package,
             source_files: source_files.into_boxed_slice(),
@@ -488,6 +505,10 @@ impl ItemTreeBuilder {
             items: self.items.into_boxed_slice(),
             ids: self.ids.into_boxed_slice(),
             positions: self.positions,
+            named: named
+                .into_iter()
+                .map(|(key, items)| (key, items.into_boxed_slice()))
+                .collect(),
             top_level: top_level.into_boxed_slice(),
         };
         let source_map = ItemSourceMap {

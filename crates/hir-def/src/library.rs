@@ -125,7 +125,13 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
 }
 
 /// A library package's declarations.
-#[salsa::tracked(returns(clone), lru = 128)]
+///
+/// Kept for the session, not evicted: every lookup of a library name asks
+/// for one, from every analysis thread, and an LRU's bookkeeping is one
+/// lock they all meet at (half the time of a workspace pass went to it).
+/// What it costs: the trees of the packages the workspace uses stay in
+/// memory (about 40 MB on a 600-library workspace).
+#[salsa::tracked(returns(clone))]
 pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) -> Arc<ItemTree> {
     let library = package.library(db);
     // Ties the tree to the archive as indexed: one rewritten in place gets

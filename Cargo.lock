@@ -293,6 +293,7 @@ dependencies = [
  "expect-test",
  "hir",
  "intern",
+ "rayon",
  "rustc-hash",
  "syntax",
  "vfs",
@@ -312,6 +313,7 @@ dependencies = [
 name = "intern"
 version = "0.1.0"
 dependencies = [
+ "boxcar",
  "rustc-hash",
 ]
 

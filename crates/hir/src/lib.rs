@@ -7,7 +7,7 @@ pub use base_db::{
 };
 pub use hir_def::def_map::{
     importable_names, package_exists, package_names, package_prefix_exists, packages_declaring,
-    visible_top_level,
+    sees, visible_top_level,
 };
 pub use hir_def::item_tree::{
     ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,

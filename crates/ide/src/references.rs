@@ -3,6 +3,7 @@
 //! that spell the name and asking, at each occurrence, what it means.
 
 use hir::{FileId, ItemContainer, ItemLocation, Language, RootDatabase, SourceDatabase};
+use rayon::prelude::*;
 use syntax::TextRange;
 
 use crate::diagnostics::TextEdit;
@@ -242,29 +243,54 @@ fn declaration_ranges(db: &RootDatabase, target: &Target) -> Vec<FileRange> {
 fn occurrences(db: &RootDatabase, target: &Target, name: &str) -> Vec<FileRange> {
     let files: Vec<FileId> = match target {
         Target::Local { file, .. } => vec![*file],
-        Target::Declarations(_) => db
+        // Only files that can name a declaration are searched: each
+        // occurrence found is resolved, and resolving means inferring the
+        // file — a common name in a large workspace is in hundreds.
+        Target::Declarations(declarations) => db
             .all_files()
             .into_iter()
-            .filter(|file| file.language(db) == Language::Kotlin && file.text(db).contains(name))
+            .filter(|file| file.language(db) == Language::Kotlin)
+            .filter(|file| {
+                declarations
+                    .iter()
+                    .any(|declaration| hir::sees(db, *file, *declaration))
+            })
+            .filter(|file| file.text(db).contains(name))
             .map(|file| file.file_id(db))
             .collect(),
     };
-    let mut found = Vec::new();
-    for file in files {
-        let Some(source) = db.source_file(file) else {
-            continue;
-        };
-        let text = source.text(db).clone();
-        for start in word_occurrences(&text, name) {
-            let Some((meaning, range)) = Target::at(db, file, start) else {
-                continue;
-            };
-            if target.includes(&meaning) {
-                found.push(FileRange { file, range });
-            }
-        }
-    }
-    found
+    // Resolving an occurrence infers its file: the files are shared out
+    // among threads, each with its own snapshot of the database.
+    let per_thread = files
+        .len()
+        .div_ceil(rayon::current_num_threads().max(1))
+        .max(1);
+    let work: Vec<(RootDatabase, Vec<FileId>)> = files
+        .chunks(per_thread)
+        .map(|chunk| (db.clone(), chunk.to_vec()))
+        .collect();
+    work.into_par_iter()
+        .flat_map(|(snapshot, chunk)| {
+            chunk
+                .into_iter()
+                .flat_map(|file| occurrences_in(&snapshot, target, name, file))
+                .collect::<Vec<FileRange>>()
+        })
+        .collect()
+}
+
+/// The occurrences of `name` in `file` that mean the target.
+fn occurrences_in(db: &RootDatabase, target: &Target, name: &str, file: FileId) -> Vec<FileRange> {
+    let Some(source) = db.source_file(file) else {
+        return Vec::new();
+    };
+    let text = source.text(db).clone();
+    word_occurrences(&text, name)
+        .into_iter()
+        .filter_map(|start| Target::at(db, file, start))
+        .filter(|(meaning, _)| target.includes(meaning))
+        .map(|(_, range)| FileRange { file, range })
+        .collect()
 }
 
 /// The starts of `name` in `text` as a whole word (backticked or not).

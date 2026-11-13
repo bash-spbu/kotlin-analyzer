@@ -875,14 +875,9 @@ impl<'db> Inferrer<'db> {
             };
             let property = class.and_then(|class| {
                 let tree = hir_def::item_tree(self.db, class.container);
-                tree.item(class.item)
-                    .children
+                tree.named(Some(class.item), parameter.name)
                     .iter()
-                    .find(|child| {
-                        let child = tree.item(**child);
-                        child.name == parameter.name
-                            && matches!(child.kind, ItemKind::Property { .. })
-                    })
+                    .find(|child| matches!(tree.item(**child).kind, ItemKind::Property { .. }))
                     .map(|child| ItemLocation {
                         container: class.container,
                         item: *child,

@@ -312,19 +312,13 @@ fn unused_imports(parse: &Parse) -> Vec<Diagnostic> {
     let text = parse.text();
     let root = parse.root();
     let mut used: FxHashSet<&str> = FxHashSet::default();
-    for node in syntax::descendants(root) {
-        let inside_imports = node
-            .parent()
-            .is_some_and(|parent| parent.kind() == "identifier")
-            && ancestors_include(node, &["import_header", "package_header"]);
-        if inside_imports {
-            continue;
-        }
+    // The package line and the imports (aliases included) aren't uses.
+    let is_header =
+        |node: SyntaxNode<'_>| matches!(node.kind(), "import_header" | "package_header");
+    for node in syntax::descendants_pruned(root, is_header) {
         match node.kind() {
             "simple_identifier" | "type_identifier" | "interpolated_identifier" => {
-                if !ancestors_include(node, &["import_alias"]) {
-                    used.insert(parse.text_of(node).trim_matches('`'));
-                }
+                used.insert(parse.text_of(node).trim_matches('`'));
             }
             kind if kind.contains("comment") => {
                 used.extend(
@@ -375,15 +369,4 @@ fn unused_imports(parse: &Parse) -> Vec<Diagnostic> {
         });
     }
     unused
-}
-
-fn ancestors_include(node: SyntaxNode<'_>, kinds: &[&str]) -> bool {
-    let mut current = node.parent();
-    while let Some(ancestor) = current {
-        if kinds.contains(&ancestor.kind()) {
-            return true;
-        }
-        current = ancestor.parent();
-    }
-    false
 }

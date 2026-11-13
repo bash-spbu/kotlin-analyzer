@@ -673,3 +673,43 @@ class Pay { fun pay() {} }
     ids.dedup();
     assert_eq!(ids.len(), count);
 }
+
+#[test]
+fn which_files_can_name_a_declaration() {
+    let fixture = Fixture::parse(
+        r#"
+//- /lib/x/Hidden.kt module=:lib
+package x
+private class Secret
+internal class Local
+class Open
+//- /lib/x/Peer.kt module=:lib
+package x
+//- /app/x/Use.kt module=:app deps=:lib
+package x
+//- /other/x/Far.kt module=:other
+package x
+"#,
+    );
+    let db = &fixture.database;
+    let file = |path: &str| db.source_file(fixture.file(path)).unwrap();
+    let hidden = file("/lib/x/Hidden.kt");
+    let declared = |name: &str| {
+        let tree = file_item_tree(db, hidden);
+        let (id, _) = tree
+            .indexed_items()
+            .find(|(_, item)| item.name.as_str() == name)
+            .unwrap();
+        crate::ItemLocation::in_file(hidden, id)
+    };
+    let sees = |path: &str, name: &str| crate::def_map::sees(db, file(path), declared(name));
+    assert!(sees("/lib/x/Hidden.kt", "Secret"));
+    assert!(!sees("/lib/x/Peer.kt", "Secret"));
+    assert!(sees("/lib/x/Peer.kt", "Local"));
+    assert!(!sees("/app/x/Use.kt", "Local"));
+    assert!(sees("/app/x/Use.kt", "Open"));
+    assert!(
+        !sees("/other/x/Far.kt", "Open"),
+        "a module that doesn't depend on it"
+    );
+}

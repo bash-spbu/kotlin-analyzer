@@ -67,8 +67,56 @@ pub fn completion_scope(
         inserted: inserted.then_some((offset, PLACEHOLDER.len() as u32)),
         captured: None,
     });
-    inferrer.file_declarations();
+    // Only the declaration around the cursor is walked: its scope is all a
+    // completion needs, and a keystroke shouldn't infer the whole file.
+    match enclosing_member(parse.root(), offset as usize) {
+        Some(member) => {
+            inferrer.enter_enclosing_classes(member);
+            inferrer.declaration(member);
+        }
+        None => inferrer.file_declarations(),
+    }
     inferrer.probe.take()?.captured
+}
+
+/// The member-level declaration (of the file or of a class) around
+/// `offset`: a function, a property (an accessor's, for a position in
+/// one), an initializer or a constructor. `None` elsewhere — a class
+/// header, a script's statements.
+fn enclosing_member(root: SyntaxNode<'_>, offset: usize) -> Option<SyntaxNode<'_>> {
+    let mut current = root.descendant_for_byte_range(offset, offset)?;
+    loop {
+        let parent = current.parent()?;
+        let at_member_level = matches!(
+            parent.kind(),
+            "class_body" | "enum_class_body" | "source_file"
+        );
+        if at_member_level {
+            return match current.kind() {
+                "function_declaration"
+                | "property_declaration"
+                | "secondary_constructor"
+                | "anonymous_initializer" => Some(current),
+                "getter" | "setter" => accessed_property(current),
+                _ => None,
+            };
+        }
+        current = parent;
+    }
+}
+
+/// The property an accessor written on its own line belongs to: the
+/// nearest property declared before it.
+fn accessed_property(accessor: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let mut previous = accessor.prev_named_sibling();
+    while let Some(sibling) = previous {
+        match sibling.kind() {
+            "property_declaration" => return Some(sibling),
+            "getter" | "setter" => previous = sibling.prev_named_sibling(),
+            _ => return None,
+        }
+    }
+    None
 }
 
 impl Inferrer<'_> {

@@ -36,6 +36,10 @@ pub struct Types<'db> {
     pub(crate) signatures: RefCell<
         FxHashMap<crate::signature::Callable, Option<Rc<crate::signature::CallableSignature>>>,
     >,
+    /// `kotlin.<name>` types by name: asked for on every fit check.
+    builtins: RefCell<FxHashMap<Box<str>, Ty>>,
+    /// A mutable collection class's read-only counterpart.
+    pub(crate) read_only_collections: RefCell<FxHashMap<ItemLocation, Option<ItemLocation>>>,
 }
 
 impl<'db> Types<'db> {
@@ -46,12 +50,21 @@ impl<'db> Types<'db> {
             hierarchies: RefCell::default(),
             complete_hierarchies: RefCell::default(),
             signatures: RefCell::default(),
+            builtins: RefCell::default(),
+            read_only_collections: RefCell::default(),
         }
     }
 
     /// `kotlin.<name>` (`Any`, `String`, `Unit`, …) without arguments.
     pub fn builtin(&self, name: &str) -> Ty {
-        builtin(self.db, self.from, "kotlin", name, Vec::new())
+        if let Some(known) = self.builtins.borrow().get(name) {
+            return known.clone();
+        }
+        let found = builtin(self.db, self.from, "kotlin", name, Vec::new());
+        self.builtins
+            .borrow_mut()
+            .insert(name.into(), found.clone());
+        found
     }
 
     /// A class's type with its own type parameters as arguments — the type
@@ -237,7 +250,7 @@ impl<'db> Types<'db> {
     /// `receiver` has, the most derived first; an inherited member a nearer
     /// class overrides (same kind, same number of parameters) is left out.
     pub fn members_named(&self, receiver: &Ty, name: Name) -> Vec<Member> {
-        self.visible_members(receiver, |candidate| candidate == name)
+        self.visible_members(receiver, Wanted::Named(name))
     }
 
     /// The non-static members of `receiver`'s hierarchy whose name `wanted`
@@ -246,7 +259,7 @@ impl<'db> Types<'db> {
     /// name, shape and parameter types — compared in terms of the
     /// receiver's class's own type parameters, so an argument not inferred
     /// yet (`buildList { add(…) }`) doesn't hide an override.
-    fn visible_members(&self, receiver: &Ty, wanted: impl Fn(Name) -> bool) -> Vec<Member> {
+    fn visible_members(&self, receiver: &Ty, wanted: Wanted) -> Vec<Member> {
         struct Found {
             member: Member,
             name: Name,
@@ -260,9 +273,13 @@ impl<'db> Types<'db> {
                 let tree = item_tree(self.db, class_type.class.container);
                 let from_nearer_classes = found.len();
                 let mut substitutions = None;
-                for child in tree.item(class_type.class.item).children.iter() {
+                let candidates = match wanted {
+                    Wanted::Named(name) => tree.named(Some(class_type.class.item), name),
+                    Wanted::All => &tree.item(class_type.class.item).children,
+                };
+                for child in candidates.iter() {
                     let item = tree.item(*child);
-                    if !wanted(item.name) || item.modifiers.contains(Modifiers::STATIC) {
+                    if item.modifiers.contains(Modifiers::STATIC) {
                         continue;
                     }
                     let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
@@ -315,11 +332,11 @@ impl<'db> Types<'db> {
         for holder in self.member_holders(receiver) {
             for class_type in self.all_supertypes(&holder) {
                 let tree = item_tree(self.db, class_type.class.container);
-                for child in tree.item(class_type.class.item).children.iter() {
+                for child in tree.named(Some(class_type.class.item), name) {
                     let item = tree.item(*child);
                     let is_inner_class =
                         item.kind.is_classifier() && item.modifiers.contains(Modifiers::INNER);
-                    if item.name == name && is_inner_class {
+                    if is_inner_class {
                         found.push(ItemLocation {
                             container: class_type.class.container,
                             item: *child,
@@ -361,7 +378,7 @@ impl<'db> Types<'db> {
         };
         for class_type in &class_types {
             let class_tree = item_tree(self.db, class_type.class.container);
-            for child in class_tree.item(class_type.class.item).children.iter() {
+            for child in class_tree.named(Some(class_type.class.item), item.name) {
                 let candidate = class_tree.item(*child);
                 let Signature::Function {
                     parameters: overridden,
@@ -370,7 +387,7 @@ impl<'db> Types<'db> {
                 else {
                     continue;
                 };
-                if candidate.name != item.name || overridden.len() != defaults.len() {
+                if overridden.len() != defaults.len() {
                     continue;
                 }
                 let candidate = Member {
@@ -394,7 +411,7 @@ impl<'db> Types<'db> {
     /// Every function and property a value of type `receiver` has, the
     /// most derived first; overridden ones left out.
     pub fn all_members(&self, receiver: &Ty) -> Vec<Member> {
-        self.visible_members(receiver, |_| true)
+        self.visible_members(receiver, Wanted::All)
     }
 
     /// The property name Kotlin gives a Java getter (`getTitle` → `title`,
@@ -476,16 +493,14 @@ impl<'db> Types<'db> {
     /// nested classifier, an enum entry, or a Java static member.
     pub fn static_members_named(&self, class: ItemLocation, name: Name) -> Vec<ItemLocation> {
         let tree = item_tree(self.db, class.container);
-        let item = tree.item(class.item);
-        let mut found: Vec<ItemLocation> = item
-            .children
+        let mut found: Vec<ItemLocation> = tree
+            .named(Some(class.item), name)
             .iter()
             .filter(|child| {
                 let child = tree.item(**child);
-                let is_static = child.modifiers.contains(Modifiers::STATIC)
+                child.modifiers.contains(Modifiers::STATIC)
                     || child.kind == ItemKind::EnumEntry
-                    || child.kind.is_classifier();
-                child.name == name && is_static
+                    || child.kind.is_classifier()
             })
             .map(|child| ItemLocation {
                 container: class.container,
@@ -502,9 +517,9 @@ impl<'db> Types<'db> {
         for supertype in self.hierarchy(class).iter() {
             let tree = item_tree(self.db, supertype.class.container);
             let from_nearer_classes = found.len();
-            for child in tree.item(supertype.class.item).children.iter() {
+            for child in tree.named(Some(supertype.class.item), name) {
                 let candidate = tree.item(*child);
-                if candidate.name != name || !candidate.modifiers.contains(Modifiers::STATIC) {
+                if !candidate.modifiers.contains(Modifiers::STATIC) {
                     continue;
                 }
                 let location = ItemLocation {
@@ -596,6 +611,13 @@ pub fn is_java(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
             .modifiers
             .contains(Modifiers::PLATFORM),
     }
+}
+
+/// Which members a walk over a hierarchy collects.
+#[derive(Clone, Copy)]
+enum Wanted {
+    Named(Name),
+    All,
 }
 
 /// A type as overriding compares parameters: by class, as the JVM erases

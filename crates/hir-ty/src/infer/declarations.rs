@@ -499,14 +499,19 @@ impl<'db> Inferrer<'db> {
         };
         self.enter_enclosing_classes(node);
         match node.kind() {
-            "function_declaration" => self.function(node),
+            "function_declaration" => match function_result(node) {
+                FunctionResult::Written(written) => self.written_type(written),
+                FunctionResult::Block => self.types.builtin("Unit"),
+                FunctionResult::Missing => Ty::Unknown,
+                FunctionResult::Expression => self.function(node),
+            },
             "property_declaration" => self.member_property(node),
             _ => Ty::Unknown,
         }
     }
 
     /// Pushes the receivers of the classes around `node`, outermost first.
-    fn enter_enclosing_classes(&mut self, node: SyntaxNode<'_>) {
+    pub(super) fn enter_enclosing_classes(&mut self, node: SyntaxNode<'_>) {
         let mut classes = Vec::new();
         let mut current = node.parent();
         while let Some(ancestor) = current {
@@ -1105,4 +1110,27 @@ fn accessors(property: SyntaxNode<'_>) -> Vec<SyntaxNode<'_>> {
         next = sibling.next_named_sibling();
     }
     found
+}
+
+/// What a function's result type comes from.
+enum FunctionResult<'tree> {
+    /// `: T`.
+    Written(SyntaxNode<'tree>),
+    /// `{ … }` without `: T`: `Unit`, whatever the body does.
+    Block,
+    /// `= expression`: inferred from the body.
+    Expression,
+    /// No body (abstract) and no type.
+    Missing,
+}
+
+fn function_result(node: SyntaxNode<'_>) -> FunctionResult<'_> {
+    if let Some(written) = FunctionDeclaration::new_unchecked(node).return_type() {
+        return FunctionResult::Written(written);
+    }
+    match named_children(node).find(|child| child.kind() == "function_body") {
+        Some(body) if has_token(body, "{") => FunctionResult::Block,
+        Some(_) => FunctionResult::Expression,
+        None => FunctionResult::Missing,
+    }
 }

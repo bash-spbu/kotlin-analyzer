@@ -339,12 +339,14 @@ pub fn read_jar(path: &Path) -> Result<JarContents, ReadError> {
 
 /// An archive opened for reading entries by index.
 pub struct Archive {
-    zip: zip::ZipArchive<std::fs::File>,
+    zip: zip::ZipArchive<std::io::BufReader<std::fs::File>>,
 }
 
 impl Archive {
     pub fn open(path: &Path) -> Result<Archive, ReadError> {
-        let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+        // Buffered: reading the central directory is thousands of small
+        // reads, each a system call on a bare file.
+        let file = std::io::BufReader::new(std::fs::File::open(path).map_err(ReadError::Io)?);
         let zip = zip::ZipArchive::new(file).map_err(|error| ReadError::Zip(error.to_string()))?;
         Ok(Archive { zip })
     }

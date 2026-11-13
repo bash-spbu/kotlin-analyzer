@@ -3,54 +3,56 @@
 //! few thousand identifiers millions of times; storing each once keeps
 //! declarations compact.
 
+use std::hash::{BuildHasher, BuildHasherDefault};
 use std::sync::{OnceLock, RwLock};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 
 /// An interned identifier (`String`, `map`, `kotlin`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Name(u32);
 
-#[derive(Default)]
+/// How many independently locked parts the spelling → id map has: every
+/// analysis thread interns names, and one lock would be their meeting point.
+const SHARDS: usize = 64;
+
 struct Interner {
-    spellings: Vec<&'static str>,
-    ids: FxHashMap<&'static str, u32>,
+    /// Spellings by id. Append-only and read without a lock.
+    spellings: boxcar::Vec<&'static str>,
+    /// Ids by spelling, split by the spelling's hash.
+    ids: [RwLock<FxHashMap<&'static str, u32>>; SHARDS],
 }
 
-fn interner() -> &'static RwLock<Interner> {
-    static INTERNER: OnceLock<RwLock<Interner>> = OnceLock::new();
-    INTERNER.get_or_init(Default::default)
+fn interner() -> &'static Interner {
+    static INTERNER: OnceLock<Interner> = OnceLock::new();
+    INTERNER.get_or_init(|| Interner {
+        spellings: boxcar::Vec::new(),
+        ids: std::array::from_fn(|_| RwLock::default()),
+    })
 }
 
 impl Name {
     pub fn new(text: &str) -> Name {
-        if let Some(id) = interner()
-            .read()
-            .expect("interner lock is never poisoned: no code panics while holding it")
-            .ids
-            .get(text)
-        {
+        let interner = interner();
+        let shard = &interner.ids
+            [BuildHasherDefault::<FxHasher>::default().hash_one(text) as usize % SHARDS];
+        let lock_held = "interner lock is never poisoned: no code panics while holding it";
+        if let Some(id) = shard.read().expect(lock_held).get(text) {
             return Name(*id);
         }
-        let mut interner = interner()
-            .write()
-            .expect("interner lock is never poisoned: no code panics while holding it");
-        if let Some(id) = interner.ids.get(text) {
+        let mut ids = shard.write().expect(lock_held);
+        if let Some(id) = ids.get(text) {
             return Name(*id);
         }
         // Names live as long as the process: a bounded set of identifiers.
         let spelling: &'static str = Box::leak(text.to_owned().into_boxed_str());
-        let id = interner.spellings.len() as u32;
-        interner.spellings.push(spelling);
-        interner.ids.insert(spelling, id);
+        let id = interner.spellings.push(spelling) as u32;
+        ids.insert(spelling, id);
         Name(id)
     }
 
     pub fn as_str(self) -> &'static str {
-        interner()
-            .read()
-            .expect("interner lock is never poisoned: no code panics while holding it")
-            .spellings[self.0 as usize]
+        interner().spellings[self.0 as usize]
     }
 }
 
@@ -131,6 +133,26 @@ impl std::fmt::Debug for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threads_interning_the_same_spellings_agree() {
+        let spellings: Vec<String> = (0..500).map(|index| format!("shared{index}")).collect();
+        let per_thread: Vec<Vec<Name>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| spellings.iter().map(|text| Name::new(text)).collect()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        for names in &per_thread[1..] {
+            assert_eq!(names, &per_thread[0]);
+        }
+        for (name, text) in per_thread[0].iter().zip(&spellings) {
+            assert_eq!(name.as_str(), text);
+        }
+    }
 
     #[test]
     fn the_same_spelling_is_one_name() {

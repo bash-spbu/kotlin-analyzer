@@ -1311,3 +1311,20 @@ fun use(account: Account) = account.balance()
     let after = inference(&fixture);
     assert!(!std::sync::Arc::ptr_eq(&before, &after));
 }
+
+#[test]
+fn a_block_bodied_function_is_unit_without_inferring_its_body() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+fun first() { second() }
+fun second() = first()
+val result = second()
+"#,
+        expect![[r#"
+            second@2 -> app.second: Unit
+            first@3 -> app.first: Unit
+            second@4 -> app.second: Unit"#]],
+    );
+}

@@ -115,10 +115,8 @@ pub fn visible_top_level(
         // A file outside every source set sees its own declarations.
         let tree = file_item_tree(db, from);
         if tree.package == *package {
-            for index in tree.top_level.iter() {
-                if tree.item(*index).name == name {
-                    found.push(ItemLocation::in_file(from, *index));
-                }
+            for index in tree.named(None, name) {
+                found.push(ItemLocation::in_file(from, *index));
             }
         }
     }
@@ -131,9 +129,8 @@ pub fn visible_top_level(
         }
         let tree = library_package_tree(db, library_package);
         let declared: Vec<ItemLocation> = tree
-            .top_level
+            .named(None, name)
             .iter()
-            .filter(|index| tree.item(**index).name == name)
             .map(|index| ItemLocation {
                 container: ItemContainer::Library(library_package),
                 item: *index,
@@ -426,6 +423,24 @@ pub fn source_set_visibility(db: &dyn SourceDatabase, source_set: SourceSet) -> 
         .into_iter()
         .filter_map(|id| inputs.get(id.0 as usize).copied())
         .collect()
+}
+
+/// Whether code in `from` can name `location` at all: the declaration's
+/// source set is one `from`'s sees (a library's always is), and its
+/// visibility lets `from` in. What a references search narrows its files by.
+pub fn sees(db: &dyn SourceDatabase, from: SourceFile, location: ItemLocation) -> bool {
+    let Some(declared_in) = location.file() else {
+        return true;
+    };
+    let source_set_visible = match (
+        source_set_input(db, from),
+        source_set_input(db, declared_in),
+    ) {
+        (Some(own), Some(declaring)) => source_set_visibility(db, own).contains(&declaring),
+        // A file outside every source set sees only itself.
+        _ => from == declared_in,
+    };
+    source_set_visible && is_visible(db, from, location)
 }
 
 fn is_visible(db: &dyn SourceDatabase, from: SourceFile, location: ItemLocation) -> bool {
