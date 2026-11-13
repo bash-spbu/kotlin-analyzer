@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/*", "xtask"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Alexander Bashkirov"]
+publish = false
+rust-version = "1.90"
+
+[workspace.dependencies]
+# Internal crates — which one may depend on which is checked by `cargo xtask check`.
+vfs = { path = "crates/vfs" }
+syntax = { path = "crates/syntax" }
+project-model = { path = "crates/project-model" }
+base-db = { path = "crates/base-db" }
+hir-def = { path = "crates/hir-def" }
+hir-ty = { path = "crates/hir-ty" }
+hir = { path = "crates/hir" }
+ide = { path = "crates/ide" }
+sidecar = { path = "crates/sidecar" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1

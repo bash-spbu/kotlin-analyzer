@@ -1,0 +1,18 @@
+[package]
+name = "hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hir-ty.workspace = true
+hir-def.workspace = true
+base-db.workspace = true
+syntax.workspace = true
+vfs.workspace = true
+
+[lints]
+workspace = true
