@@ -384,6 +384,68 @@ impl<'db> Inferrer<'db> {
         for child in named_children(root) {
             self.declaration(child);
         }
+        self.annotations();
+    }
+
+    /// Every annotation's arguments: `name =` labels mean the annotation's
+    /// members, values are expressions. What's in scope there (a class's
+    /// constants for its members' annotations) isn't tracked, so misses
+    /// are uncertain.
+    fn annotations(&mut self) {
+        let annotations: Vec<SyntaxNode<'_>> = syntax::descendants(self.parse.root())
+            .filter(|node| node.kind() == "annotation")
+            .collect();
+        self.enter_uncertain_scope();
+        for annotation in annotations {
+            let Some(invocation) =
+                named_children(annotation).find(|child| child.kind() == "constructor_invocation")
+            else {
+                continue;
+            };
+            let class = named_children(invocation)
+                .find(|child| child.kind() == "user_type")
+                .and_then(|written| self.written_type(written).class().map(|class| class.class));
+            for arguments in
+                named_children(invocation).filter(|child| child.kind() == "value_arguments")
+            {
+                for argument in
+                    named_children(arguments).filter(|child| child.kind() == "value_argument")
+                {
+                    let children: Vec<SyntaxNode<'_>> = named_children(argument).collect();
+                    let is_named = has_token(argument, "=") && children.len() >= 2;
+                    if let (true, Some(class)) = (is_named, class) {
+                        self.annotation_label(class, children[0]);
+                    }
+                    if let Some(value) = children.last() {
+                        self.expression(*value, None);
+                    }
+                }
+            }
+        }
+        self.leave_uncertain_scope();
+    }
+
+    /// `name` of `@Annotation(name = …)`: the annotation's member (a Java
+    /// annotation's method, a Kotlin one's constructor property).
+    fn annotation_label(&mut self, class: ItemLocation, label: SyntaxNode<'_>) {
+        let name = self.name(label);
+        let tree = hir_def::item_tree(self.db, class.container);
+        let member = tree
+            .item(class.item)
+            .children
+            .iter()
+            .find(|child| {
+                let child = tree.item(**child);
+                child.name == name
+                    && matches!(child.kind, ItemKind::Function | ItemKind::Property { .. })
+            })
+            .map(|child| ItemLocation {
+                container: class.container,
+                item: *child,
+            });
+        if let Some(member) = member {
+            self.record(label, Reference::Declaration(member), Ty::Unknown);
+        }
     }
 
     /// The type of the declaration spanning `range`, inferred from its body.

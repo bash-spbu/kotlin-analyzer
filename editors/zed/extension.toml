@@ -1,0 +1,11 @@
+id = "kotlin-analyzer"
+name = "kotlin-analyzer"
+version = "0.1.0"
+schema_version = 1
+authors = ["Alexander Bashkirov"]
+description = "The kotlin-analyzer language server for Kotlin (and read-only Java). The Kotlin and Java languages themselves come from their own extensions."
+repository = "https://github.com/bash-spbu/kotlin-analyzer"
+
+[language_servers.kotlin-analyzer]
+name = "kotlin-analyzer"
+languages = ["Kotlin", "Java"]

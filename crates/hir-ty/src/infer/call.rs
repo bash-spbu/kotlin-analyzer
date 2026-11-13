@@ -23,6 +23,8 @@ use crate::ty::{FunctionType, Substitution, Ty, TypeParameterId};
 /// An argument of a call, typed when the call's resolution needs it.
 pub(super) struct Argument<'tree> {
     name: Option<Name>,
+    /// The `name` of `name = value`, as written.
+    label: Option<SyntaxNode<'tree>>,
     value: ArgumentValue<'tree>,
     spread: bool,
     /// After the parentheses: always the last parameter.
@@ -46,6 +48,7 @@ impl Argument<'_> {
     fn typed(ty: Ty) -> Argument<'static> {
         Argument {
             name: None,
+            label: None,
             value: ArgumentValue::Typed {
                 ty,
                 integer_literal: false,
@@ -275,6 +278,7 @@ impl<'db> Inferrer<'db> {
         let name = self.name(function);
         let mut arguments = vec![Argument {
             name: None,
+            label: None,
             value: ArgumentValue::Pending(right),
             spread: false,
             trailing: false,
@@ -679,6 +683,7 @@ impl<'db> Inferrer<'db> {
                         Reference::Declaration(only.candidate.callable.location()),
                         &result,
                     );
+                    self.record_labels(&only, arguments);
                     return Some(result);
                 }
                 continue;
@@ -699,6 +704,7 @@ impl<'db> Inferrer<'db> {
                 let result = self
                     .complete(only, arguments, type_arguments, expected, Some(name))
                     .unwrap_or(Ty::Unknown);
+                self.record_labels(only, arguments);
                 self.record_callee(
                     name_node,
                     Reference::Declaration(only.candidate.callable.location()),
@@ -821,6 +827,41 @@ impl<'db> Inferrer<'db> {
             &candidate.signature.result.substitute(&substitution),
             parameters,
         ))
+    }
+
+    /// What each `name =` of the chosen call names: a constructor's
+    /// property (`val` parameter) when there is one, else the callee.
+    fn record_labels(&mut self, shaped: &Shaped, arguments: &[Argument<'_>]) {
+        for (argument, index) in arguments.iter().zip(&shaped.parameter_of) {
+            let Some(label) = argument.label else {
+                continue;
+            };
+            let parameter = &shaped.candidate.signature.parameters[*index];
+            let class = match shaped.candidate.callable {
+                Callable::Constructor { class, .. } | Callable::Generated { class, .. } => {
+                    Some(class)
+                }
+                Callable::Function(_) => None,
+            };
+            let property = class.and_then(|class| {
+                let tree = hir_def::item_tree(self.db, class.container);
+                tree.item(class.item)
+                    .children
+                    .iter()
+                    .find(|child| {
+                        let child = tree.item(**child);
+                        child.name == parameter.name
+                            && matches!(child.kind, ItemKind::Property { .. })
+                    })
+                    .map(|child| ItemLocation {
+                        container: class.container,
+                        item: *child,
+                    })
+            });
+            let target = property.unwrap_or(shaped.candidate.callable.location());
+            let ty = parameter.ty.substitute(&shaped.candidate.substitution);
+            self.record(label, Reference::Declaration(target), ty);
+        }
     }
 
     /// Several overloads fit equally: the lambdas are inferred against the
@@ -1214,6 +1255,7 @@ impl<'db> Inferrer<'db> {
                     {
                         arguments.push(Argument {
                             name: None,
+                            label: None,
                             value: ArgumentValue::Lambda(lambda),
                             spread: false,
                             trailing: true,
@@ -1230,6 +1272,7 @@ impl<'db> Inferrer<'db> {
         let children: Vec<SyntaxNode<'tree>> = named_children(node).collect();
         let is_named = has_token(node, "=") && children.len() >= 2;
         let name = is_named.then(|| self.name(children[0]));
+        let label = is_named.then(|| children[0]);
         let mut value = *children.last()?;
         let mut spread = false;
         if value.kind() == "spread_expression" {
@@ -1245,6 +1288,7 @@ impl<'db> Inferrer<'db> {
         };
         Some(Argument {
             name,
+            label,
             value: match lambda_node {
                 Some(lambda) => ArgumentValue::Lambda(lambda),
                 None => ArgumentValue::Pending(value),

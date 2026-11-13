@@ -49,8 +49,12 @@ impl TokenModifiers {
     pub const READONLY: TokenModifiers = TokenModifiers(1 << 1);
     pub const STATIC: TokenModifiers = TokenModifiers(1 << 2);
     pub const DEPRECATED: TokenModifiers = TokenModifiers(1 << 3);
+    /// A `var`: reassignable (not a standard LSP modifier; editors may style
+    /// it, as IntelliJ underlines them).
+    pub const MUTABLE: TokenModifiers = TokenModifiers(1 << 4);
     /// The legend's names, by bit.
-    pub const NAMES: [&'static str; 4] = ["declaration", "readonly", "static", "deprecated"];
+    pub const NAMES: [&'static str; 5] =
+        ["declaration", "readonly", "static", "deprecated", "mutable"];
 
     fn with(self, other: TokenModifiers) -> TokenModifiers {
         TokenModifiers(self.0 | other.0)
@@ -74,7 +78,11 @@ pub(crate) fn semantic_tokens(db: &RootDatabase, file: FileId) -> Vec<SemanticTo
     let mut tokens: Vec<SemanticToken> = Vec::new();
     let tree = hir::file_item_tree(db, source);
     for (index, item) in tree.indexed_items() {
-        if item.kind == ItemKind::Constructor || item.name_range.start == item.name_range.end {
+        let written =
+            &source.text(db)[item.name_range.start as usize..item.name_range.end as usize];
+        // An unnamed companion's name (`Companion`) isn't written anywhere.
+        let names_itself = written.trim_matches('`') == item.name.as_str();
+        if item.kind == ItemKind::Constructor || !names_itself {
             continue;
         }
         let location = ItemLocation::in_file(source, index);
@@ -186,7 +194,21 @@ fn declaration_token(
     ) {
         modifiers = modifiers.with(TokenModifiers::READONLY);
     }
-    if item.modifiers.contains(Modifiers::STATIC) {
+    if matches!(item.kind, ItemKind::Property { mutable: true }) {
+        modifiers = modifiers.with(TokenModifiers::MUTABLE);
+    }
+    // Kotlin's statics: top-level properties, members of objects and
+    // companions (and Java's `static`).
+    let in_object = item.parent.is_some_and(|parent| {
+        matches!(
+            tree.item(parent).kind,
+            ItemKind::Class(ClassKind::Object | ClassKind::CompanionObject)
+        )
+    });
+    let top_level_property =
+        item.parent.is_none() && matches!(item.kind, ItemKind::Property { .. });
+    let static_member = !item.kind.is_classifier() && in_object;
+    if item.modifiers.contains(Modifiers::STATIC) || top_level_property || static_member {
         modifiers = modifiers.with(TokenModifiers::STATIC);
     }
     if item.modifiers.contains(Modifiers::DEPRECATED) {
@@ -207,7 +229,7 @@ fn local_kind(kind: LocalKind) -> TokenKind {
 
 fn local_modifiers(kind: LocalKind) -> TokenModifiers {
     match kind {
-        LocalKind::Variable => TokenModifiers::default(),
+        LocalKind::Variable => TokenModifiers::MUTABLE,
         _ => TokenModifiers::READONLY,
     }
 }

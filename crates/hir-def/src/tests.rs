@@ -480,3 +480,60 @@ val entry: Map.Entry<String, Int>? = null
     // `kotlin.Pair` is a default import, but the file's own package wins.
     assert_eq!(resolve("Pair"), "/app/x/Pair.kt:Pair");
 }
+
+#[test]
+fn library_sources_are_found_in_archives_laid_out_by_source_set() {
+    let Some(jar) = cached_jar("org.jetbrains.kotlin", "kotlin-stdlib") else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let sources = jar.with_file_name(
+        jar.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(".jar", "-sources.jar"),
+    );
+    let sources = std::fs::read_dir(jar.parent().unwrap().parent().unwrap())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|hash| hash.path().join(sources.file_name().unwrap()))
+        .find(|candidate| candidate.is_file());
+    let Some(sources) = sources else {
+        eprintln!("skipped: no kotlin-stdlib sources JAR in the Gradle cache");
+        return;
+    };
+    let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
+    let source = base_db::LibrarySource {
+        archive: jar,
+        kind: base_db::ArchiveKind::Jar,
+        sources: Some(sources),
+    };
+    let indexed = crate::library::index_library(&source).expect("kotlin-stdlib indexes");
+    parsed
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let declaration = |package: &str, name: &str| {
+        crate::def_map::visible_top_level(db, file, &Path::parse(package), intern::Name::new(name))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{package}.{name} is declared"))
+    };
+    // The generated `_Arrays.kt`, `_Collections.kt`, … live under
+    // `commonMain/generated/`, not `kotlin/collections/`.
+    let map_not_null = crate::library::library_declaration_source(
+        db,
+        declaration("kotlin.collections", "mapNotNull"),
+    )
+    .expect("mapNotNull's source is found");
+    assert!(
+        map_not_null.entry.contains("generated/_"),
+        "{}",
+        map_not_null.entry
+    );
+    let text = &map_not_null.text
+        [map_not_null.name_range.start as usize..map_not_null.name_range.end as usize];
+    assert_eq!(text, "mapNotNull");
+}

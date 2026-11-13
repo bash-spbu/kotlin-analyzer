@@ -9,24 +9,46 @@ editor features as pure functions of a snapshot.
 Kotlin gets the full feature set. Java — in the workspace, the JDK and
 libraries — is read for navigation, hover and types.
 
-**Status:** early development. Working so far (milestones M1–M2): the
-project model from Gradle; declarations of every Kotlin and Java file and of
-every library on the classpath (read straight from class files and Kotlin
-metadata, the JDK from `ct.sym`); name resolution of types per module through
-sources and libraries; the LSP requests `documentSymbol`, `workspace/symbol`,
-`definition` (types and imports, into sources JARs and the JDK's `src.zip`)
-and `hover` (signature and KDoc/Javadoc), with syntax diagnostics. See `docs/spec/` for
-what it is being built to do.
+**Status:** milestones M1–M6 of the plan are in.
+
+- **Model:** the project model from Gradle, exported by the server itself.
+- **Declarations and resolution:** declarations of every Kotlin and Java
+  file and of every library on the classpath, read straight from class files
+  and Kotlin metadata; the JDK comes from `ct.sym`. Names resolve per module,
+  through sources and libraries.
+- **Bodies:** type inference in bodies — calls and overloads, generics,
+  lambdas, smart casts.
+- **LSP features:**
+  - definition (into sources JARs and the JDK's `src.zip`), hover, inlay type
+    hints;
+  - completion with auto-import, signature help;
+  - references and rename;
+  - semantic tokens, folding, document and workspace symbols;
+  - diagnostics with quick fixes: syntax, missing imports, argument count,
+    unsafe calls on nullable receivers, non-exhaustive `when`, unused imports,
+    missing package.
+
+See `docs/spec/` for what each does, and when it stays silent.
+
+## Using it in Zed
+
+1. `cargo install --path crates/kotlin-analyzer` puts `kotlin-analyzer` on
+   the PATH.
+2. *zed: install dev extension* → `editors/zed` (see its README for
+   settings). Highlighting comes from Zed's Kotlin and Java extensions.
 
 ## Project model
 
-Export the build's model once (and after dependency changes):
+On opening a Gradle build, the server runs the bundled init script in the
+background and keeps the result in its cache. To export by hand instead
+(for example, to commit it or point several tools at it):
 
 ```bash
 ./gradlew --init-script /path/to/kotlin-analyzer/editors/gradle/kotlin-analyzer.init.gradle kotlinAnalyzerModel
 ```
 
-Without it, modules and source sets are guessed from directory layout.
+which writes `.kotlin-analyzer/project.json`. Until a model is there,
+modules and source sets are guessed from the directory layout.
 
 ## Layout
 

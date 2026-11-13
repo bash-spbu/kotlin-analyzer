@@ -672,7 +672,9 @@ fn semantic_tokens_tell_properties_locals_parameters_and_classes_apart() {
         r#"
 //- /app/b/Use.kt
 package b
+const val LIMIT = 10
 class Account(val owner: String) {
+    companion object { val ZERO = 0 }
     var balance: Long = 0
     fun describe(prefix: String): String {
         val label = prefix + owner
@@ -702,10 +704,12 @@ class Account(val owner: String) {
         })
         .collect();
     expect![[r#"
+        LIMIT Property declaration,readonly,static
         Account Class declaration
         owner Property declaration,readonly
         String Class 
-        balance Property declaration
+        ZERO Property declaration,readonly,static
+        balance Property declaration,mutable
         Long Class 
         describe Method declaration
         prefix Parameter declaration,readonly

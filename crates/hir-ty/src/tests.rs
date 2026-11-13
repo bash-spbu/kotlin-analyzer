@@ -450,6 +450,7 @@ fun use() {
             Money@5 -> app.Money: Money
             Money@6 -> app.Money: Money
             amount@6 -> local amount@6: Long
+            currency@6 -> app.Money.currency: String
             Store@10 -> app.Store.Store: Store
             store@11 -> local store@10: Store
             title@11 -> app.Store.getTitle: String!
@@ -542,6 +543,7 @@ class UseTest : TestBase() {
         expect![[r#"
             point@6 -> local point@5: Point
             copy@6 -> app.Point: Point
+            y@6 -> app.Point.y: Int
             Color@7 -> app.Color: {unknown}
             valueOf@7 -> app.Color: Color
             Color@8 -> app.Color: {unknown}
@@ -923,5 +925,36 @@ fun use() {
             match@6 -> app.match: Gas
             it@6 -> local it@6: Gas
             price@6 -> app.Gas.price: Long"#]],
+    );
+}
+
+#[test]
+fn named_argument_labels_and_annotation_arguments_resolve() {
+    check_inference(
+        r#"
+//- /app/Listener.java
+package app;
+public @interface Listener { String topic(); int batch() default 1; }
+//- /app/Use.kt
+package app
+const val TOPIC = "events"
+data class Deposit(val userId: Long, val amount: Long = 0)
+class Consumer {
+    @Listener(topic = TOPIC, batch = 2)
+    fun consume() {
+        val deposit = Deposit(userId = 1)
+        deposit.copy(amount = 2)
+    }
+}
+"#,
+        expect![[r#"
+            topic@5 -> app.Listener.topic: {unknown}
+            TOPIC@5 -> app.TOPIC: String
+            batch@5 -> app.Listener.batch: {unknown}
+            Deposit@7 -> app.Deposit: Deposit
+            userId@7 -> app.Deposit.userId: Long
+            deposit@8 -> local deposit@7: Deposit
+            copy@8 -> app.Deposit: Deposit
+            amount@8 -> app.Deposit.amount: Long"#]],
     );
 }

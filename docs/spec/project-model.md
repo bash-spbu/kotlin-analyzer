@@ -54,6 +54,17 @@ are ordinary source directories that happen to be produced by the build.
    Paths are relative to the root unless absolute. Libraries carry exactly the
    versions the build resolves for that source set — never "the newest in the
    Gradle cache".
+   When neither `projectJson` nor `.kotlin-analyzer/project.json` is given
+   and the root is a Gradle build, **the server runs the export itself**:
+   the init script is bundled in the binary, runs in the background
+   (`./gradlew` when the build has a wrapper, else `gradle`) and writes the
+   model to the cache (`$XDG_CACHE_HOME/kotlin-analyzer/projects/<root>-<hash>/project.json`),
+   so nothing lands in the project besides Gradle's own `build/` output.
+   The workspace loads by convention meanwhile and reloads when the export
+   finishes. The export is redone when a build file (`build.gradle(.kts)`,
+   `settings.gradle(.kts)`, `gradle.properties`, `libs.versions.toml`) is
+   newer than the cached model. A failed export is reported with
+   `window/showMessage`. `gradleExport: false` turns this off.
 2. **Fallback by convention** when the file is missing: every directory with a
    `build.gradle(.kts)` is a module; `src/<set>/kotlin` and `src/<set>/java`
    are source directories of source set `<set>`; no module dependencies are
@@ -68,9 +79,12 @@ The server watches `project.json`; when it changes the model is reloaded.
 `initializationOptions`:
 - `projectJson`: where the exported model is, when not at
   `.kotlin-analyzer/project.json` in the root;
+- `gradleExport` (default `true`): let the server export the Gradle model
+  when none is given;
 - `sourcePaths`: extra source directories (each becomes its own module);
 - `ignorePatterns`: gitignore-style patterns of files not to analyse;
-- `diagnostics.disabled`: names of checks to turn off.
+- `diagnostics.disabled`: names of checks to turn off; `diagnostics.experimental`:
+  run experimental checks.
 
 ## Files
 

@@ -8,6 +8,7 @@
 
 mod convert;
 mod editing;
+mod gradle_export;
 mod handlers;
 mod library_sources;
 mod settings;
@@ -33,6 +34,7 @@ use crate::load::{self, LoadedFiles};
 
 /// The progress token of workspace loading.
 const LOADING_TOKEN: &str = "kotlin-analyzer/loading";
+const EXPORT_TOKEN: &str = "kotlin-analyzer/gradle";
 
 pub fn run() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
@@ -49,6 +51,12 @@ pub fn run() -> Result<(), String> {
         .and_then(|path| path.as_str())
         .map(PathBuf::from);
     let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
+    let gradle_export = params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("gradleExport"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     let result = InitializeResult {
         capabilities: capabilities(),
         server_info: Some(ServerInfo {
@@ -64,6 +72,7 @@ pub fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let mut state = GlobalState::new(connection.sender.clone(), root, project_json);
     state.diagnostics_config = Arc::new(diagnostics_config);
+    state.gradle_export = gradle_export;
     state.start_loading();
     state.main_loop(&connection.receiver)?;
     drop(state);
@@ -128,6 +137,8 @@ fn workspace_root(params: &InitializeParams) -> PathBuf {
 enum Task {
     Response(Response),
     Loaded(Result<LoadedFiles, String>),
+    /// The background Gradle export finished: the model's file, or why not.
+    ModelExported(Result<PathBuf, String>),
     Diagnostics {
         file: FileId,
         version: i32,
@@ -155,6 +166,9 @@ struct GlobalState {
     shutdown_requested: bool,
     /// Which checks run, from the client's settings.
     diagnostics_config: Arc<ide::DiagnosticsConfig>,
+    /// Whether the server may run Gradle to export the model.
+    gradle_export: bool,
+    exporting: bool,
 }
 
 impl GlobalState {
@@ -183,6 +197,8 @@ impl GlobalState {
             next_request: 0,
             shutdown_requested: false,
             diagnostics_config: Arc::default(),
+            gradle_export: true,
+            exporting: false,
         }
     }
 
@@ -228,7 +244,7 @@ impl GlobalState {
             percentage: None,
         }));
         let root = self.root.clone();
-        let project_json = self.project_json.clone();
+        let project_json = self.model_file();
         let sender = self.task_sender.clone();
         std::thread::Builder::new()
             .name("kotlin-analyzer-loader".to_owned())
@@ -237,11 +253,86 @@ impl GlobalState {
                 let _ = sender.send(Task::Loaded(loaded));
             })
             .expect("a thread can be spawned");
+        self.start_export_if_stale();
+    }
+
+    /// The model file to load: the one given, the workspace's own, or the
+    /// one exported to the cache (when there is one).
+    fn model_file(&self) -> Option<PathBuf> {
+        if self.project_json.is_some() || self.root.join(".kotlin-analyzer/project.json").is_file()
+        {
+            return self.project_json.clone();
+        }
+        gradle_export::cached_model(&self.root).filter(|cached| cached.is_file())
+    }
+
+    /// Runs the Gradle export in the background when the model would come
+    /// from the cache and that is missing or older than a build file.
+    fn start_export_if_stale(&mut self) {
+        let given = self.project_json.is_some()
+            || self.root.join(".kotlin-analyzer/project.json").is_file();
+        if given
+            || !self.gradle_export
+            || self.exporting
+            || !gradle_export::is_gradle_build(&self.root)
+        {
+            return;
+        }
+        let Some(cached) = gradle_export::cached_model(&self.root) else {
+            return;
+        };
+        if !gradle_export::is_stale(&self.root, &cached) {
+            return;
+        }
+        self.exporting = true;
+        self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+            token: lsp_types::NumberOrString::String(EXPORT_TOKEN.to_owned()),
+        });
+        self.progress_on(
+            EXPORT_TOKEN,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Exporting the Gradle model".to_owned(),
+                cancellable: Some(false),
+                message: Some("gradle kotlinAnalyzerModel".to_owned()),
+                percentage: None,
+            }),
+        );
+        let root = self.root.clone();
+        let sender = self.task_sender.clone();
+        std::thread::Builder::new()
+            .name("kotlin-analyzer-gradle".to_owned())
+            .spawn(move || {
+                let exported = gradle_export::export(&root, &cached).map(|()| cached);
+                let _ = sender.send(Task::ModelExported(exported));
+            })
+            .expect("a thread can be spawned");
     }
 
     fn on_task(&mut self, task: Task) {
         match task {
             Task::Response(response) => self.respond(response),
+            Task::ModelExported(exported) => {
+                self.exporting = false;
+                let message = match &exported {
+                    Ok(_) => "exported".to_owned(),
+                    Err(_) => "failed".to_owned(),
+                };
+                self.progress_on(
+                    EXPORT_TOKEN,
+                    WorkDoneProgress::End(WorkDoneProgressEnd {
+                        message: Some(message),
+                    }),
+                );
+                match exported {
+                    Ok(_) => self.start_loading(),
+                    Err(error) => self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
+                        typ: lsp_types::MessageType::WARNING,
+                        message: format!(
+                            "kotlin-analyzer couldn't export the Gradle model (libraries stay unknown):\n{error}"
+                        ),
+                    }),
+                }
+            }
             Task::Loaded(Ok(loaded)) => {
                 let files = loaded.files.len();
                 self.model = loaded.model.clone();
@@ -477,8 +568,12 @@ impl GlobalState {
     }
 
     fn progress(&self, progress: WorkDoneProgress) {
+        self.progress_on(LOADING_TOKEN, progress);
+    }
+
+    fn progress_on(&self, token: &str, progress: WorkDoneProgress) {
         self.notify::<notification::Progress>(lsp_types::ProgressParams {
-            token: lsp_types::NumberOrString::String(LOADING_TOKEN.to_owned()),
+            token: lsp_types::NumberOrString::String(token.to_owned()),
             value: lsp_types::ProgressParamsValue::WorkDone(progress),
         });
     }

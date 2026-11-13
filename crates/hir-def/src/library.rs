@@ -549,17 +549,25 @@ pub fn library_declaration_source(
         format!("{directory}/")
     };
     let mut archive = classfile::Archive::open(sources).ok()?;
-    let recorded = tree
+    let recorded_file = tree
         .source_files
         .iter()
         .find(|(index, _)| *index == top_level)
-        .map(|(_, file)| format!("{prefix}{file}"));
+        .map(|(_, file)| file.to_string());
     let outermost = tree.item(top_level).name;
-    let mut candidates: Vec<String> = recorded.into_iter().collect();
+    let mut file_names: Vec<String> = recorded_file.into_iter().collect();
     for extension in ["java", "kt"] {
-        candidates.push(format!("{prefix}{outermost}.{extension}"));
+        file_names.push(format!("{outermost}.{extension}"));
     }
-    // Then every source file of the package directory.
+    let mut candidates: Vec<String> = file_names
+        .iter()
+        .map(|file| format!("{prefix}{file}"))
+        .collect();
+    // Then every source file of the package directory, then — for archives
+    // laid out by source set (`commonMain/kotlin/…`, `jvmMain/…`, or
+    // `generated/` as the standard library has them) — files of the same
+    // name anywhere, those under a directory ending in the package's first.
+    let mut elsewhere: Vec<(bool, String)> = Vec::new();
     for index in 0..archive.len() {
         let Some(name) = archive.name(index) else {
             continue;
@@ -569,8 +577,21 @@ pub fn library_declaration_source(
         });
         if in_directory && !candidates.iter().any(|candidate| candidate == name) {
             candidates.push(name.to_owned());
+            continue;
+        }
+        let file_name = name.rsplit('/').next().unwrap_or(name);
+        if file_names.iter().any(|wanted| wanted == file_name)
+            && !candidates.iter().any(|candidate| candidate == name)
+        {
+            let under_package = !prefix.is_empty() && name.contains(&format!("/{prefix}"));
+            elsewhere.push((!under_package, name.to_owned()));
         }
     }
+    // JVM sources before common ones: they hold the `actual` declarations.
+    elsewhere.sort_by_key(|(not_under_package, name)| {
+        (*not_under_package, !name.starts_with("jvm"), name.clone())
+    });
+    candidates.extend(elsewhere.into_iter().map(|(_, name)| name));
     let names: Vec<(Name, bool)> = chain
         .iter()
         .map(|index| {
