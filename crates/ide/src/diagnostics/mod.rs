@@ -3,7 +3,7 @@
 //! `docs/spec/diagnostics.md`).
 
 mod facts;
-mod imports;
+pub(crate) mod imports;
 mod package;
 
 use hir::{FileId, RootDatabase, SourceDatabase};

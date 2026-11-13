@@ -7,7 +7,7 @@ use crate::NavigationTarget;
 
 /// How well a name matches; lower is better.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum MatchQuality {
+pub(crate) enum MatchQuality {
     Exact,
     Prefix,
     CamelHumps,
@@ -47,7 +47,7 @@ pub(crate) fn workspace_symbols(
         .collect()
 }
 
-fn match_quality(name: &str, query: &str) -> Option<MatchQuality> {
+pub(crate) fn match_quality(name: &str, query: &str) -> Option<MatchQuality> {
     if name == query {
         return Some(MatchQuality::Exact);
     }

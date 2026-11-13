@@ -58,10 +58,14 @@ impl Inferrer<'_> {
                 if whole_enum_covered {
                     Vec::new()
                 } else {
+                    let enum_name = subject_type
+                        .class()
+                        .map(|class| crate::display::class_name(self.db, class.class))
+                        .unwrap_or_default();
                     entries
                         .into_iter()
                         .filter(|entry| !covered.declarations.contains(entry))
-                        .map(|entry| self.item_name(entry))
+                        .map(|entry| format!("{enum_name}.{}", self.item_name(entry)))
                         .collect()
                 }
             }

@@ -7,6 +7,7 @@
 //! the background and reports progress.
 
 mod convert;
+mod editing;
 mod handlers;
 mod library_sources;
 mod settings;
@@ -76,6 +77,30 @@ fn capabilities() -> ServerCapabilities {
         definition_provider: Some(OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        completion_provider: Some(lsp_types::CompletionOptions {
+            trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
+            ..lsp_types::CompletionOptions::default()
+        }),
+        signature_help_provider: Some(lsp_types::SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+            retrigger_characters: Some(vec![",".to_owned()]),
+            ..lsp_types::SignatureHelpOptions::default()
+        }),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+        })),
+        folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+        semantic_tokens_provider: Some(
+            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                lsp_types::SemanticTokensOptions {
+                    legend: editing::semantic_tokens_legend(),
+                    full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                    ..lsp_types::SemanticTokensOptions::default()
+                },
+            ),
+        ),
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),

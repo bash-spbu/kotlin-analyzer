@@ -191,6 +191,9 @@ impl Inferrer<'_> {
     /// a top-level property, an object or class (as a qualifier), or a
     /// package.
     pub(super) fn identifier(&mut self, node: SyntaxNode<'_>) -> Typed {
+        if self.probed(node) {
+            self.capture(None);
+        }
         let name = self.name(node);
         if let Some(local) = self.lookup_local(name) {
             let ty = self.local_type(local);
@@ -385,6 +388,9 @@ impl Inferrer<'_> {
             // `Foo::class` and the like.
             return Typed::Value(Ty::Unknown);
         };
+        if self.probed(name_node) {
+            self.capture(Some(&receiver));
+        }
         let name = self.name(name_node);
         if has_token(suffix, "::") {
             return Typed::Value(self.member_reference(&receiver, name_node, name));

@@ -15,7 +15,7 @@ use lsp_types::{
 };
 use vfs::{FileId, LineIndex};
 
-use super::{convert, library_sources};
+use super::{convert, editing, library_sources};
 
 /// What a request needs from the main thread.
 pub(super) struct Snapshot {
@@ -52,6 +52,7 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
         }
         WorkspaceSymbolRequest::METHOD => params::<WorkspaceSymbolRequest>(request)
             .map(|params| workspace_symbols(&snapshot, &params.query)),
+        method if editing::handles(method) => editing::handle(&snapshot, request),
         method => {
             return Response::new_err(
                 id,

@@ -9,19 +9,19 @@ empty until it has loaded.
 | request | answers |
 |---|---|
 | `textDocument/definition`, `declaration` | the declaration(s) the name at the cursor means; in a library, the location inside its source (sources JAR entry or JDK `src.zip` entry, materialised under the cache directory) |
-| `textDocument/implementation` | on a class or interface: its subclasses; on a function or property: its overrides |
+| `textDocument/implementation` | *(not yet)* on a class or interface: its subclasses; on a function or property: its overrides |
 | `textDocument/hover` | the declaration's signature in a `kotlin` code block, its KDoc/Javadoc, where it is declared (`package.Class`), a deprecation note; on an expression without declaration (`it`, a lambda parameter): its inferred type |
-| `textDocument/completion` (+ `completionItem/resolve`) | after `.`: members and applicable extensions of the receiver's type; elsewhere: everything in scope, then importable names with an auto-import edit; inside a call's parentheses: parameter names (`name =`). Ranked by exact prefix, then camel-case humps, then substring. Documentation is filled in on resolve |
-| `textDocument/signatureHelp` | the overloads of the call around the cursor, the active one, the active parameter (named arguments respected) |
-| `textDocument/references` | every reference to the declaration at the cursor across the workspace (not libraries), optionally with the declaration |
-| `textDocument/prepareRename`, `rename` | rename of a local, a parameter, or a workspace declaration with all its references; refused for library declarations and with a message when the target is ambiguous |
-| `textDocument/documentHighlight` | references in the current file; the declaration and assignments as *write*, other uses as *read* |
+| `textDocument/completion` | after `.`: the receiver's members (its class's first, `Any`'s last), Java getters as properties, then the extensions in scope it can use; after `Class.`: nested classes, enum entries, statics, companion members; elsewhere: locals (smart casts applied), the implicit receivers' members, declarations in scope, then — from two typed characters on — declarations not imported yet, with the import as an additional edit; in a type: classes only; in an import: the package's declarations. Matched by prefix, camel-case humps or substring. The scope is the one inference has at the cursor (a placeholder name is parsed there when none is typed yet). *(Later: parameter names, documentation on resolve.)* |
+| `textDocument/signatureHelp` | the signatures the callee may have (a class's constructors), the one with room for the argument at the cursor, the active parameter (named arguments and `vararg` respected) — also while the `)` isn't typed yet |
+| `textDocument/references` | every reference to the declaration (or local) at the cursor in the workspace's Kotlin files, optionally with the declaration: files spelling the name are searched and each occurrence is resolved, so a same-named declaration elsewhere isn't counted. *(Not yet: uses from Java files, Java getters used as properties.)* |
+| `textDocument/prepareRename`, `rename` | renames a local, a parameter or a Kotlin declaration of the workspace with all its references; refused for library and Java declarations and for a name that isn't a plain identifier (keywords included) |
+| `textDocument/documentHighlight` | *(not yet)* references in the current file; the declaration and assignments as *write*, other uses as *read* |
 | `textDocument/documentSymbol` | the file's declarations as a tree |
 | `workspace/symbol` | workspace declarations (and, for queries of 3+ characters, library classes) matching the query fuzzily |
-| `textDocument/foldingRange` | blocks, import list, comment runs |
-| `textDocument/semanticTokens/full`, `/range` | classification of identifiers by what they resolve to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, annotation; modifiers: declaration, readonly (val), static (companion/object/Java static), deprecated, defaultLibrary (declared in a library) |
+| `textDocument/foldingRange` | multi-line class and function bodies, blocks, lambdas, `when`s, the import list, block comments (a body and its block fold once) |
+| `textDocument/semanticTokens/full` | every name classified by what it resolves to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace; modifiers: declaration, readonly (`val`, non-`var` locals), static, deprecated. *(Later: `/range`, annotation, defaultLibrary.)* |
 | `textDocument/inlayHint` | inferred types of local `val`/`var` (and destructured components) that write no type, except where a constructor call makes it obvious (`val box = Box(…)`); later: lambda parameters and `it`, expression-bodied functions |
-| `textDocument/codeAction` | the fixes of the diagnostics in the range: "Import `a.b.C`", "Remove the unused import", "Add `package …`" |
+| `textDocument/codeAction` | the fixes of the diagnostics in the range: "Import `a.b.C`", "Remove the unused import", "Add `package …`", "Add the missing branches" (of a `when`, each `case -> TODO()`) |
 | `textDocument/publishDiagnostics` | see diagnostics.md; published with the document version they were computed for |
 
 `workspace/executeCommand`: `kotlin-analyzer.reloadWorkspace` — reload the

@@ -313,6 +313,61 @@ impl<'db> Types<'db> {
         defaults
     }
 
+    /// Every function and property a value of type `receiver` has, the
+    /// most derived first; overridden ones left out.
+    pub fn all_members(&self, receiver: &Ty) -> Vec<Member> {
+        let mut found: Vec<(Member, Name, MemberShape)> = Vec::new();
+        for holder in self.member_holders(receiver) {
+            for class_type in self.all_supertypes(&holder) {
+                let tree = item_tree(self.db, class_type.class.container);
+                let from_nearer_classes = found.len();
+                let substitution = class_substitution(&class_type);
+                for child in tree.item(class_type.class.item).children.iter() {
+                    let item = tree.item(*child);
+                    if item.modifiers.contains(Modifiers::STATIC) {
+                        continue;
+                    }
+                    let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
+                        continue;
+                    };
+                    let overridden = found[..from_nearer_classes]
+                        .iter()
+                        .any(|(_, name, known)| *name == item.name && *known == shape);
+                    if overridden {
+                        continue;
+                    }
+                    found.push((
+                        Member {
+                            location: ItemLocation {
+                                container: class_type.class.container,
+                                item: *child,
+                            },
+                            substitution: substitution.clone(),
+                        },
+                        item.name,
+                        shape,
+                    ));
+                }
+            }
+        }
+        found.into_iter().map(|(member, _, _)| member).collect()
+    }
+
+    /// The property name Kotlin gives a Java getter (`getTitle` → `title`,
+    /// `isOpen` → `open`), when `member` is one.
+    pub fn java_property_name(&self, member: ItemLocation) -> Option<String> {
+        if !is_java_getter(self.db, member) {
+            return None;
+        }
+        let tree = item_tree(self.db, member.container);
+        let name = tree.item(member.item).name.as_str();
+        let rest = name
+            .strip_prefix("get")
+            .or_else(|| name.strip_prefix("is"))?;
+        let first = rest.chars().next().filter(|first| first.is_uppercase())?;
+        Some(first.to_lowercase().chain(rest.chars().skip(1)).collect())
+    }
+
     /// The getter a Java class has for the property `name` Kotlin lets you
     /// write (`user.name` for `getName()`, `user.active` for `isActive()`).
     pub fn java_getters(&self, receiver: &Ty, name: Name) -> Vec<Member> {

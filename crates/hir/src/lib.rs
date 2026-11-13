@@ -5,7 +5,10 @@ pub use base_db::{
     ArchiveKind, FileChange, FileId, IndexedLibrary, Language, LibrarySource, ProjectModel,
     RootDatabase, SourceDatabase, SourceFile, SourceSetId, parse, salsa,
 };
-pub use hir_def::def_map::{packages_declaring, visible_top_level};
+pub use hir_def::def_map::{
+    importable_names, package_exists, package_names, package_prefix_exists, packages_declaring,
+    visible_top_level,
+};
 pub use hir_def::item_tree::{
     ClassKind, Import, ImportTarget, Item, ItemIndex, ItemKind, ItemTree, Modifiers, Parameter,
     Signature, TypeArgument, TypeRef, Visibility,
@@ -13,13 +16,18 @@ pub use hir_def::item_tree::{
 pub use hir_def::library::{
     LibrarySourceLocation, index_library, library_declaration_source, release_letter,
 };
-pub use hir_def::resolver::{Resolution, resolve_import_path, resolve_type_path};
+pub use hir_def::resolver::{
+    DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, resolve_import_path,
+    resolve_type_path,
+};
 pub use hir_def::{ItemContainer, ItemLocation, file_item_tree, item_tree, source_set_def_map};
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
     NonExhaustiveWhen, Reference, ResolvedName, UnresolvedName, UnsafeCall, declaration_type,
     infer_file,
 };
+pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
+pub use hir_ty::members::{Member, Types};
 pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};
 

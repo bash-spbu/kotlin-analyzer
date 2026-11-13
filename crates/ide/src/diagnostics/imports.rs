@@ -253,14 +253,14 @@ fn matches(
 }
 
 /// Where a new import goes.
-struct ImportPlacement {
+pub(crate) struct ImportPlacement {
     offset: usize,
     /// Blank line needed before (after a `package` line, no imports yet).
     after_package: bool,
 }
 
 impl ImportPlacement {
-    fn of(parse: &Parse) -> ImportPlacement {
+    pub(crate) fn of(parse: &Parse) -> ImportPlacement {
         let root = parse.root();
         let last_import = syntax::descendants(root)
             .filter(|node| node.kind() == "import_header")
@@ -283,7 +283,7 @@ impl ImportPlacement {
         }
     }
 
-    fn edit(&self, qualified: &str) -> TextEdit {
+    pub(crate) fn edit(&self, qualified: &str) -> TextEdit {
         let new_text = if self.after_package {
             format!("\nimport {qualified}\n")
         } else if self.offset == 0 {

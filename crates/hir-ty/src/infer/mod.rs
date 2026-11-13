@@ -16,6 +16,7 @@
 //! on this stay silent instead of guessing.
 
 mod call;
+mod completion;
 mod declarations;
 mod exhaustiveness;
 mod expressions;
@@ -32,6 +33,7 @@ use syntax::{Language, TextRange};
 
 use crate::ty::Ty;
 
+pub use completion::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use fit::Fit;
 
 /// A local declaration: a `val`/`var` in a body, a parameter, a lambda's

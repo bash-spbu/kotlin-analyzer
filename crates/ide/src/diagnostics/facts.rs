@@ -1,9 +1,10 @@
 //! Checks that render facts inference recorded: calls no candidate takes,
 //! unsafe calls on nullable receivers, non-exhaustive `when`s.
 
-use hir::{RootDatabase, SourceFile};
+use hir::{NonExhaustiveWhen, RootDatabase, SourceFile};
+use syntax::{Parse, TextRange, has_token};
 
-use super::{Check, Diagnostic, DiagnosticsConfig};
+use super::{Check, Diagnostic, DiagnosticsConfig, Fix, TextEdit};
 
 pub(super) fn diagnostics(
     db: &RootDatabase,
@@ -52,9 +53,59 @@ pub(super) fn diagnostics(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                fixes: Vec::new(),
+                fixes: fill_when(&hir::parse(db, file), when).into_iter().collect(),
             });
         }
     }
     found
+}
+
+/// Adds the missing branches, each `case -> TODO()`, before the `when`'s
+/// closing brace.
+fn fill_when(parse: &Parse, when: &NonExhaustiveWhen) -> Option<Fix> {
+    let start = when.range.start as usize;
+    let node = parse
+        .root()
+        .descendant_for_byte_range(start, start + 1)
+        .and_then(|mut node| {
+            while node.kind() != "when_expression" {
+                node = node.parent()?;
+            }
+            Some(node)
+        })?;
+    if !has_token(node, "}") {
+        return None;
+    }
+    let text = parse.text();
+    let close = node.end_byte() - 1;
+    let line_start = text[..close].rfind('\n').map_or(0, |newline| newline + 1);
+    let before_brace = &text[line_start..close];
+    let edit = if before_brace.trim().is_empty() {
+        // `}` on its own line: branches go above it, indented one level in.
+        let indent = format!("{before_brace}    ");
+        let branches: String = when
+            .missing
+            .iter()
+            .map(|case| format!("{indent}{case} -> TODO()\n"))
+            .collect();
+        TextEdit {
+            range: TextRange::new(line_start, line_start),
+            new_text: branches,
+        }
+    } else {
+        let branches: String = when
+            .missing
+            .iter()
+            .map(|case| format!("; {case} -> TODO()"))
+            .collect();
+        let trimmed = text[..close].trim_end().len();
+        TextEdit {
+            range: TextRange::new(trimmed, trimmed),
+            new_text: branches,
+        }
+    };
+    Some(Fix {
+        label: "Add the missing branches".to_owned(),
+        edits: vec![edit],
+    })
 }

@@ -5,12 +5,17 @@
 //! while a snapshot is still computing, that computation is cancelled and
 //! its call returns `Err(Cancelled)` — the editor asks again.
 
+mod completion;
 mod diagnostics;
 mod document_symbols;
+mod folding;
 mod goto_definition;
 mod hover;
 mod inlay_hints;
 mod navigation_target;
+mod references;
+mod semantic_tokens;
+mod signature_help;
 mod statistics;
 mod workspace_symbols;
 
@@ -20,12 +25,17 @@ use std::sync::Arc;
 use hir::{FileChange, FileId, ProjectModel, RootDatabase, SourceDatabase};
 use syntax::{SyntaxError, TextRange};
 
+pub use completion::{CompletionItem, CompletionKind, Completions};
 pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stability, TextEdit};
 pub use document_symbols::DocumentSymbol;
+pub use folding::{Fold, FoldKind};
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
 pub use inlay_hints::InlayHint;
 pub use navigation_target::{NavigationFile, NavigationTarget, SymbolKind};
+pub use references::{FileRange, RenameError, SourceChange};
+pub use semantic_tokens::{SemanticToken, TokenKind, TokenModifiers};
+pub use signature_help::{SignatureHelp, SignatureInformation};
 pub use statistics::{BodyStatistics, DeclarationStatistics, UnsettledName};
 
 /// A result that a newer change may have cancelled.
@@ -94,6 +104,59 @@ impl Analysis {
             Some(source) => hir::parse(db, source).errors(),
             None => Vec::new(),
         })
+    }
+
+    /// What can be written at `offset`.
+    pub fn completions(&self, file: FileId, offset: usize) -> Cancellable<Completions> {
+        self.with_db(|db| completion::completions(db, file, offset))
+    }
+
+    /// Every place the name at `offset` refers to the same thing.
+    pub fn references(
+        &self,
+        file: FileId,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Cancellable<Vec<FileRange>> {
+        self.with_db(|db| references::references(db, file, offset, include_declaration))
+    }
+
+    /// The range of the name at `offset` when it can be renamed.
+    pub fn prepare_rename(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Result<TextRange, RenameError>> {
+        self.with_db(|db| references::prepare_rename(db, file, offset))
+    }
+
+    /// The edits renaming the name at `offset` everywhere.
+    pub fn rename(
+        &self,
+        file: FileId,
+        offset: usize,
+        new_name: &str,
+    ) -> Cancellable<Result<SourceChange, RenameError>> {
+        self.with_db(|db| references::rename(db, file, offset, new_name))
+    }
+
+    /// What each name in `file` is, for colouring.
+    pub fn semantic_tokens(&self, file: FileId) -> Cancellable<Vec<SemanticToken>> {
+        self.with_db(|db| semantic_tokens::semantic_tokens(db, file))
+    }
+
+    /// The regions of `file` an editor can fold.
+    pub fn folding_ranges(&self, file: FileId) -> Cancellable<Vec<Fold>> {
+        self.with_db(|db| folding::folding_ranges(db, file))
+    }
+
+    /// The signatures of the call around `offset`.
+    pub fn signature_help(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Option<SignatureHelp>> {
+        self.with_db(|db| signature_help::signature_help(db, file, offset))
     }
 
     /// The diagnostics of `file` the configuration enables.

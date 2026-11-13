@@ -851,7 +851,7 @@ fun narrowed(color: Color) {
 }
 "#,
         expect![[r#"
-            when@9 missing BLUE
+            when@9 missing Color.BLUE
             when@11 missing is Square
             when@13 missing false
             when@14 missing null"#]],

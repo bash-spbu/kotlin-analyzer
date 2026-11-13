@@ -70,6 +70,8 @@ pub(crate) struct Inferrer<'db> {
     pub(super) depth: u32,
     /// How many scopes of unknown shape enclose the walk.
     uncertain_scopes: u32,
+    /// For completion: the position whose scope to capture.
+    pub(super) probe: Option<super::completion::Probe>,
 }
 
 impl<'db> Inferrer<'db> {
@@ -96,6 +98,7 @@ impl<'db> Inferrer<'db> {
             depth: 0,
             // A script's implicit receivers (Gradle's DSL) aren't modelled.
             uncertain_scopes: u32::from(is_script(parse)),
+            probe: None,
         }
     }
 
@@ -115,8 +118,12 @@ impl<'db> Inferrer<'db> {
 
     /// The workspace declaration a node declares.
     pub(super) fn item_of(&self, node: SyntaxNode<'_>) -> Option<ItemLocation> {
+        let range = TextRange {
+            start: self.original_offset(node.start_byte() as u32),
+            end: self.original_offset(node.end_byte() as u32),
+        };
         self.items_by_range
-            .get(&TextRange::of(node))
+            .get(&range)
             .map(|index| ItemLocation::in_file(self.file, *index))
     }
 
@@ -318,6 +325,30 @@ impl<'db> Inferrer<'db> {
             inside_function |= scope.kind == ScopeKind::Function;
         }
         None
+    }
+
+    pub(super) fn local_declaration(&self, local: LocalId) -> &Local {
+        self.result.local(local)
+    }
+
+    /// Every local visible here, innermost first; a shadowed one left out.
+    pub(super) fn visible_locals(&self) -> Vec<LocalId> {
+        let mut visible: Vec<LocalId> = Vec::new();
+        let mut seen: Vec<Name> = Vec::new();
+        let mut inside_function = false;
+        for scope in self.scopes.iter().rev() {
+            let hidden = inside_function && scope.kind == ScopeKind::ConstructorParameters;
+            if !hidden {
+                for (name, id) in scope.names.iter().rev() {
+                    if !seen.contains(name) {
+                        seen.push(*name);
+                        visible.push(*id);
+                    }
+                }
+            }
+            inside_function |= scope.kind == ScopeKind::Function;
+        }
+        visible
     }
 
     /// A local's type here: its declared or inferred type, or what a smart

@@ -132,6 +132,9 @@ impl<'db> Inferrer<'db> {
         type_arguments: &[Ty],
         expected: Option<&Ty>,
     ) -> Ty {
+        if self.probed(callee) {
+            self.capture(None);
+        }
         let name = self.name(callee);
         if let Some(local) = self.lookup_local(name) {
             let local_type = self.local_type(local);
@@ -184,6 +187,9 @@ impl<'db> Inferrer<'db> {
             self.type_remaining(arguments);
             return Ty::Unknown;
         };
+        if self.probed(name_node) {
+            self.capture(Some(&receiver));
+        }
         let name = self.name(name_node);
         // `block.invoke(…)` / `block?.invoke(…)` calls the function value.
         if let Typed::Value(Ty::Function(function)) = &receiver

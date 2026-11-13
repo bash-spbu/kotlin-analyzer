@@ -48,6 +48,14 @@ impl DefMap {
         self.packages.keys()
     }
 
+    /// The top-level names of `package`.
+    pub fn package_names(&self, package: &Path) -> impl Iterator<Item = Name> + '_ {
+        self.packages
+            .get(package)
+            .into_iter()
+            .flat_map(|scope| scope.keys().copied())
+    }
+
     /// Every package with its top-level names.
     pub fn names(&self) -> impl Iterator<Item = (&Path, Name)> {
         self.packages
@@ -255,6 +263,44 @@ pub fn packages_declaring(db: &dyn SourceDatabase, from: SourceFile, name: Name)
     packages
 }
 
+/// The top-level names of `package` that `from` sees (from its source
+/// sets and classpath), each once.
+pub fn package_names(db: &dyn SourceDatabase, from: SourceFile, package: &Path) -> Vec<Name> {
+    let mut names: Vec<Name> = Vec::new();
+    if let Some(source_set) = source_set_input(db, from) {
+        for def_map in visible_def_maps(db, source_set).iter() {
+            names.extend(def_map.package_names(package));
+        }
+    }
+    for library_package in classpath_packages(db, from, package) {
+        names.extend(library_package.names(db).iter().copied());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every top-level name with the packages declaring it that `from` sees —
+/// what completion can offer to import.
+pub fn importable_names(db: &dyn SourceDatabase, from: SourceFile) -> Vec<(Name, Path)> {
+    let mut importable = Vec::new();
+    let Some(source_set) = source_set_input(db, from) else {
+        return importable;
+    };
+    for (name, packages) in workspace_names(db, source_set).iter() {
+        importable.extend(packages.iter().map(|package| (*name, package.clone())));
+    }
+    let positions = classpath_positions(db, source_set);
+    for (name, declaring) in library_names(db).iter() {
+        for library_package in declaring {
+            if positions.contains_key(&library_package.library(db)) {
+                importable.push((*name, library_package.package(db).clone()));
+            }
+        }
+    }
+    importable
+}
+
 /// Where each library is on a source set's classpath (the JDK first).
 #[salsa::tracked(returns(clone))]
 pub fn classpath_positions(
@@ -311,7 +357,7 @@ fn classpath_packages(
         .collect()
 }
 
-fn source_set_input(db: &dyn SourceDatabase, file: SourceFile) -> Option<SourceSet> {
+pub fn source_set_input(db: &dyn SourceDatabase, file: SourceFile) -> Option<SourceSet> {
     let id = file.source_set(db)?;
     db.workspace().source_sets(db).get(id.0 as usize).copied()
 }
