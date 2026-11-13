@@ -6,7 +6,7 @@ use std::rc::Rc;
 use base_db::{SourceDatabase, SourceFile};
 use hir_def::item_tree::{ItemKind, kotlin_type_ref};
 use hir_def::resolver::top_level_levels;
-use hir_def::{ItemIndex, ItemLocation, file_item_tree};
+use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::FxHashMap;
 use syntax::ast::AstNode;
@@ -76,7 +76,7 @@ pub(crate) struct Inferrer<'db> {
     pub(super) db: &'db dyn SourceDatabase,
     pub(super) file: SourceFile,
     pub(super) parse: &'db Parse,
-    items_by_range: FxHashMap<TextRange, ItemIndex>,
+    items_by_range: FxHashMap<TextRange, ItemId>,
     scopes: Vec<Scope>,
     pub(super) receivers: Vec<ImplicitReceiver>,
     result: InferenceResult,
@@ -95,9 +95,10 @@ impl<'db> Inferrer<'db> {
         parse: &'db Parse,
     ) -> Inferrer<'db> {
         let tree = file_item_tree(db, file);
+        let source_map = hir_def::file_item_source_map(db, file);
         let items_by_range = tree
             .indexed_items()
-            .map(|(index, item)| (item.range, index))
+            .map(|(item, _)| (source_map.ranges(item).range, item))
             .collect();
         Inferrer {
             types: Types::new(db, file),
@@ -180,7 +181,7 @@ impl<'db> Inferrer<'db> {
         let type_ref = kotlin_type_ref(self.parse, node);
         lower_type(
             self.db,
-            TypeScope::written_in(self.db, self.file),
+            TypeScope::written_at(self.db, self.file, node.start_byte()),
             &type_ref,
         )
     }

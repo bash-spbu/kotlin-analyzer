@@ -10,17 +10,20 @@ pub use hir_def::def_map::{
     visible_top_level,
 };
 pub use hir_def::item_tree::{
-    ClassKind, Import, ImportTarget, Item, ItemIndex, ItemKind, ItemTree, Modifiers, Parameter,
-    Signature, TypeArgument, TypeRef, Visibility,
+    ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
+    Modifiers, Parameter, Signature, TypeArgument, TypeRef, Visibility,
 };
 pub use hir_def::library::{
     LibrarySourceLocation, index_library, library_declaration_source, release_letter,
 };
 pub use hir_def::resolver::{
     DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, resolve_import_path,
-    resolve_type_path,
+    resolve_type_path, resolve_type_path_in_declaration,
 };
-pub use hir_def::{ItemContainer, ItemLocation, file_item_tree, item_tree, source_set_def_map};
+pub use hir_def::{
+    ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,
+    source_set_def_map,
+};
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
     NonExhaustiveWhen, Reference, ResolvedName, UnresolvedName, UnsafeCall, declaration_type,

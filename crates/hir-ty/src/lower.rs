@@ -5,7 +5,10 @@
 
 use base_db::{SourceDatabase, SourceFile};
 use hir_def::item_tree::{ItemKind, Modifiers, Signature, TypeArgument, TypeRef};
-use hir_def::resolver::{Resolution, resolve_qualified, resolve_supertype, resolve_type_path};
+use hir_def::resolver::{
+    Resolution, resolve_qualified, resolve_supertype, resolve_type_path,
+    resolve_type_path_in_declaration,
+};
 use hir_def::{ItemContainer, ItemLocation, item_tree};
 use intern::{Name, Path};
 
@@ -14,29 +17,58 @@ use crate::ty::{ClassType, FunctionType, Nullability, Substitution, Ty, TypePara
 /// Where a written type is read.
 #[derive(Clone, Copy, Debug)]
 pub struct TypeScope {
-    /// For a type written in a workspace file, that file (names resolve at
-    /// the type's own position there); for a library's, the file asking,
-    /// whose classpath its fully qualified names resolve through.
+    /// For a type written in a workspace file, that file; for a library's,
+    /// the file asking, whose classpath its fully qualified names resolve
+    /// through.
     pub from: SourceFile,
-    /// The declaration whose signature holds the type: a library type
-    /// names its type parameters only by name, declared by it or by a class
-    /// around it.
-    pub owner: Option<ItemLocation>,
+    pub site: TypeSite,
     /// Declared in Java: nullability unknown.
     pub platform: bool,
 }
 
+/// Where in its file a type is written: what's in scope for its names.
+#[derive(Clone, Copy, Debug)]
+pub enum TypeSite {
+    /// In a declaration's signature: it and the declarations around it (a
+    /// library type names its type parameters only by name, declared by it
+    /// or by a class around it).
+    Declaration(ItemLocation),
+    /// At an offset of the file's text: in a body.
+    Offset(usize),
+}
+
 impl TypeScope {
-    /// Where the types in `location`'s signature are read.
-    /// A type written in `file`'s text (inside a body, say).
-    pub fn written_in(db: &dyn SourceDatabase, file: SourceFile) -> TypeScope {
+    /// A type written at `offset` in `file`'s text (inside a body, say).
+    pub fn written_at(db: &dyn SourceDatabase, file: SourceFile, offset: usize) -> TypeScope {
         TypeScope {
             from: file,
-            owner: None,
+            site: TypeSite::Offset(offset),
             platform: file.language(db) == syntax::Language::Java,
         }
     }
 
+    /// The declaration whose signature holds the type, if it is in one.
+    fn owner(self) -> Option<ItemLocation> {
+        match self.site {
+            TypeSite::Declaration(location) => Some(location),
+            TypeSite::Offset(_) => None,
+        }
+    }
+
+    /// What `path` names here.
+    fn resolve(self, db: &dyn SourceDatabase, path: &Path) -> Resolution {
+        match self.site {
+            TypeSite::Declaration(ItemLocation {
+                container: ItemContainer::File(file),
+                item,
+            }) => resolve_type_path_in_declaration(db, file, path, item),
+            // A compiled signature's names are fully qualified.
+            TypeSite::Declaration(_) => resolve_type_path(db, self.from, path, 0),
+            TypeSite::Offset(offset) => resolve_type_path(db, self.from, path, offset),
+        }
+    }
+
+    /// Where the types in `location`'s signature are read.
     pub fn of_declaration(
         db: &dyn SourceDatabase,
         from: SourceFile,
@@ -45,7 +77,7 @@ impl TypeScope {
         match location.container {
             ItemContainer::File(file) => TypeScope {
                 from: file,
-                owner: Some(location),
+                site: TypeSite::Declaration(location),
                 platform: file.language(db) == syntax::Language::Java,
             },
             ItemContainer::Library(_) => {
@@ -53,7 +85,7 @@ impl TypeScope {
                 let item = tree.item(location.item);
                 TypeScope {
                     from,
-                    owner: Some(location),
+                    site: TypeSite::Declaration(location),
                     platform: item.modifiers.contains(Modifiers::PLATFORM),
                 }
             }
@@ -140,19 +172,14 @@ pub fn lower_type(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef)
 
 fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: usize) -> Ty {
     match type_ref {
-        TypeRef::Named {
-            segments,
-            nullable,
-            range,
-        } => {
+        TypeRef::Named { segments, nullable } => {
             let nullability = nullability(scope, *nullable);
             let path = Path::new(segments.iter().map(|segment| segment.name));
-            let position = range.start as usize;
             let arguments = segments
                 .last()
                 .map(|segment| lower_arguments(db, scope, &segment.arguments, depth))
                 .unwrap_or_default();
-            match resolve_type_path(db, scope.from, &path, position) {
+            match scope.resolve(db, &path) {
                 Resolution::Declaration(class) => {
                     class_type(db, scope, class, arguments, nullability, depth)
                 }
@@ -344,7 +371,7 @@ fn type_parameter_named(
     scope: TypeScope,
     name: Name,
 ) -> Option<TypeParameterId> {
-    let owner = scope.owner?;
+    let owner = scope.owner()?;
     let tree = item_tree(db, owner.container);
     let mut current = Some(owner.item);
     while let Some(index) = current {

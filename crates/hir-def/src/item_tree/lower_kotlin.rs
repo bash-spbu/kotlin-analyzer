@@ -11,17 +11,18 @@ use syntax::ast::kotlin::{
 use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use super::{
-    ClassKind, Import, ImportTarget, Item, ItemIndex, ItemKind, ItemTree, Modifiers, Parameter,
-    Signature, TypeArgument, TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
+    ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
+    ItemTreeBuilder, Modifiers, Parameter, Signature, TypeArgument, TypeParameter, TypeRef,
+    TypeSegment, Variance, Visibility,
 };
 
-pub(crate) fn lower_kotlin(parse: &Parse) -> ItemTree {
+pub(crate) fn lower_kotlin(parse: &Parse) -> (ItemTree, ItemSourceMap) {
     let Some(file) = SourceFile::cast(parse.root()) else {
-        return ItemTree::default();
+        return (ItemTree::default(), ItemSourceMap::default());
     };
     let mut lowering = Lowering {
         parse,
-        items: Vec::new(),
+        builder: ItemTreeBuilder::default(),
     };
     let package = file
         .package_header()
@@ -36,13 +37,9 @@ pub(crate) fn lower_kotlin(parse: &Parse) -> ItemTree {
         .declarations()
         .filter_map(|declaration| lowering.declaration(declaration, None, Container::File))
         .collect();
-    ItemTree {
-        package,
-        source_files: Box::new([]),
-        imports,
-        items: lowering.items.into_boxed_slice(),
-        top_level,
-    }
+    lowering
+        .builder
+        .finish(package, imports, top_level, Vec::new())
 }
 
 /// A type written in a Kotlin file (a type node: `user_type`,
@@ -51,7 +48,7 @@ pub(crate) fn lower_kotlin(parse: &Parse) -> ItemTree {
 pub fn kotlin_type_ref(parse: &Parse, node: SyntaxNode<'_>) -> TypeRef {
     let lowering = Lowering {
         parse,
-        items: Vec::new(),
+        builder: ItemTreeBuilder::default(),
     };
     lowering.type_ref(node)
 }
@@ -66,7 +63,7 @@ enum Container {
 
 struct Lowering<'parse> {
     parse: &'parse Parse,
-    items: Vec<Item>,
+    builder: ItemTreeBuilder,
 }
 
 /// An item about to be added, before its children are known.
@@ -95,7 +92,8 @@ impl<'parse> Lowering<'parse> {
         Path::new(segments.map(|segment| self.name(segment)))
     }
 
-    fn import(&self, import: syntax::ast::kotlin::ImportHeader<'_>) -> Option<Import> {
+    /// An import and its path's range.
+    fn import(&self, import: syntax::ast::kotlin::ImportHeader<'_>) -> Option<(Import, TextRange)> {
         let path_node = import.path()?;
         let target = if import.is_wildcard() {
             ImportTarget::Everything
@@ -104,40 +102,41 @@ impl<'parse> Lowering<'parse> {
                 alias: import.alias().map(|alias| self.name(alias)),
             }
         };
-        Some(Import {
+        let import = Import {
             path: self.dotted(path_node.segments()),
             target,
-            range: path_node.range(),
-        })
+        };
+        Some((import, path_node.range()))
     }
 
-    fn push(&mut self, item: NewItem, parent: Option<ItemIndex>) -> ItemIndex {
-        let index = ItemIndex(self.items.len() as u32);
-        self.items.push(Item {
+    fn push(&mut self, item: NewItem, parent: Option<ItemId>) -> ItemId {
+        let ranges = ItemRanges {
+            range: item.range,
+            name_range: item.name_range,
+        };
+        let new = Item {
             name: item.name,
             kind: item.kind,
-            name_range: item.name_range,
-            range: item.range,
             parent,
             children: Box::new([]),
             visibility: item.visibility,
             modifiers: item.modifiers,
             type_parameters: item.type_parameters,
             signature: item.signature,
-        });
-        index
+        };
+        self.builder.push(new, ranges)
     }
 
-    fn set_children(&mut self, parent: ItemIndex, children: Vec<ItemIndex>) {
-        self.items[parent.0 as usize].children = children.into_boxed_slice();
+    fn set_children(&mut self, parent: ItemId, children: Vec<ItemId>) {
+        self.builder.set_children(parent, children);
     }
 
     fn declaration(
         &mut self,
         declaration: Declaration<'_>,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         container: Container,
-    ) -> Option<ItemIndex> {
+    ) -> Option<ItemId> {
         match declaration {
             Declaration::Class(class) => self.class(class, parent),
             Declaration::Object(object) => self.object(object, parent),
@@ -169,7 +168,7 @@ impl<'parse> Lowering<'parse> {
                 let keyword = keyword_range(constructor.syntax(), "constructor")
                     .unwrap_or_else(|| TextRange::of(constructor.syntax()));
                 let item = NewItem {
-                    name: self.items[parent_index.0 as usize].name,
+                    name: self.builder.item(parent_index).name,
                     kind: ItemKind::Constructor,
                     name_range: keyword,
                     range: TextRange::of(constructor.syntax()),
@@ -201,11 +200,7 @@ impl<'parse> Lowering<'parse> {
         }
     }
 
-    fn class(
-        &mut self,
-        class: ClassDeclaration<'_>,
-        parent: Option<ItemIndex>,
-    ) -> Option<ItemIndex> {
+    fn class(&mut self, class: ClassDeclaration<'_>, parent: Option<ItemId>) -> Option<ItemId> {
         let name_node = class.name()?;
         let container = if parent.is_some() {
             Container::Class
@@ -298,11 +293,7 @@ impl<'parse> Lowering<'parse> {
         Some(index)
     }
 
-    fn object(
-        &mut self,
-        object: ObjectDeclaration<'_>,
-        parent: Option<ItemIndex>,
-    ) -> Option<ItemIndex> {
+    fn object(&mut self, object: ObjectDeclaration<'_>, parent: Option<ItemId>) -> Option<ItemId> {
         let name_node = object.name()?;
         let container = if parent.is_some() {
             Container::Class
@@ -335,8 +326,8 @@ impl<'parse> Lowering<'parse> {
     fn companion(
         &mut self,
         companion: CompanionObject<'_>,
-        parent: Option<ItemIndex>,
-    ) -> Option<ItemIndex> {
+        parent: Option<ItemId>,
+    ) -> Option<ItemId> {
         let (visibility, modifiers) = self.modifiers(companion.modifiers(), Container::Class);
         let (name, name_range) = match companion.name() {
             Some(name_node) => (self.name(name_node), TextRange::of(name_node)),
@@ -371,9 +362,9 @@ impl<'parse> Lowering<'parse> {
     fn function(
         &mut self,
         function: FunctionDeclaration<'_>,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         container: Container,
-    ) -> Option<ItemIndex> {
+    ) -> Option<ItemId> {
         let name_node = function.name()?;
         let (visibility, mut modifiers) = self.modifiers(function.modifiers(), container);
         let abstract_in_interface = container == Container::Interface && !function.has_body();
@@ -400,9 +391,9 @@ impl<'parse> Lowering<'parse> {
     fn property(
         &mut self,
         property: PropertyDeclaration<'_>,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         container: Container,
-    ) -> Option<ItemIndex> {
+    ) -> Option<ItemId> {
         let variable = property.variable()?;
         let name_node = variable.name()?;
         let (visibility, modifiers) = self.modifiers(property.modifiers(), container);
@@ -543,18 +534,14 @@ impl<'parse> Lowering<'parse> {
                 TypeRef::Named {
                     segments,
                     nullable: false,
-                    range: TextRange::of(node),
                 }
             }
             "nullable_type" => {
                 let inner = named_children(node).find(|child| syntax::ast::kotlin::is_type(*child));
                 match inner.map(|inner| self.type_ref(inner)) {
-                    Some(TypeRef::Named {
-                        segments, range, ..
-                    }) => TypeRef::Named {
+                    Some(TypeRef::Named { segments, .. }) => TypeRef::Named {
                         segments,
                         nullable: true,
-                        range,
                     },
                     Some(TypeRef::Function {
                         receiver,

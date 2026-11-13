@@ -99,8 +99,9 @@ fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
     match location.container {
         ItemContainer::File(file) => {
             let parse = hir::parse(db, file);
-            let tree = hir::file_item_tree(db, file);
-            let range = tree.item(location.item).range;
+            let range = hir::file_item_source_map(db, file)
+                .ranges(location.item)
+                .range;
             doc_comment(&parse, range)
         }
         ItemContainer::Library(_) => {

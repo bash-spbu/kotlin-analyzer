@@ -236,10 +236,10 @@ impl Analysis {
         self.with_db(|db| {
             let source = db.source_file(file)?;
             let tree = hir::file_item_tree(db, source);
-            tree.items
-                .iter()
-                .find(|item| item.name_range.contains(offset))
-                .map(|item| item.name_range)
+            let source_map = hir::file_item_source_map(db, source);
+            tree.indexed_items()
+                .map(|(item, _)| source_map.ranges(item).name_range)
+                .find(|name_range| name_range.contains(offset))
         })
     }
 }

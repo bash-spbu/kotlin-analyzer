@@ -174,8 +174,9 @@ fn declaration_named_at(
     range: TextRange,
 ) -> Vec<ItemLocation> {
     let tree = hir::file_item_tree(db, file);
+    let source_map = hir::file_item_source_map(db, file);
     tree.indexed_items()
-        .filter(|(_, item)| item.name_range == range)
+        .filter(|(index, _)| source_map.ranges(*index).name_range == range)
         .map(|(index, _)| ItemLocation::in_file(file, index))
         .collect()
 }

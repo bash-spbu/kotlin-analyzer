@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use super::{
-    ClassKind, ImportTarget, Item, ItemIndex, ItemKind, ItemTree, Parameter, Signature,
-    TypeArgument, TypeParameter, TypeRef, Variance, Visibility,
+    ClassKind, ImportTarget, Item, ItemId, ItemKind, ItemTree, Parameter, Signature, TypeArgument,
+    TypeParameter, TypeRef, Variance, Visibility,
 };
 
 pub(super) fn print(tree: &ItemTree) -> String {
@@ -31,7 +31,7 @@ pub(super) fn print(tree: &ItemTree) -> String {
     output
 }
 
-fn print_item(tree: &ItemTree, index: ItemIndex, depth: usize, output: &mut String) {
+fn print_item(tree: &ItemTree, index: ItemId, depth: usize, output: &mut String) {
     let item = tree.item(index);
     output.push_str(&"  ".repeat(depth));
     output.push_str(&header(item));
@@ -230,7 +230,6 @@ pub fn type_text(type_ref: &TypeRef) -> String {
                 let named = TypeRef::Named {
                     segments: Box::new([class.clone()]),
                     nullable: false,
-                    range: syntax::TextRange::default(),
                 };
                 segments.push(type_text(&named));
             }

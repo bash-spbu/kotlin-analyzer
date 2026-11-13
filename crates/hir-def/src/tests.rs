@@ -591,3 +591,85 @@ fn library_sources_are_found_in_archives_laid_out_by_source_set() {
         [map_not_null.name_range.start as usize..map_not_null.name_range.end as usize];
     assert_eq!(text, "mapNotNull");
 }
+
+#[test]
+fn edits_that_leave_declarations_alone_recompute_nothing_built_on_them() {
+    let mut fixture = Fixture::parse(
+        r#"
+//- /app/x/A.kt
+package x
+fun first() = 1
+class Later { fun inside() {} }
+//- /app/x/B.kt
+package x
+class Other
+"#,
+    );
+    let later_id = |fixture: &Fixture| {
+        let db = &fixture.database;
+        let file = db.source_file(fixture.file("/app/x/A.kt")).unwrap();
+        let tree = file_item_tree(db, file);
+        tree.indexed_items()
+            .find(|(_, item)| item.name.as_str() == "Later")
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    let def_map = |fixture: &Fixture| {
+        let db = &fixture.database;
+        let file = db.source_file(fixture.file("/app/x/A.kt")).unwrap();
+        let set = file.source_set(db).unwrap();
+        let source_set = db.workspace().source_sets(db)[set.0 as usize];
+        crate::source_set_def_map(db, source_set)
+    };
+    let before = def_map(&fixture);
+    let later_before = later_id(&fixture);
+
+    // A reload with the same model keeps every source set's input.
+    let model = fixture
+        .database
+        .workspace()
+        .model(&fixture.database)
+        .clone();
+    fixture.database.set_project_model(model);
+    assert!(std::sync::Arc::ptr_eq(&before, &def_map(&fixture)));
+
+    // A body edit that also moves every declaration below it.
+    fixture.edit(
+        "/app/x/A.kt",
+        "package x\n\n\nfun first() = 2 + 40\nclass Later { fun inside() { val moved = 1 } }\n",
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &def_map(&fixture)),
+        "the definition map is reused, not recomputed"
+    );
+    assert_eq!(later_id(&fixture), later_before);
+
+    // A new declaration above: the map changes, `Later` keeps its id.
+    fixture.edit(
+        "/app/x/A.kt",
+        "package x\nfun added() {}\nfun first() = 1\nclass Later { fun inside() {} }\n",
+    );
+    assert!(!std::sync::Arc::ptr_eq(&before, &def_map(&fixture)));
+    assert_eq!(later_id(&fixture), later_before);
+}
+
+#[test]
+fn overloads_and_same_named_members_get_distinct_ids() {
+    let fixture = Fixture::parse(
+        r#"
+//- /app/x/A.kt
+package x
+fun pay(amount: Int) {}
+fun pay(amount: Long) {}
+class Pay { fun pay() {} }
+"#,
+    );
+    let db = &fixture.database;
+    let file = db.source_file(fixture.file("/app/x/A.kt")).unwrap();
+    let tree = file_item_tree(db, file);
+    let mut ids: Vec<crate::ItemId> = tree.indexed_items().map(|(id, _)| id).collect();
+    let count = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), count);
+}

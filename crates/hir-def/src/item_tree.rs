@@ -10,6 +10,9 @@ mod lower_kotlin;
 mod pretty;
 
 use intern::{Name, Path};
+use std::hash::{Hash, Hasher};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
 pub(crate) use lower_java::lower_java;
@@ -17,9 +20,37 @@ pub use lower_kotlin::kotlin_type_ref;
 pub(crate) use lower_kotlin::lower_kotlin;
 pub use pretty::type_text;
 
-/// An item's position in its file's [`ItemTree`].
+/// An item's identity in its file's [`ItemTree`]: derived from its parent,
+/// its kind, its name and its place among same-named siblings of that kind
+/// — not from where it is in the file — so an edit elsewhere in the file
+/// leaves it, and everything that refers to it, unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct ItemIndex(pub u32);
+pub struct ItemId(u32);
+
+/// The coarse kind an [`ItemId`] is derived from: turning a `val` into a
+/// `var`, or a class into an interface, keeps the item's identity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum IdentityKind {
+    Classifier,
+    Function,
+    Property,
+    Constructor,
+    EnumEntry,
+    TypeAlias,
+}
+
+impl IdentityKind {
+    fn of(kind: &ItemKind) -> IdentityKind {
+        match kind {
+            ItemKind::Class(_) => IdentityKind::Classifier,
+            ItemKind::Function => IdentityKind::Function,
+            ItemKind::Property { .. } => IdentityKind::Property,
+            ItemKind::Constructor => IdentityKind::Constructor,
+            ItemKind::EnumEntry => IdentityKind::EnumEntry,
+            ItemKind::TypeAlias => IdentityKind::TypeAlias,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ItemTree {
@@ -27,45 +58,33 @@ pub struct ItemTree {
     pub package: Path,
     /// For a library package: the source file each top-level item was
     /// compiled from (`Strings.kt`), to find it in a sources archive.
-    pub source_files: Box<[(ItemIndex, Box<str>)]>,
+    pub source_files: Box<[(ItemId, Box<str>)]>,
     pub imports: Box<[Import]>,
     /// Every declaration of the file, nested ones included, in document
-    /// order; `top_level` and each item's `children` index into it.
-    pub items: Box<[Item]>,
-    pub top_level: Box<[ItemIndex]>,
+    /// order, and each one's id.
+    items: Box<[Item]>,
+    ids: Box<[ItemId]>,
+    positions: FxHashMap<ItemId, u32>,
+    pub top_level: Box<[ItemId]>,
 }
 
 impl ItemTree {
-    pub fn item(&self, index: ItemIndex) -> &Item {
-        &self.items[index.0 as usize]
+    pub fn item(&self, id: ItemId) -> &Item {
+        &self.items[self.positions[&id] as usize]
     }
 
-    /// Every item with its index.
-    pub fn indexed_items(&self) -> impl Iterator<Item = (ItemIndex, &Item)> {
-        self.items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| (ItemIndex(index as u32), item))
+    /// Every item with its id, in document order.
+    pub fn indexed_items(&self) -> impl Iterator<Item = (ItemId, &Item)> {
+        self.ids.iter().copied().zip(self.items.iter())
     }
 
-    /// The items whose range contains `offset`, outermost first.
-    pub fn items_enclosing(&self, offset: usize) -> Vec<ItemIndex> {
-        let mut enclosing = Vec::new();
-        let mut level: &[ItemIndex] = &self.top_level;
-        while let Some(found) = level
-            .iter()
-            .copied()
-            .find(|index| self.item(*index).range.contains(offset))
-        {
-            enclosing.push(found);
-            level = &self.item(found).children;
-        }
-        enclosing
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     /// The items `index` is declared in, outermost first — the scope its
     /// header sees (its own body is not around its header).
-    pub fn ancestors(&self, index: ItemIndex) -> Vec<ItemIndex> {
+    pub fn ancestors(&self, index: ItemId) -> Vec<ItemId> {
         let mut ancestors = Vec::new();
         let mut current = self.item(index).parent;
         while let Some(parent) = current {
@@ -77,7 +96,7 @@ impl ItemTree {
     }
 
     /// One declaration as Kotlin-like text: `data class Point<T>(x: T) : Shape`.
-    pub fn signature(&self, index: ItemIndex) -> String {
+    pub fn signature(&self, index: ItemId) -> String {
         pretty::header(self.item(index))
     }
 
@@ -93,8 +112,6 @@ pub struct Import {
     /// `a.b.C` of `import a.b.C`; `a.b` of `import a.b.*`.
     pub path: Path,
     pub target: ImportTarget,
-    /// The range of the imported path.
-    pub range: TextRange,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -119,12 +136,8 @@ impl Import {
 pub struct Item {
     pub name: Name,
     pub kind: ItemKind,
-    /// The declared name's range — where navigation lands.
-    pub name_range: TextRange,
-    /// The whole declaration's range.
-    pub range: TextRange,
-    pub parent: Option<ItemIndex>,
-    pub children: Box<[ItemIndex]>,
+    pub parent: Option<ItemId>,
+    pub children: Box<[ItemId]>,
     pub visibility: Visibility,
     pub modifiers: Modifiers,
     pub type_parameters: Box<[TypeParameter]>,
@@ -298,7 +311,6 @@ pub enum TypeRef {
     Named {
         segments: Box<[TypeSegment]>,
         nullable: bool,
-        range: TextRange,
     },
     /// `suspend R.(A, B) -> C`
     Function {
@@ -357,4 +369,131 @@ pub enum Variance {
     Invariant,
     In,
     Out,
+}
+
+/// Where a file's items and imports are in its text. Kept apart from the
+/// [`ItemTree`] so that an edit which only moves declarations changes this
+/// and not the tree everything else depends on.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ItemSourceMap {
+    items: FxHashMap<ItemId, ItemRanges>,
+    /// By position in [`ItemTree::imports`]: the imported path's range.
+    imports: Box<[TextRange]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ItemRanges {
+    /// The whole declaration.
+    pub range: TextRange,
+    /// The declared name — where navigation lands.
+    pub name_range: TextRange,
+}
+
+impl ItemSourceMap {
+    /// Where the item is; empty ranges for one not in this file's text.
+    pub fn ranges(&self, item: ItemId) -> ItemRanges {
+        self.items.get(&item).copied().unwrap_or_default()
+    }
+
+    /// The `index`-th import's path.
+    pub fn import_range(&self, index: usize) -> TextRange {
+        self.imports.get(index).copied().unwrap_or_default()
+    }
+
+    /// The items of `tree` whose range contains `offset`, outermost first.
+    pub fn items_enclosing(&self, tree: &ItemTree, offset: usize) -> Vec<ItemId> {
+        let mut enclosing = Vec::new();
+        let mut level: &[ItemId] = &tree.top_level;
+        while let Some(found) = level
+            .iter()
+            .copied()
+            .find(|item| self.ranges(*item).range.contains(offset))
+        {
+            enclosing.push(found);
+            level = &tree.item(found).children;
+        }
+        enclosing
+    }
+
+    /// The item whose whole declaration is exactly `range`.
+    pub fn item_at(&self, range: TextRange) -> Option<ItemId> {
+        self.items
+            .iter()
+            .find(|(_, ranges)| ranges.range == range)
+            .map(|(item, _)| *item)
+    }
+}
+
+/// Builds an [`ItemTree`] and its [`ItemSourceMap`] item by item, giving
+/// each its [`ItemId`].
+#[derive(Default)]
+pub(crate) struct ItemTreeBuilder {
+    items: Vec<Item>,
+    ids: Vec<ItemId>,
+    positions: FxHashMap<ItemId, u32>,
+    /// How many items of a kind and name a parent has had so far.
+    ordinals: FxHashMap<(Option<ItemId>, IdentityKind, Name), u32>,
+    taken: FxHashSet<ItemId>,
+    ranges: FxHashMap<ItemId, ItemRanges>,
+}
+
+impl ItemTreeBuilder {
+    /// Adds `item` (its `parent` set, its children to come) found at
+    /// `ranges`.
+    pub(crate) fn push(&mut self, item: Item, ranges: ItemRanges) -> ItemId {
+        let id = self.allocate(item.parent, IdentityKind::of(&item.kind), item.name);
+        self.positions.insert(id, self.items.len() as u32);
+        self.items.push(item);
+        self.ids.push(id);
+        if ranges != ItemRanges::default() {
+            self.ranges.insert(id, ranges);
+        }
+        id
+    }
+
+    fn allocate(&mut self, parent: Option<ItemId>, kind: IdentityKind, name: Name) -> ItemId {
+        let ordinal = self.ordinals.entry((parent, kind, name)).or_default();
+        let mut hasher = rustc_hash::FxHasher::default();
+        (parent, kind, name.as_str(), *ordinal).hash(&mut hasher);
+        *ordinal += 1;
+        let mut candidate = ItemId(hasher.finish() as u32);
+        // A collision (rare) takes the next free value, in document order.
+        while !self.taken.insert(candidate) {
+            candidate = ItemId(candidate.0.wrapping_add(1));
+        }
+        candidate
+    }
+
+    pub(crate) fn item(&self, id: ItemId) -> &Item {
+        &self.items[self.positions[&id] as usize]
+    }
+
+    pub(crate) fn set_children(&mut self, parent: ItemId, children: Vec<ItemId>) {
+        let position = self.positions[&parent] as usize;
+        self.items[position].children = children.into_boxed_slice();
+    }
+
+    pub(crate) fn finish(
+        self,
+        package: Path,
+        imports: Vec<(Import, TextRange)>,
+        top_level: Vec<ItemId>,
+        source_files: Vec<(ItemId, Box<str>)>,
+    ) -> (ItemTree, ItemSourceMap) {
+        let (imports, import_ranges): (Vec<Import>, Vec<TextRange>) = imports.into_iter().unzip();
+        let tree = ItemTree {
+            package,
+            source_files: source_files.into_boxed_slice(),
+            imports: imports.into_boxed_slice(),
+            items: self.items.into_boxed_slice(),
+            ids: self.ids.into_boxed_slice(),
+            positions: self.positions,
+            top_level: top_level.into_boxed_slice(),
+        };
+        let source_map = ItemSourceMap {
+            items: self.ranges,
+            imports: import_ranges.into_boxed_slice(),
+        };
+        (tree, source_map)
+    }
 }

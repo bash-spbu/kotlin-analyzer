@@ -26,7 +26,7 @@ mod narrowing;
 use std::sync::Arc;
 
 use base_db::{SourceDatabase, SourceFile};
-use hir_def::{ItemIndex, ItemLocation, file_item_tree};
+use hir_def::{ItemId, ItemLocation};
 use intern::Name;
 use rustc_hash::FxHashMap;
 use syntax::{Language, TextRange};
@@ -227,12 +227,11 @@ pub fn infer_file(db: &dyn SourceDatabase, file: SourceFile) -> Arc<InferenceRes
 /// initializer's, getter's or delegate's. A declaration whose type depends
 /// on itself is `Unknown`.
 #[salsa::tracked(returns(clone), cycle_result = unknown_declaration_type, lru = 4096)]
-pub fn declaration_type(db: &dyn SourceDatabase, file: SourceFile, item: ItemIndex) -> Ty {
+pub fn declaration_type(db: &dyn SourceDatabase, file: SourceFile, item: ItemId) -> Ty {
     if file.language(db) != Language::Kotlin {
         return Ty::Unknown;
     }
-    let tree = file_item_tree(db, file);
-    let range = tree.item(item).range;
+    let range = hir_def::file_item_source_map(db, file).ranges(item).range;
     let parse = base_db::parse(db, file);
     let mut inferrer = declarations::Inferrer::new(db, file, &parse);
     inferrer.declaration_type(range)
@@ -242,7 +241,7 @@ fn unknown_declaration_type(
     _db: &dyn SourceDatabase,
     _id: salsa::Id,
     _file: SourceFile,
-    _item: ItemIndex,
+    _item: ItemId,
 ) -> Ty {
     Ty::Unknown
 }

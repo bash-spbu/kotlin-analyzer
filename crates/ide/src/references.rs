@@ -227,10 +227,10 @@ fn declaration_ranges(db: &RootDatabase, target: &Target) -> Vec<FileRange> {
             .iter()
             .filter_map(|declaration| {
                 let file = declaration.file()?;
-                let tree = hir::file_item_tree(db, file);
+                let source_map = hir::file_item_source_map(db, file);
                 Some(FileRange {
                     file: file.file_id(db),
-                    range: tree.item(declaration.item).name_range,
+                    range: source_map.ranges(declaration.item).name_range,
                 })
             })
             .collect(),

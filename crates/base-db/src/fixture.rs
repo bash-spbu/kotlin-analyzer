@@ -25,7 +25,7 @@ use project_model::{
 use syntax::Language;
 use vfs::{FileId, Vfs};
 
-use crate::{FileChange, RootDatabase};
+use crate::{FileChange, RootDatabase, SourceDatabase};
 
 /// The cursor marker inside fixture text.
 pub const CURSOR: &str = "$0";
@@ -78,6 +78,25 @@ impl Fixture {
             vfs,
             cursor,
         }
+    }
+
+    /// Replaces the text of the fixture file at `path`, as an editor would.
+    pub fn edit(&mut self, path: &str, text: &str) {
+        let file_id = self.file(path);
+        let source = self
+            .database
+            .source_file(file_id)
+            .expect("a fixture file is in the database");
+        let change = FileChange {
+            file: file_id,
+            text: Some(Arc::from(text)),
+            language: source.language(&self.database),
+            source_set: source.source_set(&self.database),
+            directory_package: source.directory_package(&self.database).clone(),
+        };
+        self.vfs
+            .set_contents(std::path::Path::new(path), Some(Arc::from(text)));
+        self.database.apply_change(vec![change]);
     }
 
     pub fn cursor(&self) -> (FileId, usize) {

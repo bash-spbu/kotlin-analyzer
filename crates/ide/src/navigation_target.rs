@@ -83,11 +83,14 @@ impl NavigationTarget {
             None => Some(tree.package.to_string()),
         };
         let (file, full_range, focus_range) = match location.file() {
-            Some(file) => (
-                NavigationFile::Workspace(file.file_id(db)),
-                item.range,
-                item.name_range,
-            ),
+            Some(file) => {
+                let ranges = hir::file_item_source_map(db, file).ranges(location.item);
+                (
+                    NavigationFile::Workspace(file.file_id(db)),
+                    ranges.range,
+                    ranges.name_range,
+                )
+            }
             None => {
                 let source = hir::library_declaration_source(db, location)?;
                 (

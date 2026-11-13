@@ -29,11 +29,12 @@ pub(crate) fn declaration_statistics(db: &RootDatabase) -> DeclarationStatistics
     let mut ambiguous_names: FxHashMap<Name, usize> = FxHashMap::default();
     for file in db.all_files() {
         let tree = hir::file_item_tree(db, file);
-        statistics.declarations += tree.items.len();
-        for type_ref in written_types(&tree) {
+        statistics.declarations += tree.indexed_items().count();
+        for (declaration, type_ref) in written_types(&tree) {
             count(
                 db,
                 file,
+                declaration,
                 type_ref,
                 &mut statistics,
                 &mut unresolved_names,
@@ -55,44 +56,57 @@ fn ranked(counts: FxHashMap<Name, usize>) -> Vec<(String, usize)> {
     top
 }
 
-/// Every type reference in the tree's signatures, type arguments included.
-fn written_types(tree: &ItemTree) -> Vec<&TypeRef> {
+/// Every type reference in the tree's signatures, type arguments
+/// included, with the declaration it is written in.
+fn written_types(tree: &ItemTree) -> Vec<(hir::ItemId, &TypeRef)> {
+    let mut written = Vec::new();
+    for (declaration, item) in tree.indexed_items() {
+        written.extend(
+            declared_types(item)
+                .into_iter()
+                .map(|type_ref| (declaration, type_ref)),
+        );
+    }
+    written
+}
+
+/// The type references in one declaration's signature, type arguments
+/// included.
+fn declared_types(item: &hir::Item) -> Vec<&TypeRef> {
     let mut found = Vec::new();
-    for item in tree.items.iter() {
-        for parameter in item.type_parameters.iter() {
-            found.extend(parameter.bounds.iter());
+    for parameter in item.type_parameters.iter() {
+        found.extend(parameter.bounds.iter());
+    }
+    match &item.signature {
+        Signature::Class {
+            supertypes,
+            primary_constructor,
+        } => {
+            found.extend(supertypes.iter());
+            for parameter in primary_constructor
+                .iter()
+                .flat_map(|parameters| parameters.iter())
+            {
+                found.extend(parameter.type_ref.iter());
+            }
         }
-        match &item.signature {
-            Signature::Class {
-                supertypes,
-                primary_constructor,
-            } => {
-                found.extend(supertypes.iter());
-                for parameter in primary_constructor
-                    .iter()
-                    .flat_map(|parameters| parameters.iter())
-                {
-                    found.extend(parameter.type_ref.iter());
-                }
+        Signature::Function {
+            receiver,
+            parameters,
+            return_type,
+        } => {
+            found.extend(receiver.iter());
+            for parameter in parameters.iter() {
+                found.extend(parameter.type_ref.iter());
             }
-            Signature::Function {
-                receiver,
-                parameters,
-                return_type,
-            } => {
-                found.extend(receiver.iter());
-                for parameter in parameters.iter() {
-                    found.extend(parameter.type_ref.iter());
-                }
-                found.extend(return_type.iter());
-            }
-            Signature::Property { receiver, type_ref } => {
-                found.extend(receiver.iter());
-                found.extend(type_ref.iter());
-            }
-            Signature::TypeAlias { target } => found.push(target),
-            Signature::None => {}
+            found.extend(return_type.iter());
         }
+        Signature::Property { receiver, type_ref } => {
+            found.extend(receiver.iter());
+            found.extend(type_ref.iter());
+        }
+        Signature::TypeAlias { target } => found.push(target),
+        Signature::None => {}
     }
     let mut nested = Vec::new();
     for type_ref in &found {
@@ -138,19 +152,20 @@ fn collect_nested<'tree>(type_ref: &'tree TypeRef, output: &mut Vec<&'tree TypeR
 fn count(
     db: &RootDatabase,
     file: SourceFile,
+    declaration: hir::ItemId,
     type_ref: &TypeRef,
     statistics: &mut DeclarationStatistics,
     unresolved_names: &mut FxHashMap<Name, usize>,
     ambiguous_names: &mut FxHashMap<Name, usize>,
 ) {
-    let TypeRef::Named { range, .. } = type_ref else {
+    if !matches!(type_ref, TypeRef::Named { .. }) {
         return;
-    };
+    }
     let Some(path) = type_ref.path() else {
         return;
     };
     statistics.type_references += 1;
-    match hir::resolve_type_path(db, file, &path, range.start as usize) {
+    match hir::resolve_type_path_in_declaration(db, file, &path, declaration) {
         Resolution::Declaration(_) => statistics.resolved += 1,
         Resolution::TypeParameter { .. } => statistics.type_parameters += 1,
         Resolution::Ambiguous(_) => {

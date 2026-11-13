@@ -5,14 +5,15 @@ use intern::{Name, Path};
 use syntax::{Parse, SyntaxNode, TextRange, named_children};
 
 use super::{
-    ClassKind, Import, ImportTarget, Item, ItemIndex, ItemKind, ItemTree, Modifiers, Parameter,
-    Signature, TypeArgument, TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
+    ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
+    ItemTreeBuilder, Modifiers, Parameter, Signature, TypeArgument, TypeParameter, TypeRef,
+    TypeSegment, Variance, Visibility,
 };
 
-pub(crate) fn lower_java(parse: &Parse) -> ItemTree {
+pub(crate) fn lower_java(parse: &Parse) -> (ItemTree, ItemSourceMap) {
     let mut lowering = Lowering {
         parse,
-        items: Vec::new(),
+        builder: ItemTreeBuilder::default(),
     };
     let root = parse.root();
     let mut package = Path::default();
@@ -31,18 +32,14 @@ pub(crate) fn lower_java(parse: &Parse) -> ItemTree {
             _ => top_level.extend(lowering.type_declaration(node, None, false)),
         }
     }
-    ItemTree {
-        package,
-        source_files: Box::new([]),
-        imports: imports.into_boxed_slice(),
-        items: lowering.items.into_boxed_slice(),
-        top_level: top_level.into_boxed_slice(),
-    }
+    lowering
+        .builder
+        .finish(package, imports, top_level, Vec::new())
 }
 
 struct Lowering<'parse> {
     parse: &'parse Parse,
-    items: Vec<Item>,
+    builder: ItemTreeBuilder,
 }
 
 impl<'parse> Lowering<'parse> {
@@ -54,19 +51,20 @@ impl<'parse> Lowering<'parse> {
         Name::new(self.text(node))
     }
 
-    fn import(&self, node: SyntaxNode<'_>) -> Option<Import> {
+    /// An import and its path's range.
+    fn import(&self, node: SyntaxNode<'_>) -> Option<(Import, TextRange)> {
         let path_node = named_children(node)
             .find(|child| matches!(child.kind(), "scoped_identifier" | "identifier"))?;
         let everything = named_children(node).any(|child| child.kind() == "asterisk");
-        Some(Import {
+        let import = Import {
             path: Path::parse(self.text(path_node)),
             target: if everything {
                 ImportTarget::Everything
             } else {
                 ImportTarget::Single { alias: None }
             },
-            range: TextRange::of(path_node),
-        })
+        };
+        Some((import, TextRange::of(path_node)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -76,34 +74,35 @@ impl<'parse> Lowering<'parse> {
         kind: ItemKind,
         name_node: SyntaxNode<'_>,
         node: SyntaxNode<'_>,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         (visibility, modifiers): (Visibility, Modifiers),
         type_parameters: Box<[TypeParameter]>,
         signature: Signature,
-    ) -> ItemIndex {
-        let index = ItemIndex(self.items.len() as u32);
-        self.items.push(Item {
+    ) -> ItemId {
+        let ranges = ItemRanges {
+            range: TextRange::of(node),
+            name_range: TextRange::of(name_node),
+        };
+        let item = Item {
             name,
             kind,
-            name_range: TextRange::of(name_node),
-            range: TextRange::of(node),
             parent,
             children: Box::new([]),
             visibility,
             modifiers,
             type_parameters,
             signature,
-        });
-        index
+        };
+        self.builder.push(item, ranges)
     }
 
     /// A class, interface, enum, record or annotation declaration.
     fn type_declaration(
         &mut self,
         node: SyntaxNode<'_>,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         in_interface: bool,
-    ) -> Option<ItemIndex> {
+    ) -> Option<ItemId> {
         let kind = match node.kind() {
             "class_declaration" | "record_declaration" => ClassKind::Class,
             "interface_declaration" => ClassKind::Interface,
@@ -150,16 +149,16 @@ impl<'parse> Lowering<'parse> {
             let members_in_interface = matches!(kind, ClassKind::Interface | ClassKind::Annotation);
             self.members(body, index, members_in_interface, &mut children);
         }
-        self.items[index.0 as usize].children = children.into_boxed_slice();
+        self.builder.set_children(index, children);
         Some(index)
     }
 
     fn members(
         &mut self,
         body: SyntaxNode<'_>,
-        parent: ItemIndex,
+        parent: ItemId,
         in_interface: bool,
-        children: &mut Vec<ItemIndex>,
+        children: &mut Vec<ItemId>,
     ) {
         for member in named_children(body) {
             match member.kind() {
@@ -381,7 +380,6 @@ impl<'parse> Lowering<'parse> {
                     arguments: Box::new([]),
                 }]),
                 nullable: false,
-                range: TextRange::of(node),
             },
             "scoped_type_identifier" | "generic_type" => {
                 let mut segments = Vec::new();
@@ -389,7 +387,6 @@ impl<'parse> Lowering<'parse> {
                 TypeRef::Named {
                     segments: segments.into_boxed_slice(),
                     nullable: false,
-                    range: TextRange::of(node),
                 }
             }
             "array_type" => TypeRef::Array {

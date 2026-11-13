@@ -77,9 +77,10 @@ pub(crate) fn semantic_tokens(db: &RootDatabase, file: FileId) -> Vec<SemanticTo
     }
     let mut tokens: Vec<SemanticToken> = Vec::new();
     let tree = hir::file_item_tree(db, source);
+    let source_map = hir::file_item_source_map(db, source);
     for (index, item) in tree.indexed_items() {
-        let written =
-            &source.text(db)[item.name_range.start as usize..item.name_range.end as usize];
+        let name_range = source_map.ranges(index).name_range;
+        let written = &source.text(db)[name_range.start as usize..name_range.end as usize];
         // An unnamed companion's name (`Companion`) isn't written anywhere.
         let names_itself = written.trim_matches('`') == item.name.as_str();
         if item.kind == ItemKind::Constructor || !names_itself {
@@ -88,7 +89,7 @@ pub(crate) fn semantic_tokens(db: &RootDatabase, file: FileId) -> Vec<SemanticTo
         let location = ItemLocation::in_file(source, index);
         if let Some((kind, modifiers)) = declaration_token(db, location) {
             tokens.push(SemanticToken {
-                range: item.name_range,
+                range: name_range,
                 kind,
                 modifiers: modifiers.with(TokenModifiers::DECLARATION),
             });

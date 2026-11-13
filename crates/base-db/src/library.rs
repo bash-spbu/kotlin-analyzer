@@ -30,14 +30,36 @@ pub struct LibrarySource {
     pub sources: Option<PathBuf>,
 }
 
-/// A library as the indexer leaves it: per package, its top-level names and
-/// the archive entries that hold its declarations.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// A library as the indexer leaves it: per package (sorted), its top-level
+/// names and the archive entries that hold its declarations; and the
+/// archive's state when it was read.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct IndexedLibrary {
     pub packages: Vec<IndexedPackage>,
+    pub stamp: ArchiveStamp,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// An archive file's modification time and length: a rebuilt archive at
+/// the same path has another.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct ArchiveStamp {
+    pub modified: Option<std::time::SystemTime>,
+    pub length: u64,
+}
+
+impl ArchiveStamp {
+    pub fn of(path: &std::path::Path) -> ArchiveStamp {
+        match std::fs::metadata(path) {
+            Ok(metadata) => ArchiveStamp {
+                modified: metadata.modified().ok(),
+                length: metadata.len(),
+            },
+            Err(_) => ArchiveStamp::default(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct IndexedPackage {
     pub package: Path,
     /// Top-level classes, functions, properties and type aliases, sorted.
@@ -56,6 +78,10 @@ pub struct Library {
     pub source: Arc<LibrarySource>,
     #[returns(ref)]
     pub packages: Arc<FxHashMap<Path, LibraryPackage>>,
+    /// The archive as indexed. Reading a package's declarations depends on
+    /// it, so an archive rewritten in place is read again after a reload.
+    #[returns(copy)]
+    pub stamp: ArchiveStamp,
 }
 
 /// One package of one library — the key of the query that reads its

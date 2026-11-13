@@ -9,8 +9,8 @@ use intern::{Name, Path};
 use rustc_hash::FxHashMap;
 
 use crate::def_map::{package_exists, visible_top_level};
-use crate::item_tree::{ImportTarget, ItemIndex, Signature, TypeRef};
-use crate::{ItemContainer, ItemLocation, file_item_tree, item_tree};
+use crate::item_tree::{ImportTarget, ItemId, Signature, TypeRef};
+use crate::{ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_tree};
 
 /// Kotlin's own default imports.
 pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
@@ -68,19 +68,46 @@ impl Resolution {
     }
 }
 
-/// What the type name `path` written at `offset` in `file` refers to.
+/// What the type name `path` written at `offset` in `file` refers to (in
+/// a body, or wherever an editor asks).
 pub fn resolve_type_path(
     db: &dyn SourceDatabase,
     file: SourceFile,
     path: &Path,
     offset: usize,
 ) -> Resolution {
+    let tree = file_item_tree(db, file);
+    let enclosing = file_item_source_map(db, file).items_enclosing(&tree, offset);
+    resolve_type_path_within(db, file, path, &enclosing)
+}
+
+/// What the type name `path` written in the signature of `declaration`
+/// (in `file`) refers to: it and the declarations around it are in scope.
+/// Asks only the item tree, so an edit that moves declarations doesn't
+/// change the answer's inputs.
+pub fn resolve_type_path_in_declaration(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    path: &Path,
+    declaration: ItemId,
+) -> Resolution {
+    let mut enclosing = file_item_tree(db, file).ancestors(declaration);
+    enclosing.push(declaration);
+    resolve_type_path_within(db, file, path, &enclosing)
+}
+
+/// `path` resolved inside the items `enclosing` (outermost first).
+fn resolve_type_path_within(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    path: &Path,
+    enclosing: &[ItemId],
+) -> Resolution {
     let Some((&first, rest)) = path.segments().split_first() else {
         return Resolution::Unresolved;
     };
     let mut walk = HierarchyWalk::new(db);
-    let enclosing = file_item_tree(db, file).items_enclosing(offset);
-    let head = walk.resolve_simple_classifier(file, first, &enclosing);
+    let head = walk.resolve_simple_classifier(file, first, enclosing);
     match head {
         Some(Resolution::Declaration(location)) => walk.walk_nested(file, location, rest),
         Some(Resolution::TypeParameter { .. }) if rest.is_empty() => {
@@ -429,7 +456,7 @@ impl<'db> HierarchyWalk<'db> {
         &mut self,
         file: SourceFile,
         name: Name,
-        enclosing: &[ItemIndex],
+        enclosing: &[ItemId],
     ) -> Option<Resolution> {
         let db = self.db;
         let tree = file_item_tree(db, file);

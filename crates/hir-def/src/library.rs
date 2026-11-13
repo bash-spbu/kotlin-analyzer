@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use base_db::{
-    ArchiveKind, IndexedLibrary, IndexedPackage, LibraryPackage, LibrarySource, SourceDatabase,
+    ArchiveKind, ArchiveStamp, IndexedLibrary, IndexedPackage, LibraryPackage, LibrarySource,
+    SourceDatabase,
 };
 use classfile::{ClassContents, LibraryClass, LibraryType, MemberKind, PackageMembers};
 use intern::{Name, Path};
@@ -12,8 +13,8 @@ use rustc_hash::FxHashMap;
 use syntax::TextRange;
 
 use crate::item_tree::{
-    ClassKind, Item, ItemIndex, ItemKind, ItemTree, Modifiers, Parameter, Signature, TypeArgument,
-    TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
+    ClassKind, Item, ItemId, ItemKind, ItemRanges, ItemTree, ItemTreeBuilder, Modifiers, Parameter,
+    Signature, TypeArgument, TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
 };
 
 /// Where an archive entry's declarations belong (their package is the one
@@ -116,13 +117,20 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
         package.names.sort();
         package.names.dedup();
     }
-    Ok(IndexedLibrary { packages })
+    packages.sort_by_cached_key(|package| package.package.to_string());
+    Ok(IndexedLibrary {
+        packages,
+        stamp: ArchiveStamp::of(&source.archive),
+    })
 }
 
 /// A library package's declarations.
 #[salsa::tracked(returns(clone), lru = 128)]
 pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) -> Arc<ItemTree> {
     let library = package.library(db);
+    // Ties the tree to the archive as indexed: one rewritten in place gets
+    // a new stamp on reload, and is read again.
+    library.stamp(db);
     let source = library.source(db).clone();
     let Ok(mut archive) = classfile::Archive::open(&source.archive) else {
         return Arc::new(ItemTree::default());
@@ -166,7 +174,7 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
     let mut builder = Builder::default();
     // Outer classes first, so each nested class finds its parent.
     classes.sort_by_key(|class| class.name.classes.len());
-    let mut by_nesting: FxHashMap<Box<[Name]>, ItemIndex> = FxHashMap::default();
+    let mut by_nesting: FxHashMap<Box<[Name]>, ItemId> = FxHashMap::default();
     let mut source_files = Vec::new();
     for class in classes {
         let parent = match class.name.classes.split_last() {
@@ -199,8 +207,6 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
                 Item {
                     name: alias.name,
                     kind: ItemKind::TypeAlias,
-                    name_range: TextRange::default(),
-                    range: TextRange::default(),
                     parent: None,
                     children: Box::new([]),
                     visibility: Visibility::Public,
@@ -217,43 +223,41 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
             }
         }
     }
-    let (items, top_level) = builder.finish();
-    ItemTree {
-        package,
-        source_files: source_files.into_boxed_slice(),
-        imports: Box::new([]),
-        top_level: top_level.into_boxed_slice(),
-        items: items.into_boxed_slice(),
-    }
+    builder.finish(package, source_files)
 }
 
 #[derive(Default)]
 struct Builder {
-    items: Vec<Item>,
-    top_level: Vec<ItemIndex>,
-    children: FxHashMap<ItemIndex, Vec<ItemIndex>>,
+    tree: ItemTreeBuilder,
+    top_level: Vec<ItemId>,
+    children: FxHashMap<ItemId, Vec<ItemId>>,
 }
 
 impl Builder {
-    fn push(&mut self, item: Item, parent: Option<ItemIndex>) -> ItemIndex {
-        let index = ItemIndex(self.items.len() as u32);
-        self.items.push(Item { parent, ..item });
+    fn push(&mut self, item: Item, parent: Option<ItemId>) -> ItemId {
+        // Compiled code has no text to point into: no ranges.
+        let id = self
+            .tree
+            .push(Item { parent, ..item }, ItemRanges::default());
         match parent {
-            Some(parent) => self.children.entry(parent).or_default().push(index),
-            None => self.top_level.push(index),
+            Some(parent) => self.children.entry(parent).or_default().push(id),
+            None => self.top_level.push(id),
         }
-        index
+        id
     }
 
-    /// The items, each given its children.
-    fn finish(mut self) -> (Vec<Item>, Vec<ItemIndex>) {
+    /// The tree, each item given its children.
+    fn finish(mut self, package: Path, source_files: Vec<(ItemId, Box<str>)>) -> ItemTree {
         for (parent, children) in self.children {
-            self.items[parent.0 as usize].children = children.into_boxed_slice();
+            self.tree.set_children(parent, children);
         }
-        (self.items, self.top_level)
+        let (tree, _) = self
+            .tree
+            .finish(package, Vec::new(), self.top_level, source_files);
+        tree
     }
 
-    fn class(&mut self, class: LibraryClass, parent: Option<ItemIndex>) -> ItemIndex {
+    fn class(&mut self, class: LibraryClass, parent: Option<ItemId>) -> ItemId {
         let kind = match class.kind {
             classfile::ClassKind::Class => ClassKind::Class,
             classfile::ClassKind::Interface => ClassKind::Interface,
@@ -272,8 +276,6 @@ impl Builder {
             Item {
                 name: class.name.simple_name(),
                 kind: ItemKind::Class(kind),
-                name_range: TextRange::default(),
-                range: TextRange::default(),
                 parent,
                 children: Box::new([]),
                 visibility: visibility(class.visibility),
@@ -291,8 +293,6 @@ impl Builder {
                 Item {
                     name: entry,
                     kind: ItemKind::EnumEntry,
-                    name_range: TextRange::default(),
-                    range: TextRange::default(),
                     parent: Some(index),
                     children: Box::new([]),
                     visibility: Visibility::Public,
@@ -312,9 +312,9 @@ impl Builder {
     fn member(
         &mut self,
         member: classfile::Member,
-        parent: Option<ItemIndex>,
+        parent: Option<ItemId>,
         is_java: bool,
-    ) -> ItemIndex {
+    ) -> ItemId {
         let mut kept = modifiers(&member.modifiers);
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
@@ -351,8 +351,6 @@ impl Builder {
             Item {
                 name: member.name,
                 kind,
-                name_range: TextRange::default(),
-                range: TextRange::default(),
                 parent,
                 children: Box::new([]),
                 visibility: visibility(member.visibility),
@@ -613,17 +611,17 @@ pub fn library_declaration_source(
             continue;
         };
         let parse = syntax::parse(text.clone(), language);
-        let source_tree = match language {
+        let (source_tree, source_map) = match language {
             syntax::Language::Kotlin => crate::item_tree::lower_kotlin(&parse),
             syntax::Language::Java => crate::item_tree::lower_java(&parse),
         };
         if let Some(found) = find_by_names(&source_tree, &names) {
-            let item = source_tree.item(found);
+            let ranges = source_map.ranges(found);
             return Some(LibrarySourceLocation {
                 archive: sources.clone(),
                 entry,
-                name_range: item.name_range,
-                full_range: item.range,
+                name_range: ranges.name_range,
+                full_range: ranges.range,
                 text,
             });
         }
@@ -632,7 +630,7 @@ pub fn library_declaration_source(
 }
 
 /// The items from the top-level one down to `item`.
-fn name_chain(tree: &ItemTree, item: ItemIndex) -> Vec<ItemIndex> {
+fn name_chain(tree: &ItemTree, item: ItemId) -> Vec<ItemId> {
     let mut chain = vec![item];
     let mut current = item;
     while let Some(parent) = tree.item(current).parent {
@@ -645,8 +643,8 @@ fn name_chain(tree: &ItemTree, item: ItemIndex) -> Vec<ItemIndex> {
 
 /// The item reached by following `names` (each: a name, and whether it
 /// is a classifier) from the top level.
-fn find_by_names(tree: &ItemTree, names: &[(Name, bool)]) -> Option<ItemIndex> {
-    let mut level: &[ItemIndex] = &tree.top_level;
+fn find_by_names(tree: &ItemTree, names: &[(Name, bool)]) -> Option<ItemId> {
+    let mut level: &[ItemId] = &tree.top_level;
     let mut found = None;
     for (name, is_classifier) in names {
         let next = level.iter().copied().find(|index| {

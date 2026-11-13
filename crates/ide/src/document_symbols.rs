@@ -1,6 +1,6 @@
 //! `textDocument/documentSymbol`: the file's declarations as a tree.
 
-use hir::{FileId, ItemIndex, ItemTree, RootDatabase, Signature, SourceDatabase};
+use hir::{FileId, ItemId, ItemTree, RootDatabase, Signature, SourceDatabase};
 use syntax::TextRange;
 
 use crate::SymbolKind;
@@ -22,25 +22,27 @@ pub(crate) fn document_symbols(db: &RootDatabase, file: FileId) -> Vec<DocumentS
         return Vec::new();
     };
     let tree = hir::file_item_tree(db, source);
+    let source_map = hir::file_item_source_map(db, source);
     tree.top_level
         .iter()
-        .map(|index| symbol(&tree, *index))
+        .map(|index| symbol(&tree, &source_map, *index))
         .collect()
 }
 
-fn symbol(tree: &ItemTree, index: ItemIndex) -> DocumentSymbol {
+fn symbol(tree: &ItemTree, source_map: &hir::ItemSourceMap, index: ItemId) -> DocumentSymbol {
     let item = tree.item(index);
+    let ranges = source_map.ranges(index);
     DocumentSymbol {
         name: item.name.to_string(),
         kind: SymbolKind::of(item.kind, item.parent.is_some()),
         detail: detail(&item.signature),
-        range: item.range,
-        selection_range: item.name_range,
+        range: ranges.range,
+        selection_range: ranges.name_range,
         deprecated: item.modifiers.contains(hir::Modifiers::DEPRECATED),
         children: item
             .children
             .iter()
-            .map(|child| symbol(tree, *child))
+            .map(|child| symbol(tree, source_map, *child))
             .collect(),
     }
 }

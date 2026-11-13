@@ -12,7 +12,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 pub use library::{
-    ArchiveKind, Classpaths, IndexedLibrary, IndexedPackage, Library, LibraryPackage, LibrarySource,
+    ArchiveKind, ArchiveStamp, Classpaths, IndexedLibrary, IndexedPackage, Library, LibraryPackage,
+    LibrarySource,
 };
 pub use parse_cache::ParseCache;
 pub use project_model::{ProjectModel, SourceSetId};
@@ -87,8 +88,19 @@ pub struct RootDatabase {
     workspace: Option<Workspace>,
     files: Arc<FxHashMap<FileId, SourceFile>>,
     classpaths: Option<Classpaths>,
+    /// Every library input made so far, by source: a reload re-uses an
+    /// unchanged archive's inputs — nothing read from it is read again,
+    /// and inputs (which Salsa never frees) don't pile up.
+    libraries: Arc<FxHashMap<LibrarySource, KnownLibrary>>,
     /// Shared by snapshots.
     parse_cache: Arc<ParseCache>,
+}
+
+/// A library's input and a hash of what it was set from.
+#[derive(Clone, Copy)]
+struct KnownLibrary {
+    input: Library,
+    content: u64,
 }
 
 impl Default for RootDatabase {
@@ -98,6 +110,7 @@ impl Default for RootDatabase {
             workspace: None,
             files: Arc::default(),
             classpaths: None,
+            libraries: Arc::default(),
             parse_cache: Arc::default(),
         };
         database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None));
@@ -146,16 +159,23 @@ impl RootDatabase {
         match self.workspace {
             Some(workspace) => {
                 use salsa::Setter;
-                workspace.set_model(self).to(model);
-                workspace.set_source_sets(self).to(source_sets);
+                if *workspace.model(self) != model {
+                    workspace.set_model(self).to(model);
+                }
+                if *workspace.source_sets(self) != source_sets {
+                    workspace.set_source_sets(self).to(source_sets);
+                }
             }
             None => self.workspace = Some(Workspace::new(self, model, source_sets)),
         }
     }
 
     /// One input per source set of `model`, holding the files already
-    /// known to belong to it.
-    fn source_set_inputs(&self, model: &ProjectModel) -> Arc<[SourceSet]> {
+    /// known to belong to it. A source set the workspace already had keeps
+    /// its input (its file list set only if it changed), so a reload with
+    /// the same model recomputes nothing per source set.
+    fn source_set_inputs(&mut self, model: &ProjectModel) -> Arc<[SourceSet]> {
+        use salsa::Setter;
         let mut grouped: Vec<Vec<SourceFile>> = vec![Vec::new(); model.source_sets.len()];
         for file in self.files.values() {
             let group = file
@@ -165,14 +185,26 @@ impl RootDatabase {
                 group.push(*file);
             }
         }
-        grouped
-            .into_iter()
-            .enumerate()
-            .map(|(index, mut files)| {
-                files.sort_by_key(|file| file.file_id(self));
-                SourceSet::new(self, SourceSetId(index as u32), files.into())
-            })
-            .collect()
+        let known: Arc<[SourceSet]> = match self.workspace {
+            Some(workspace) => workspace.source_sets(self).clone(),
+            None => Arc::new([]),
+        };
+        let mut inputs = Vec::with_capacity(grouped.len());
+        for (index, mut files) in grouped.into_iter().enumerate() {
+            files.sort_by_key(|file| file.file_id(self));
+            let files: Arc<[SourceFile]> = files.into();
+            let input = match known.get(index).copied() {
+                Some(input) => {
+                    if *input.files(self) != files {
+                        input.set_files(self).to(files);
+                    }
+                    input
+                }
+                None => SourceSet::new(self, SourceSetId(index as u32), files),
+            };
+            inputs.push(input);
+        }
+        inputs.into()
     }
 
     /// Applies new texts. Source sets whose file lists change get new lists;
@@ -254,24 +286,7 @@ impl RootDatabase {
         use salsa::Setter;
         let mut inputs: Vec<Library> = Vec::with_capacity(libraries.len());
         for (source, indexed) in libraries {
-            let library = Library::new(self, Arc::new(source), Arc::default());
-            let packages: FxHashMap<intern::Path, LibraryPackage> = indexed
-                .packages
-                .into_iter()
-                .map(|package| {
-                    let input = LibraryPackage::new(
-                        self,
-                        library,
-                        package.package.clone(),
-                        package.names.into(),
-                        package.entries.into(),
-                        package.module,
-                    );
-                    (package.package, input)
-                })
-                .collect();
-            library.set_packages(self).to(Arc::new(packages));
-            inputs.push(library);
+            inputs.push(self.library_input(source, indexed));
         }
         let by_source_set: Arc<[Arc<[Library]>]> = by_source_set
             .into_iter()
@@ -288,10 +303,148 @@ impl RootDatabase {
         classpaths.set_jdk(self).to(jdk);
     }
 
+    /// The input for `source` indexed as `indexed`: the known one when
+    /// nothing changed, the known one updated when the archive did, else a
+    /// new one.
+    fn library_input(&mut self, source: LibrarySource, indexed: IndexedLibrary) -> Library {
+        use salsa::Setter;
+        let content = content_hash(&indexed);
+        let known = self.libraries.get(&source).copied();
+        let library = match known {
+            Some(known) if known.content == content => return known.input,
+            Some(known) => known.input,
+            None => Library::new(
+                self,
+                Arc::new(source.clone()),
+                Arc::default(),
+                indexed.stamp,
+            ),
+        };
+        if library.stamp(self) != indexed.stamp {
+            library.set_stamp(self).to(indexed.stamp);
+        }
+        let packages = self.package_inputs(library, indexed.packages);
+        if **library.packages(self) != packages {
+            library.set_packages(self).to(Arc::new(packages));
+        }
+        Arc::make_mut(&mut self.libraries).insert(
+            source,
+            KnownLibrary {
+                input: library,
+                content,
+            },
+        );
+        library
+    }
+
+    /// The package inputs of `library` for `packages`: a package it already
+    /// had keeps its input, updated where it changed.
+    fn package_inputs(
+        &mut self,
+        library: Library,
+        packages: Vec<IndexedPackage>,
+    ) -> FxHashMap<intern::Path, LibraryPackage> {
+        use salsa::Setter;
+        let known = library.packages(self).clone();
+        let mut inputs = FxHashMap::default();
+        for package in packages {
+            let names: Arc<[intern::Name]> = package.names.into();
+            let entries: Arc<[u32]> = package.entries.into();
+            let input = match known.get(&package.package).copied() {
+                Some(input) => {
+                    if *input.names(self) != names {
+                        input.set_names(self).to(names);
+                    }
+                    if *input.entries(self) != entries {
+                        input.set_entries(self).to(entries);
+                    }
+                    if input.module(self) != package.module {
+                        input.set_module(self).to(package.module);
+                    }
+                    input
+                }
+                None => LibraryPackage::new(
+                    self,
+                    library,
+                    package.package.clone(),
+                    names,
+                    entries,
+                    package.module,
+                ),
+            };
+            inputs.insert(package.package, input);
+        }
+        inputs
+    }
+
     /// Every file the database knows.
     pub fn all_files(&self) -> Vec<SourceFile> {
         let mut files: Vec<SourceFile> = self.files.values().copied().collect();
         files.sort_by_key(|file| file.file_id(self));
         files
+    }
+}
+
+fn content_hash(indexed: &IndexedLibrary) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    indexed.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use intern::{Name, Path};
+
+    use super::*;
+
+    fn indexed(names: &[&str], length: u64) -> IndexedLibrary {
+        IndexedLibrary {
+            packages: vec![IndexedPackage {
+                package: Path::parse("a"),
+                names: names.iter().map(|name| Name::new(name)).collect(),
+                entries: vec![0],
+                module: None,
+            }],
+            stamp: ArchiveStamp {
+                modified: None,
+                length,
+            },
+        }
+    }
+
+    #[test]
+    fn a_reload_reuses_an_unchanged_librarys_inputs_and_updates_a_changed_one() {
+        let mut db = RootDatabase::default();
+        let source = LibrarySource {
+            archive: PathBuf::from("/nowhere/a.jar"),
+            kind: ArchiveKind::Jar,
+            sources: None,
+        };
+        let library_of = |db: &RootDatabase| db.classpaths().by_source_set(db)[0][0];
+        db.set_libraries(
+            vec![(source.clone(), indexed(&["A"], 1))],
+            vec![vec![0]],
+            None,
+        );
+        let first = library_of(&db);
+        let package = first.packages(&db)[&Path::parse("a")];
+
+        db.set_libraries(
+            vec![(source.clone(), indexed(&["A"], 1))],
+            vec![vec![0]],
+            None,
+        );
+        assert_eq!(library_of(&db), first, "unchanged: the same input");
+
+        // Rebuilt in place with another class: same inputs, new contents.
+        db.set_libraries(vec![(source, indexed(&["A", "B"], 2))], vec![vec![0]], None);
+        let library = library_of(&db);
+        assert_eq!(library, first);
+        assert_eq!(library.packages(&db)[&Path::parse("a")], package);
+        assert_eq!(package.names(&db).len(), 2);
+        assert_eq!(library.stamp(&db).length, 2);
     }
 }

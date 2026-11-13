@@ -1278,3 +1278,36 @@ val total: Int = 0
             field@12 -> local field@12: Int"#]],
     );
 }
+
+#[test]
+fn a_body_edit_in_one_file_leaves_other_files_inference_alone() {
+    let mut fixture = with_stdlib(
+        r#"
+//- /app/Account.kt
+package app
+class Account { fun balance(): Long = 0 }
+//- /app/Use.kt
+package app
+fun use(account: Account) = account.balance()
+"#,
+    );
+    let inference = |fixture: &Fixture| {
+        let db = &fixture.database;
+        infer_file(db, db.source_file(fixture.file("/app/Use.kt")).unwrap())
+    };
+    let before = inference(&fixture);
+    fixture.edit(
+        "/app/Account.kt",
+        "package app\n\n// moved\nclass Account { fun balance(): Long = 1 + 41 }\n",
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &inference(&fixture)),
+        "Use.kt's inference is reused"
+    );
+    fixture.edit(
+        "/app/Account.kt",
+        "package app\nclass Account { fun balance(): Int = 0 }\n",
+    );
+    let after = inference(&fixture);
+    assert!(!std::sync::Arc::ptr_eq(&before, &after));
+}
