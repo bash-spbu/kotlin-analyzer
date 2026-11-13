@@ -11,21 +11,44 @@ use std::process::{Command, ExitCode};
 /// higher ones; features (`ide`) never reach past `hir` into `hir-def` or
 /// `hir-ty`. Only the binary sees everything.
 const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
+    ("intern", &[]),
     ("vfs", &[]),
     ("syntax", &[]),
-    ("project-model", &[]),
+    ("project-model", &["intern"]),
     ("sidecar", &[]),
-    ("base-db", &["vfs", "syntax", "project-model"]),
+    ("base-db", &["intern", "vfs", "syntax", "project-model"]),
     (
         "hir-def",
-        &["base-db", "syntax", "vfs", "project-model", "sidecar"],
+        &[
+            "intern",
+            "base-db",
+            "syntax",
+            "vfs",
+            "project-model",
+            "sidecar",
+        ],
     ),
-    ("hir-ty", &["hir-def", "base-db", "syntax", "vfs"]),
-    ("hir", &["hir-ty", "hir-def", "base-db", "syntax", "vfs"]),
-    ("ide", &["hir", "base-db", "syntax", "vfs"]),
+    ("hir-ty", &["intern", "hir-def", "base-db", "syntax", "vfs"]),
+    (
+        "hir",
+        &[
+            "intern",
+            "hir-ty",
+            "hir-def",
+            "base-db",
+            "syntax",
+            "vfs",
+            "project-model",
+        ],
+    ),
+    (
+        "ide",
+        &["intern", "hir", "base-db", "syntax", "vfs", "project-model"],
+    ),
     (
         "kotlin-analyzer",
         &[
+            "intern",
             "vfs",
             "syntax",
             "project-model",
