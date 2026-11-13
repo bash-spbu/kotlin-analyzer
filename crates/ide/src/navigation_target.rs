@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hir::{ClassKind, FileId, ItemKind, ItemLocation, RootDatabase};
+use hir::{ClassKind, FileId, ItemKind, ItemLocation, Local, RootDatabase, SourceFile};
 use syntax::TextRange;
 
 /// What a declaration is, as editors show it.
@@ -21,6 +21,8 @@ pub enum SymbolKind {
     Constructor,
     EnumMember,
     TypeAlias,
+    /// A local variable, parameter or local function.
+    Variable,
 }
 
 impl SymbolKind {
@@ -107,5 +109,17 @@ impl NavigationTarget {
             focus_range,
             container,
         })
+    }
+
+    /// A local declared in `file`.
+    pub fn of_local(db: &RootDatabase, file: SourceFile, local: &Local) -> NavigationTarget {
+        NavigationTarget {
+            file: NavigationFile::Workspace(file.file_id(db)),
+            name: local.name.to_string(),
+            kind: SymbolKind::Variable,
+            full_range: local.name_range,
+            focus_range: local.name_range,
+            container: None,
+        }
     }
 }

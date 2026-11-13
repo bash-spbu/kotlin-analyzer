@@ -211,6 +211,17 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         vec!["T.apply(block: T.() -> kotlin.Unit): T"]
     );
 
+    // Built-in functions have no class file either: `arrayOf` is in the
+    // `kotlin` package's built-ins.
+    let array_of: Vec<String> = top_level(&contents, "kotlin", "arrayOf")
+        .into_iter()
+        .map(signature)
+        .collect();
+    assert_eq!(
+        array_of,
+        vec!["arrayOf(vararg elements: T): kotlin.Array<T>"]
+    );
+
     let aliases: Vec<String> = contents
         .package_members
         .iter()

@@ -8,6 +8,7 @@
 mod document_symbols;
 mod goto_definition;
 mod hover;
+mod inlay_hints;
 mod navigation_target;
 mod statistics;
 mod workspace_symbols;
@@ -21,8 +22,9 @@ use syntax::{SyntaxError, TextRange};
 pub use document_symbols::DocumentSymbol;
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
+pub use inlay_hints::InlayHint;
 pub use navigation_target::{NavigationFile, NavigationTarget, SymbolKind};
-pub use statistics::DeclarationStatistics;
+pub use statistics::{BodyStatistics, DeclarationStatistics, UnsettledName};
 
 /// A result that a newer change may have cancelled.
 pub type Cancellable<T> = Result<T, Cancelled>;
@@ -102,6 +104,16 @@ impl Analysis {
         self.with_db(|db| hover::hover(db, file, offset))
     }
 
+    /// Inferred types of the locals in `range` (the whole file when
+    /// `None`) that don't write one.
+    pub fn inlay_hints(
+        &self,
+        file: FileId,
+        range: Option<TextRange>,
+    ) -> Cancellable<Vec<InlayHint>> {
+        self.with_db(|db| inlay_hints::inlay_hints(db, file, range))
+    }
+
     /// The declarations the name at `offset` refers to.
     pub fn goto_definition(
         &self,
@@ -119,6 +131,17 @@ impl Analysis {
     /// Workspace-wide declaration and resolution counts.
     pub fn declaration_statistics(&self) -> Cancellable<DeclarationStatistics> {
         self.with_db(statistics::declaration_statistics)
+    }
+
+    /// What inference resolves in the bodies of `files`.
+    pub fn body_statistics(&self, files: &[FileId]) -> Cancellable<BodyStatistics> {
+        self.with_db(|db| statistics::body_statistics(db, files))
+    }
+
+    /// The names in `file`'s bodies inference left unresolved or with
+    /// several candidates.
+    pub fn unsettled_names(&self, file: FileId) -> Cancellable<Vec<UnsettledName>> {
+        self.with_db(|db| statistics::unsettled_names(db, file))
     }
 
     /// The range of the declaration name at `offset`, when there is one.

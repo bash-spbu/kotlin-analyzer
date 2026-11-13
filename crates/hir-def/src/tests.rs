@@ -143,8 +143,8 @@ public interface Repo<T, ID> extends Base<T>, java.io.Serializable {
             import java.util.function.Function
             interface Repo<T, ID> : Base<T>, java.io.Serializable
               static final val LIMIT: int
-              fun findById(id: ID): Optional<T>
-              fun map<R>(mapper: Function<in T, out R>, vararg tags: String): List<R>
+              abstract fun findById(id: ID): Optional<T>
+              abstract fun map<R>(mapper: Function<in T, out R>, vararg tags: String): List<R>
               enum class Mode
                 static entry FAST
                 static entry SAFE

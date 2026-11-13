@@ -1,10 +1,10 @@
 //! `textDocument/hover`: a declaration's signature, its documentation, and
 //! where it lives.
 
-use hir::{FileId, ItemContainer, ItemLocation, RootDatabase};
+use hir::{FileId, ItemContainer, ItemLocation, Local, LocalKind, RootDatabase};
 use syntax::{Language, SyntaxNode, TextRange};
 
-use crate::goto_definition::name_at;
+use crate::goto_definition::{NameTarget, name_at};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct HoverResult {
@@ -15,10 +15,30 @@ pub struct HoverResult {
 
 pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<HoverResult> {
     let name = name_at(db, file, offset)?;
-    let location = *name.declarations.first()?;
+    let location = match &name.target {
+        NameTarget::Local { local, .. } => {
+            return Some(HoverResult {
+                markdown: format!("```kotlin\n{}\n```", local_signature(db, local)),
+                range: name.range,
+            });
+        }
+        NameTarget::Declarations(declarations) => *declarations.first()?,
+    };
     let tree = hir::item_tree(db, location.container);
     let item = tree.item(location.item);
     let mut markdown = format!("```kotlin\n{}\n```", tree.signature(location.item));
+    if let Some(ty) = name.ty.as_ref().filter(|ty| !ty.is_unknown())
+        && type_depends_on_use(&tree, location)
+    {
+        let label = match item.kind {
+            hir::ItemKind::Property { .. } | hir::ItemKind::EnumEntry => "Type",
+            _ => "Returns",
+        };
+        markdown.push_str(&format!(
+            "\n\n{label} here: `{}`",
+            hir::display_type(db, ty)
+        ));
+    }
     if let Some(documentation) = documentation(db, location) {
         markdown.push_str("\n\n---\n\n");
         markdown.push_str(&documentation);
@@ -43,6 +63,36 @@ pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<Ho
     })
 }
 
+/// Whether the type a use of the declaration gets can differ from what the
+/// declaration writes: it, or its class, is generic, or it writes no type.
+fn type_depends_on_use(tree: &hir::ItemTree, location: ItemLocation) -> bool {
+    let item = tree.item(location.item);
+    let generic_class = item
+        .parent
+        .is_some_and(|parent| !tree.item(parent).type_parameters.is_empty());
+    let writes_no_type = matches!(
+        &item.signature,
+        hir::Signature::Function {
+            return_type: None,
+            ..
+        } | hir::Signature::Property { type_ref: None, .. }
+    );
+    !item.type_parameters.is_empty() || generic_class || writes_no_type
+}
+
+/// `val name: Type`, `it: Type`, `fun name(…): Type`.
+fn local_signature(db: &RootDatabase, local: &Local) -> String {
+    let ty = hir::display_type(db, &local.ty);
+    match local.kind {
+        LocalKind::Value => format!("val {}: {ty}", local.name),
+        LocalKind::Variable => format!("var {}: {ty}", local.name),
+        LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::ImplicitIt => {
+            format!("{}: {ty}", local.name)
+        }
+        LocalKind::Function => format!("fun {}: {ty}", local.name),
+    }
+}
+
 /// The KDoc or Javadoc comment just before the declaration, cleaned up.
 fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
     match location.container {
@@ -50,7 +100,7 @@ fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
             let parse = hir::parse(db, file);
             let tree = hir::file_item_tree(db, file);
             let range = tree.item(location.item).range;
-            doc_comment(parse, range)
+            doc_comment(&parse, range)
         }
         ItemContainer::Library(_) => {
             let source = hir::library_declaration_source(db, location)?;

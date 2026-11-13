@@ -6,7 +6,8 @@ use std::sync::Arc;
 use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _, WorkspaceSymbolRequest,
+    DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest, Request as _,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -38,6 +39,9 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
         }
         HoverRequest::METHOD => {
             params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
+        }
+        InlayHintRequest::METHOD => {
+            params::<InlayHintRequest>(request).map(|params| inlay_hints(&snapshot, params))
         }
         DocumentSymbolRequest::METHOD => {
             params::<DocumentSymbolRequest>(request).map(|_| document_symbols(&snapshot))
@@ -108,6 +112,39 @@ fn hover(snapshot: &Snapshot, params: lsp_types::HoverParams) -> Cancellable<ser
         range: Some(convert::range(&index, &text, result.range)),
     };
     Ok(serde_json::to_value(hover).unwrap_or_default())
+}
+
+fn inlay_hints(
+    snapshot: &Snapshot,
+    params: lsp_types::InlayHintParams,
+) -> Cancellable<serde_json::Value> {
+    let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(text) = snapshot.analysis.file_text(file)? else {
+        return Ok(serde_json::Value::Null);
+    };
+    let range = syntax::TextRange::new(
+        convert::offset(&text, params.range.start),
+        convert::offset(&text, params.range.end),
+    );
+    let index = LineIndex::new(&text);
+    let hints: Vec<lsp_types::InlayHint> = snapshot
+        .analysis
+        .inlay_hints(file, Some(range))?
+        .into_iter()
+        .map(|hint| lsp_types::InlayHint {
+            position: convert::position(&index, &text, hint.offset as usize),
+            label: lsp_types::InlayHintLabel::String(hint.label),
+            kind: Some(lsp_types::InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: None,
+            data: None,
+        })
+        .collect();
+    Ok(serde_json::to_value(hints).unwrap_or_default())
 }
 
 fn location_of(snapshot: &Snapshot, target: &NavigationTarget) -> Cancellable<Option<Location>> {
@@ -241,6 +278,7 @@ fn symbol_kind(kind: SymbolKind) -> lsp_types::SymbolKind {
         SymbolKind::Field => lsp_types::SymbolKind::FIELD,
         SymbolKind::Constructor => lsp_types::SymbolKind::CONSTRUCTOR,
         SymbolKind::EnumMember => lsp_types::SymbolKind::ENUM_MEMBER,
+        SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
         SymbolKind::TypeAlias => lsp_types::SymbolKind::TYPE_PARAMETER,
     }
 }

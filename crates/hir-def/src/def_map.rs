@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use base_db::{Library, SourceDatabase, SourceFile, SourceSet};
+use base_db::{Library, LibraryPackage, SourceDatabase, SourceFile, SourceSet};
 use intern::{Name, Path};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::item_tree::{ItemTree, Visibility};
 use crate::library::library_package_tree;
@@ -18,6 +18,8 @@ use crate::{ItemContainer, ItemLocation, file_item_tree};
 #[derive(PartialEq, Eq, Debug, Default)]
 pub struct DefMap {
     packages: FxHashMap<Path, FxHashMap<Name, Vec<ItemLocation>>>,
+    /// Every package and every prefix of one (`a`, `a.b` for `a.b.c`).
+    package_prefixes: FxHashSet<Path>,
 }
 
 impl DefMap {
@@ -45,6 +47,11 @@ impl DefMap {
     pub fn packages(&self) -> impl Iterator<Item = &Path> {
         self.packages.keys()
     }
+
+    /// Whether `path` is a package or the start of one.
+    pub fn has_package_prefix(&self, path: &Path) -> bool {
+        self.package_prefixes.contains(path)
+    }
 }
 
 #[salsa::tracked(returns(clone))]
@@ -58,6 +65,7 @@ pub fn source_set_def_map(db: &dyn SourceDatabase, source_set: SourceSet) -> Arc
 }
 
 fn add_file(map: &mut DefMap, file: SourceFile, tree: &ItemTree) {
+    add_prefixes(&mut map.package_prefixes, &tree.package);
     let scope = map.packages.entry(tree.package.clone()).or_default();
     for index in tree.top_level.iter() {
         let item = tree.item(*index);
@@ -81,14 +89,14 @@ pub fn visible_top_level(
     package: &Path,
     name: Name,
 ) -> Vec<ItemLocation> {
-    let mut found = Vec::new();
-    for source_set in visible_source_sets(db, from).iter() {
-        for location in source_set_def_map(db, *source_set).declarations(package, name) {
-            if is_visible(db, from, *location) {
-                found.push(*location);
-            }
-        }
-    }
+    let mut found: Vec<ItemLocation> = match source_set_input(db, from) {
+        Some(source_set) => workspace_top_level(db, source_set, package.clone(), name)
+            .iter()
+            .copied()
+            .filter(|location| is_visible(db, from, *location))
+            .collect(),
+        None => Vec::new(),
+    };
     if found.is_empty() && from.source_set(db).is_none() {
         // A file outside every source set sees its own declarations.
         let tree = file_item_tree(db, from);
@@ -103,10 +111,7 @@ pub fn visible_top_level(
     if !found.is_empty() {
         return found;
     }
-    for library in libraries_of(db, from) {
-        let Some(library_package) = library.packages(db).get(package).copied() else {
-            continue;
-        };
+    for library_package in classpath_packages(db, from, package) {
         if !library_package.declares(db, name) {
             continue;
         }
@@ -127,6 +132,121 @@ pub fn visible_top_level(
     Vec::new()
 }
 
+/// The top-level declarations named `name` in `package` of the source sets
+/// `source_set` sees, before visibility (which depends on the asking file)
+/// filters them. Remembered: the same names are looked up over and over.
+#[salsa::tracked(returns(clone))]
+pub fn workspace_top_level(
+    db: &dyn SourceDatabase,
+    source_set: SourceSet,
+    package: Path,
+    name: Name,
+) -> Arc<[ItemLocation]> {
+    source_set_visibility(db, source_set)
+        .iter()
+        .flat_map(|visible| {
+            source_set_def_map(db, *visible)
+                .declarations(&package, name)
+                .to_vec()
+        })
+        .collect()
+}
+
+/// Every library's packages, by package name: which libraries declare
+/// each (a package is usually in one or two).
+#[derive(PartialEq, Eq, Debug, Default)]
+pub struct LibraryPackages {
+    by_package: FxHashMap<Path, Vec<LibraryPackage>>,
+    /// Every package and every prefix of one.
+    prefixes: FxHashSet<Path>,
+}
+
+#[salsa::tracked(returns(clone))]
+pub fn library_packages(db: &dyn SourceDatabase) -> Arc<LibraryPackages> {
+    let classpaths = db.classpaths();
+    let mut libraries: Vec<Library> = classpaths.jdk(db).into_iter().collect();
+    for classpath in classpaths.by_source_set(db).iter() {
+        libraries.extend(classpath.iter().copied());
+    }
+    let mut seen = FxHashSet::default();
+    let mut index = LibraryPackages::default();
+    for library in libraries {
+        if !seen.insert(library) {
+            continue;
+        }
+        for (package, library_package) in library.packages(db).iter() {
+            index
+                .by_package
+                .entry(package.clone())
+                .or_default()
+                .push(*library_package);
+            add_prefixes(&mut index.prefixes, package);
+        }
+    }
+    Arc::new(index)
+}
+
+/// Where each library is on a source set's classpath (the JDK first).
+#[salsa::tracked(returns(clone))]
+pub fn classpath_positions(
+    db: &dyn SourceDatabase,
+    source_set: SourceSet,
+) -> Arc<FxHashMap<Library, u32>> {
+    let classpaths = db.classpaths();
+    let classpath = classpaths
+        .by_source_set(db)
+        .get(source_set.id(db).0 as usize)
+        .into_iter()
+        .flat_map(|classpath| classpath.iter().copied());
+    let mut positions = FxHashMap::default();
+    for (position, library) in classpaths.jdk(db).into_iter().chain(classpath).enumerate() {
+        positions.entry(library).or_insert(position as u32);
+    }
+    Arc::new(positions)
+}
+
+/// The packages named `package` of the libraries `from` compiles against,
+/// in classpath order.
+fn classpath_packages(
+    db: &dyn SourceDatabase,
+    from: SourceFile,
+    package: &Path,
+) -> Vec<LibraryPackage> {
+    let index = library_packages(db);
+    let Some(declaring) = index.by_package.get(package) else {
+        return Vec::new();
+    };
+    let positions = match source_set_input(db, from) {
+        Some(source_set) => classpath_positions(db, source_set),
+        None => {
+            let jdk = db.classpaths().jdk(db);
+            return declaring
+                .iter()
+                .filter(|library_package| Some(library_package.library(db)) == jdk)
+                .copied()
+                .collect();
+        }
+    };
+    let mut ordered: Vec<(u32, LibraryPackage)> = declaring
+        .iter()
+        .filter_map(|library_package| {
+            positions
+                .get(&library_package.library(db))
+                .map(|position| (*position, *library_package))
+        })
+        .collect();
+    ordered.sort_by_key(|(position, _)| *position);
+    ordered
+        .into_iter()
+        .map(|(_, library_package)| library_package)
+        .collect()
+}
+
+fn source_set_input(db: &dyn SourceDatabase, file: SourceFile) -> Option<SourceSet> {
+    let id = file.source_set(db)?;
+    db.workspace().source_sets(db).get(id.0 as usize).copied()
+}
+
 /// The libraries `from` compiles against: the JDK, then its source set's
 /// classpath in order.
 pub fn libraries_of(db: &dyn SourceDatabase, from: SourceFile) -> Vec<Library> {
@@ -140,15 +260,28 @@ pub fn libraries_of(db: &dyn SourceDatabase, from: SourceFile) -> Vec<Library> {
     libraries
 }
 
+fn add_prefixes(prefixes: &mut FxHashSet<Path>, package: &Path) {
+    let segments = package.segments();
+    for length in 1..=segments.len() {
+        prefixes.insert(Path::new(segments[..length].iter().copied()));
+    }
+}
+
+/// Whether `path` is a package `from` sees, or the start of one — what a
+/// qualified name's leading segments (`java` in `java.time.Instant`) are.
+pub fn package_prefix_exists(db: &dyn SourceDatabase, from: SourceFile, path: &Path) -> bool {
+    let in_sources = visible_source_sets(db, from)
+        .iter()
+        .any(|source_set| source_set_def_map(db, *source_set).has_package_prefix(path));
+    in_sources || library_packages(db).prefixes.contains(path)
+}
+
 /// Whether any source set or library `from` sees declares the package.
 pub fn package_exists(db: &dyn SourceDatabase, from: SourceFile, package: &Path) -> bool {
     let in_sources = visible_source_sets(db, from)
         .iter()
         .any(|source_set| source_set_def_map(db, *source_set).has_package(package));
-    in_sources
-        || libraries_of(db, from)
-            .into_iter()
-            .any(|library| library.packages(db).contains_key(package))
+    in_sources || !classpath_packages(db, from, package).is_empty()
 }
 
 /// The inputs of the source sets `from` sees, its own first.

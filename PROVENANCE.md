@@ -17,6 +17,7 @@ Rules:
 | here | from (author's own work in the fork) | what was taken |
 |---|---|---|
 | `editors/gradle/kotlin-analyzer.init.gradle` | `contrib/gradle/kmp-lsp-deps.init.gradle` (author's own) | the idea of an init-script task exporting the build's resolved dependencies and generated source roots; rewritten for the new `project.json` model (modules, source sets, module dependencies, per-source-set libraries with sources JARs, JDK) and Gradle 9's per-project resolution |
+| `crates/hir-ty/src/infer/` | `src/analysis/` of the fork (scope-tower call resolution, call receivers, lambda parameters — the author's own) | the approach only: resolve a call against candidate levels in Kotlin's scope order and type lambda parameters from the parameter they're passed to. The rules themselves are taken from the Kotlin specification (overload resolution, type inference, smart casts); no code was read or reused |
 | `crates/syntax/src/pointer.rs` (`SyntaxNodePtr`) | `src/indexer/file_model/syntax_ptr.rs` (author's own) | the design: a node remembered by kind and range, found again by climbing from the smallest node spanning the range; rewritten |
 
 ## Formats implemented from published specifications

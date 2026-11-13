@@ -1,5 +1,8 @@
 //! Workspace-wide counts for `analysis-stats`: how many declarations there
-//! are and how many type names written in their signatures resolve.
+//! are and how many type names written in their signatures resolve; how
+//! many names in bodies inference resolves, and how long it takes.
+
+use std::time::{Duration, Instant};
 
 use hir::{
     ItemTree, Name, Resolution, RootDatabase, Signature, SourceDatabase, SourceFile, TypeRef,
@@ -172,4 +175,153 @@ pub(crate) fn prime_item_trees(db: &RootDatabase, files: &[hir::FileId]) {
             hir::file_item_tree(db, source);
         }
     }
+}
+
+/// What inference found in bodies.
+#[derive(Debug, Default)]
+pub struct BodyStatistics {
+    pub files: usize,
+    /// Names resolved to one declaration or local.
+    pub resolved: usize,
+    /// Of those, the ones whose value's type is known.
+    pub typed: usize,
+    /// Names with several candidates left (ambiguous, or none fitting).
+    pub candidates: usize,
+    pub unresolved: usize,
+    pub unresolved_names: FxHashMap<String, usize>,
+    pub candidate_names: FxHashMap<String, usize>,
+    /// Where each unsettled name first occurs.
+    pub examples: FxHashMap<String, (hir::FileId, u32)>,
+    /// How long each file's inference took.
+    pub durations: Vec<(hir::FileId, Duration)>,
+}
+
+impl BodyStatistics {
+    pub fn merge(&mut self, other: BodyStatistics) {
+        self.files += other.files;
+        self.resolved += other.resolved;
+        self.typed += other.typed;
+        self.candidates += other.candidates;
+        self.unresolved += other.unresolved;
+        for (name, count) in other.unresolved_names {
+            *self.unresolved_names.entry(name).or_default() += count;
+        }
+        for (name, count) in other.candidate_names {
+            *self.candidate_names.entry(name).or_default() += count;
+        }
+        for (name, example) in other.examples {
+            self.examples.entry(name).or_insert(example);
+        }
+        self.durations.extend(other.durations);
+    }
+
+    /// Names by how often they occur, most first.
+    pub fn ranked(counts: &FxHashMap<String, usize>) -> Vec<(String, usize)> {
+        let mut top: Vec<(String, usize)> = counts
+            .iter()
+            .map(|(name, count)| (name.clone(), *count))
+            .collect();
+        top.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+        top
+    }
+}
+
+pub(crate) fn body_statistics(db: &RootDatabase, files: &[hir::FileId]) -> BodyStatistics {
+    let mut statistics = BodyStatistics::default();
+    for file_id in files {
+        let Some(file) = db.source_file(*file_id) else {
+            continue;
+        };
+        if file.language(db) != hir::Language::Kotlin {
+            continue;
+        }
+        let started = Instant::now();
+        let inference = hir::infer_file(db, file);
+        statistics.durations.push((*file_id, started.elapsed()));
+        statistics.files += 1;
+        let text = file.text(db);
+        let name_at = |start: u32| -> String {
+            text[start as usize..]
+                .chars()
+                .take_while(|char| char.is_alphanumeric() || *char == '_')
+                .collect()
+        };
+        for (start, resolved) in inference.names() {
+            match resolved.reference {
+                hir::Reference::Local(_) | hir::Reference::Declaration(_) => {
+                    statistics.resolved += 1;
+                    if !resolved.ty.is_unknown() {
+                        statistics.typed += 1;
+                    }
+                }
+                hir::Reference::Candidates(_) => {
+                    statistics.candidates += 1;
+                    let name = name_at(start);
+                    statistics
+                        .examples
+                        .entry(name.clone())
+                        .or_insert((*file_id, start));
+                    *statistics.candidate_names.entry(name).or_default() += 1;
+                }
+            }
+        }
+        for (start, name) in inference.unresolved() {
+            statistics
+                .examples
+                .entry(name.to_string())
+                .or_insert((*file_id, *start));
+            statistics.unresolved += 1;
+            *statistics
+                .unresolved_names
+                .entry(name.to_string())
+                .or_default() += 1;
+        }
+    }
+    statistics
+}
+
+/// A name in a body inference couldn't settle.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct UnsettledName {
+    pub offset: u32,
+    pub name: String,
+    /// `None`: nothing has the name; else how many candidates are left.
+    pub candidates: Option<usize>,
+}
+
+pub(crate) fn unsettled_names(db: &RootDatabase, file: hir::FileId) -> Vec<UnsettledName> {
+    let Some(source) = db.source_file(file) else {
+        return Vec::new();
+    };
+    let inference = hir::infer_file(db, source);
+    let text = source.text(db);
+    let name_at = |start: u32| -> String {
+        text[start as usize..]
+            .chars()
+            .take_while(|char| char.is_alphanumeric() || *char == '_')
+            .collect()
+    };
+    let mut unsettled: Vec<UnsettledName> = inference
+        .names()
+        .filter_map(|(start, resolved)| match &resolved.reference {
+            hir::Reference::Candidates(candidates) => Some(UnsettledName {
+                offset: start,
+                name: name_at(start),
+                candidates: Some(candidates.len()),
+            }),
+            _ => None,
+        })
+        .chain(
+            inference
+                .unresolved()
+                .iter()
+                .map(|(start, name)| UnsettledName {
+                    offset: *start,
+                    name: name.to_string(),
+                    candidates: None,
+                }),
+        )
+        .collect();
+    unsettled.sort_by_key(|name| name.offset);
+    unsettled
 }

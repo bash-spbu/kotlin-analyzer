@@ -26,6 +26,10 @@
   its layer. Features (`ide`) ask `hir`; they never reach into `hir-def` or
   `hir-ty`.
 - Every derived fact is a query of the database; read paths take `&self`.
+  The one exception is syntax trees: `base_db::parse` keeps a bounded cache
+  keyed by the text's identity (a tree is a pure function of its text),
+  because Salsa evicts a query's results only between revisions and a pass
+  over the workspace would keep every tree.
 - Analysis fails closed: when something can't be known exactly, the answer is
   `Unknown` and no diagnostic is reported.
 - Nothing above `vfs` reads source text from disk.

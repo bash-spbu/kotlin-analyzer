@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         Some("parse") => parse_command(arguments.get(1)),
         Some("analysis-stats") => analysis_stats_command(&arguments[1..]),
         Some("definition") => analysis_stats::definition_command(&arguments[1..]),
+        Some("inference") => analysis_stats::inference_command(&arguments[1..]),
         Some("--help" | "-h") => {
             print!("{USAGE}");
             ExitCode::SUCCESS

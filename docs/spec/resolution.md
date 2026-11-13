@@ -74,3 +74,43 @@ without parameters. A later declaration in the same block does not bind an
 earlier use. Smart casts narrow a stable value's type after a check
 (`is`, `!= null`, `!!`, contracts like `requireNotNull`), along the paths
 where the check holds.
+
+## Types in bodies
+
+Every expression gets a type, or `Unknown`. A call's type parameters are
+inferred from, in this order of evidence: explicit type arguments, the
+receiver (`List<String>.map` binds `T`), the arguments (each inferred with its
+parameter's type expected), the type the context expects (`val x:
+List<String> = emptyList()`), and the lambdas' results (inferred last, their
+parameters typed from the parameter they're passed to — a function type, or a
+functional interface's single abstract method). Parameters nothing binds
+become `Unknown`.
+
+Among applicable overloads, the most specific wins: one whose parameter types
+fit another's (a concrete type is more specific than a type parameter whose
+bounds allow it); an extension's receiver counts as a parameter. Ties go to a
+non-`vararg`, then to the one using fewer defaults, then to a non-generic one,
+then — for Java's `f(int)` against `f(Integer)` — to non-null parameters. A
+lambda fits a parameter only with the right number of parameters (`{ … }`
+counts as none or one). A Java parameter of a mutable collection type also
+takes the read-only collection. An argument breaking a callee type
+parameter's bounds makes the overload inapplicable.
+
+Java declarations have platform types (`String!`); Java getters and setters
+read as properties (`user.name`, `user.active` for `isActive()`). The compiler
+generates `copy` of data classes, `valueOf`, `values` and `entries` of enums,
+and `componentN` for destructuring; the companions of superclasses are
+implicit receivers in subclasses.
+
+A declaration without a written type gets its body's type; one whose type
+depends on itself is `Unknown`.
+
+### Not modelled yet (stays `Unknown`, never reported)
+
+- contracts (`require(x is T)`, `requireNotNull(x)`, `checkNotNull`) and
+  smart casts after `!!`;
+- members of anonymous objects (`object { val x = 1 }`);
+- declarations compiler plugins generate (`serializer()` of
+  `@Serializable` classes);
+- member extensions, which need two receivers;
+- type parameters of local functions.

@@ -1,0 +1,369 @@
+//! Whether a value fits where a type is expected, binding a callee's type
+//! parameters from the values passed, and the common type of branches.
+
+use hir_def::item_tree as tree;
+use hir_def::item_tree::{ClassKind, ItemKind, Modifiers};
+
+use crate::members::{Types, class_substitution};
+use crate::ty::{ClassType, FunctionType, Nullability, Substitution, Ty, TypeParameterId};
+
+/// How well a value fits an expected type.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Fit {
+    No,
+    /// Can't tell (something is unknown, or the rules involved aren't
+    /// modelled): treated as fitting, never reported.
+    Unknown,
+    Yes,
+}
+
+impl Fit {
+    pub fn and(self, other: Fit) -> Fit {
+        self.min(other)
+    }
+}
+
+impl Types<'_> {
+    /// Whether a value of type `value` may be used where `expected` is.
+    pub fn fits(&self, value: &Ty, expected: &Ty) -> Fit {
+        if value.is_unknown() || expected.is_unknown() {
+            return Fit::Unknown;
+        }
+        let null_into_non_null = value.nullability() == Nullability::Nullable
+            && expected.nullability() == Nullability::NotNull
+            && !matches!(expected, Ty::TypeParameter { .. });
+        if null_into_non_null {
+            return Fit::No;
+        }
+        match (value, expected) {
+            (Ty::Nothing { .. }, _) => Fit::Yes,
+            (
+                Ty::TypeParameter {
+                    parameter: value_parameter,
+                    ..
+                },
+                Ty::TypeParameter {
+                    parameter: expected_parameter,
+                    ..
+                },
+            ) if value_parameter == expected_parameter => Fit::Yes,
+            (_, Ty::TypeParameter { .. }) => Fit::Unknown,
+            (Ty::TypeParameter { parameter, .. }, Ty::Class(expected_class)) => {
+                if self.is_any(expected_class) {
+                    return Fit::Yes;
+                }
+                let bounds = self.type_parameter_bounds(*parameter);
+                if bounds
+                    .iter()
+                    .any(|bound| self.fits(bound, expected) == Fit::Yes)
+                {
+                    Fit::Yes
+                } else {
+                    Fit::Unknown
+                }
+            }
+            (Ty::Function(value_function), Ty::Function(expected_function)) => {
+                if arity(value_function) == arity(expected_function) {
+                    Fit::Yes
+                } else {
+                    Fit::No
+                }
+            }
+            (Ty::Function(_), Ty::Class(expected_class)) => {
+                if self.is_any(expected_class) {
+                    Fit::Yes
+                } else {
+                    // A functional interface (SAM conversion), or `FunctionN`.
+                    Fit::Unknown
+                }
+            }
+            (Ty::Class(_), Ty::Function(_)) => Fit::Unknown,
+            (Ty::Class(value_class), Ty::Class(expected_class)) => {
+                self.class_fits(value_class, expected_class)
+            }
+            (_, Ty::Nothing { .. }) => Fit::No,
+            _ => Fit::Unknown,
+        }
+    }
+
+    fn class_fits(&self, value: &ClassType, expected: &ClassType) -> Fit {
+        if value.class == expected.class || self.is_any(expected) {
+            return Fit::Yes;
+        }
+        let is_supertype = self
+            .all_supertypes(value)
+            .iter()
+            .any(|supertype| supertype.class == expected.class);
+        if is_supertype {
+            return Fit::Yes;
+        }
+        // A Java parameter typed `java.util.List` takes a read-only
+        // `kotlin.collections.List` as well: it's `(Mutable)List!`.
+        if expected.nullability == Nullability::Platform
+            && let Some(read_only) = self.read_only_collection(expected)
+            && all_supertypes_contain(&self.all_supertypes(value), read_only)
+        {
+            return Fit::Yes;
+        }
+        Fit::No
+    }
+
+    /// `kotlin.collections.List` for `MutableList` (and so on).
+    fn read_only_collection(&self, mutable: &ClassType) -> Option<hir_def::ItemLocation> {
+        let tree = hir_def::item_tree(self.db, mutable.class.container);
+        let item = tree.item(mutable.class.item);
+        let read_only_name = item.name.as_str().strip_prefix("Mutable")?;
+        let parent = item.parent.map(|parent| tree.item(parent).name.as_str());
+        let qualified = match parent {
+            // `MutableMap.MutableEntry` → `Map.Entry`.
+            Some(parent) => format!(
+                "{}.{read_only_name}",
+                parent.strip_prefix("Mutable").unwrap_or(parent)
+            ),
+            None => read_only_name.to_owned(),
+        };
+        match crate::lower::builtin(
+            self.db,
+            self.from,
+            "kotlin.collections",
+            &qualified,
+            Vec::new(),
+        ) {
+            Ty::Class(read_only) => Some(read_only.class),
+            _ => None,
+        }
+    }
+
+    fn is_any(&self, class: &ClassType) -> bool {
+        matches!(self.builtin("Any"), Ty::Class(any) if any.class == class.class)
+    }
+
+    /// Binds the callee's `parameters` that `expected` mentions from the
+    /// value passed for it (`List<T>` given `ArrayList<String>` binds `T`
+    /// to `String`).
+    pub fn unify(
+        &self,
+        expected: &Ty,
+        value: &Ty,
+        parameters: &[TypeParameterId],
+        substitution: &mut Substitution,
+    ) {
+        self.unify_at_depth(expected, value, parameters, substitution, 0);
+    }
+
+    fn unify_at_depth(
+        &self,
+        expected: &Ty,
+        value: &Ty,
+        parameters: &[TypeParameterId],
+        substitution: &mut Substitution,
+        depth: usize,
+    ) {
+        if depth > 8 || value.is_unknown() {
+            return;
+        }
+        match expected {
+            Ty::TypeParameter {
+                parameter,
+                nullability,
+            } if parameters.contains(parameter) => {
+                if matches!(value, Ty::Nothing { .. }) {
+                    return;
+                }
+                let bound = match nullability {
+                    Nullability::Nullable => value.clone().non_null(),
+                    _ => value.clone(),
+                };
+                substitution.bind(*parameter, bound);
+            }
+            Ty::Class(expected_class) => {
+                if expected_class.arguments.is_empty() {
+                    return;
+                }
+                if let Ty::Function(_) = value {
+                    // A lambda passed for a functional interface binds through
+                    // its single method: `Rows<T>` given `{ row, _ -> 1 }`.
+                    if let Some(function) = self.functional_interface_type(expected_class) {
+                        self.unify_at_depth(
+                            &Ty::Function(Box::new(function)),
+                            value,
+                            parameters,
+                            substitution,
+                            depth + 1,
+                        );
+                    }
+                    return;
+                }
+                let Some(instance) = self.as_supertype(value, expected_class.class) else {
+                    return;
+                };
+                for (expected_argument, value_argument) in expected_class
+                    .arguments
+                    .iter()
+                    .zip(instance.arguments.iter())
+                {
+                    self.unify_at_depth(
+                        expected_argument,
+                        value_argument,
+                        parameters,
+                        substitution,
+                        depth + 1,
+                    );
+                }
+            }
+            Ty::Function(expected_function) => {
+                let Ty::Function(value_function) = value else {
+                    return;
+                };
+                if let (Some(expected_receiver), Some(value_receiver)) =
+                    (&expected_function.receiver, &value_function.receiver)
+                {
+                    self.unify_at_depth(
+                        expected_receiver,
+                        value_receiver,
+                        parameters,
+                        substitution,
+                        depth + 1,
+                    );
+                }
+                for (expected_parameter, value_parameter) in expected_function
+                    .parameters
+                    .iter()
+                    .zip(value_function.parameters.iter())
+                {
+                    self.unify_at_depth(
+                        expected_parameter,
+                        value_parameter,
+                        parameters,
+                        substitution,
+                        depth + 1,
+                    );
+                }
+                self.unify_at_depth(
+                    &expected_function.result,
+                    &value_function.result,
+                    parameters,
+                    substitution,
+                    depth + 1,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// The type of an expression whose value is one of `branches`.
+    pub fn common_type(&self, branches: &[Ty]) -> Ty {
+        let mut nullable = false;
+        let mut common: Option<Ty> = None;
+        for branch in branches {
+            match branch {
+                Ty::Nothing { nullable: true } => nullable = true,
+                Ty::Nothing { nullable: false } => {}
+                other => {
+                    if other.nullability() == Nullability::Nullable {
+                        nullable = true;
+                    }
+                    let other = other.clone().non_null();
+                    common = Some(match common {
+                        None => other,
+                        Some(known) => self.common_supertype(&known, &other),
+                    });
+                }
+            }
+        }
+        match (common, nullable) {
+            (Some(common), true) => common.nullable(),
+            (Some(common), false) => common,
+            (None, true) => Ty::Nothing { nullable: true },
+            (None, false) => Ty::Nothing { nullable: false },
+        }
+    }
+
+    fn common_supertype(&self, first: &Ty, second: &Ty) -> Ty {
+        if first == second {
+            return first.clone();
+        }
+        if first.is_unknown() || second.is_unknown() {
+            return Ty::Unknown;
+        }
+        if self.fits(first, second) == Fit::Yes {
+            return second.clone();
+        }
+        if self.fits(second, first) == Fit::Yes {
+            return first.clone();
+        }
+        let (Ty::Class(first_class), Ty::Class(second_class)) = (first, second) else {
+            return Ty::Unknown;
+        };
+        let second_supertypes = self.all_supertypes(second_class);
+        self.all_supertypes(first_class)
+            .into_iter()
+            .find(|supertype| {
+                second_supertypes
+                    .iter()
+                    .any(|other| other.class == supertype.class)
+            })
+            .map(Ty::Class)
+            .unwrap_or(Ty::Unknown)
+    }
+
+    /// The function a functional interface stands for (`Runnable` → `()
+    /// -> Unit`, `Comparator<T>` → `(T, T) -> Int`): its single abstract
+    /// method, through the type's arguments.
+    pub fn functional_interface_type(&self, class_type: &ClassType) -> Option<FunctionType> {
+        let class_tree = hir_def::item_tree(self.db, class_type.class.container);
+        let class_item = class_tree.item(class_type.class.item);
+        if class_item.kind != ItemKind::Class(ClassKind::Interface) {
+            return None;
+        }
+        let mut abstract_methods = Vec::new();
+        for supertype in self.all_supertypes(class_type) {
+            let tree = hir_def::item_tree(self.db, supertype.class.container);
+            for child in tree.item(supertype.class.item).children.iter() {
+                let item = tree.item(*child);
+                let is_abstract_method = item.kind == ItemKind::Function
+                    && item.modifiers.contains(Modifiers::ABSTRACT)
+                    && !is_object_method(item);
+                if is_abstract_method {
+                    abstract_methods.push((
+                        hir_def::ItemLocation {
+                            container: supertype.class.container,
+                            item: *child,
+                        },
+                        class_substitution(&supertype),
+                    ));
+                }
+            }
+        }
+        let [(method, substitution)] = &abstract_methods[..] else {
+            return None;
+        };
+        let signature = self.signature(crate::signature::Callable::Function(*method))?;
+        Some(FunctionType {
+            receiver: None,
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.substitute(substitution))
+                .collect(),
+            result: signature.result.substitute(substitution),
+            suspend: false,
+            nullability: Nullability::NotNull,
+        })
+    }
+}
+
+fn all_supertypes_contain(supertypes: &[ClassType], class: hir_def::ItemLocation) -> bool {
+    supertypes.iter().any(|supertype| supertype.class == class)
+}
+
+/// `equals`, `hashCode`, `toString` an interface may redeclare abstractly
+/// without making them its single method.
+fn is_object_method(item: &tree::Item) -> bool {
+    matches!(item.name.as_str(), "equals" | "hashCode" | "toString")
+}
+
+/// How many values a function takes, its receiver included.
+fn arity(function: &FunctionType) -> usize {
+    function.parameters.len() + usize::from(function.receiver.is_some())
+}

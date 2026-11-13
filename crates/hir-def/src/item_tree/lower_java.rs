@@ -192,7 +192,14 @@ impl<'parse> Lowering<'parse> {
                         .map(|node| self.type_ref(node));
                     let type_parameters =
                         self.type_parameters(member.child_by_field_name("type_parameters"));
-                    let modifiers = self.modifiers(member, in_interface);
+                    let (visibility, mut kept) = self.modifiers(member, in_interface);
+                    // An interface method without a body (not `default`, not
+                    // `static`) is implicitly abstract.
+                    let has_body = member.child_by_field_name("body").is_some();
+                    if in_interface && !has_body && !kept.contains(Modifiers::STATIC) {
+                        kept.insert(Modifiers::ABSTRACT);
+                    }
+                    let modifiers = (visibility, kept);
                     children.push(self.push(
                         self.name(name_node),
                         ItemKind::Function,

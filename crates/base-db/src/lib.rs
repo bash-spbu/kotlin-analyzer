@@ -5,6 +5,7 @@
 
 pub mod fixture;
 mod library;
+mod parse_cache;
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use rustc_hash::FxHashMap;
 pub use library::{
     ArchiveKind, Classpaths, IndexedLibrary, IndexedPackage, Library, LibraryPackage, LibrarySource,
 };
+pub use parse_cache::ParseCache;
 pub use project_model::{ProjectModel, SourceSetId};
 pub use salsa;
 pub use syntax::{Language, Parse};
@@ -57,13 +59,20 @@ pub trait SourceDatabase: salsa::Database {
     fn workspace(&self) -> Workspace;
     fn source_file(&self, file: FileId) -> Option<SourceFile>;
     fn classpaths(&self) -> Classpaths;
+    fn parse_cache(&self) -> &ParseCache;
 }
 
-/// The syntax tree of a file. Kept for the files used recently; any other is
-/// parsed again on demand.
-#[salsa::tracked(returns(ref), lru = 256)]
-pub fn parse(db: &dyn SourceDatabase, file: SourceFile) -> Parse {
-    syntax::parse(file.text(db).clone(), file.language(db))
+/// The syntax tree of a file.
+///
+/// Not a query: a tree is many times the size of its text, and Salsa keeps
+/// a query's results until the next revision however many there are, so
+/// one pass over the workspace would hold every file's tree. The bounded
+/// [`ParseCache`] keeps the recently used ones instead; reading the text
+/// here records the dependency the caller's result has on it.
+pub fn parse(db: &dyn SourceDatabase, file: SourceFile) -> Arc<Parse> {
+    let text = file.text(db);
+    let language = file.language(db);
+    db.parse_cache().get_or_parse(text, language)
 }
 
 /// The database: Salsa's storage plus the handles of its inputs. Cloning it
@@ -75,6 +84,8 @@ pub struct RootDatabase {
     workspace: Option<Workspace>,
     files: Arc<FxHashMap<FileId, SourceFile>>,
     classpaths: Option<Classpaths>,
+    /// Shared by snapshots.
+    parse_cache: Arc<ParseCache>,
 }
 
 impl Default for RootDatabase {
@@ -84,6 +95,7 @@ impl Default for RootDatabase {
             workspace: None,
             files: Arc::default(),
             classpaths: None,
+            parse_cache: Arc::default(),
         };
         database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None));
         database
@@ -107,6 +119,10 @@ impl SourceDatabase for RootDatabase {
     fn classpaths(&self) -> Classpaths {
         self.classpaths
             .expect("classpaths are set when the database is created")
+    }
+
+    fn parse_cache(&self) -> &ParseCache {
+        &self.parse_cache
     }
 }
 

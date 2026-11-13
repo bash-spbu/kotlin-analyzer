@@ -1,6 +1,5 @@
 //! The semantic model as features see it: what a name refers to, what a
-//! declaration is and where — one API in front of `hir-def` (and, later,
-//! `hir-ty`), so features never depend on how the layers below are split.
+//! declaration is and where — one API in front of `hir-def` and `hir-ty`, so features never depend on how the layers below are split.
 
 pub use base_db::{
     ArchiveKind, FileChange, FileId, IndexedLibrary, Language, LibrarySource, ProjectModel,
@@ -15,6 +14,11 @@ pub use hir_def::library::{
 };
 pub use hir_def::resolver::{Resolution, resolve_import_path, resolve_type_path};
 pub use hir_def::{ItemContainer, ItemLocation, file_item_tree, item_tree, source_set_def_map};
+pub use hir_ty::infer::{
+    InferenceResult, Local, LocalId, LocalKind, Reference, ResolvedName, declaration_type,
+    infer_file,
+};
+pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};
 
 /// The type a type reference is written as, in Kotlin syntax.

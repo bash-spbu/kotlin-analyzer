@@ -13,6 +13,7 @@ use intern::{Name, Path};
 use syntax::TextRange;
 
 pub(crate) use lower_java::lower_java;
+pub use lower_kotlin::kotlin_type_ref;
 pub(crate) use lower_kotlin::lower_kotlin;
 pub use pretty::type_text;
 

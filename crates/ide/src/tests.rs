@@ -201,3 +201,117 @@ fun total(price: Mon$0ey): Money = price
         in `x`"#]]
     .assert_eq(&hover.markdown);
 }
+
+#[test]
+fn definition_of_names_in_bodies_follows_inference() {
+    let fixture = r#"
+//- /app/a/Repo.kt
+package a
+class Repo {
+    fun find(id: Int): String = TODO()
+    fun find(name: String): Int = TODO()
+}
+fun find(id: Int): Long = TODO()
+//- /app/a/Use.kt
+package a
+fun use(repo: Repo) {
+    val found = repo.find("x")
+    found.plus(1)
+}
+"#;
+    // The member overload taking a `String`, not the top-level `find` nor
+    // the `Int` overload.
+    check_definition(
+        &format!(
+            "{}{}",
+            base_db::fixture::MINI_STDLIB,
+            fixture.replace("repo.find(\"x\")", "repo.fi$0nd(\"x\")")
+        ),
+        expect!["/app/a/Repo.kt:4:find"],
+    );
+    check_definition(
+        &fixture.replace("found.plus", "fou$0nd.plus"),
+        expect!["/app/a/Use.kt:3:found"],
+    );
+    check_definition(
+        &fixture.replace("repo.find", "re$0po.find"),
+        expect!["/app/a/Use.kt:2:repo"],
+    );
+}
+
+#[test]
+fn hover_shows_a_local_with_its_type_and_a_generic_member_as_used() {
+    let fixture = r#"
+//- /app/a/Box.kt
+package a
+class Box<T>(val content: T)
+//- /app/a/Use.kt
+package a
+fun use() {
+    val box = Box("text")
+    box.content
+}
+"#;
+    let hover_at = |marked: &str| {
+        let fixture = Fixture::with_mini_stdlib(marked);
+        let (file, offset) = fixture.cursor();
+        analysis(&fixture)
+            .hover(file, offset)
+            .unwrap()
+            .unwrap()
+            .markdown
+    };
+    expect![[r#"
+        ```kotlin
+        val box: Box<String>
+        ```"#]]
+    .assert_eq(&hover_at(&fixture.replace("val box", "val b$0ox")));
+    expect![[r#"
+        ```kotlin
+        val content: T
+        ```
+
+        Type here: `String`
+
+        ---
+
+        in `a.Box`"#]]
+    .assert_eq(&hover_at(&fixture.replace("box.content", "box.con$0tent")));
+}
+
+#[test]
+fn inlay_hints_show_inferred_local_types_but_not_written_or_constructed_ones() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/a/Use.kt
+package a
+class Box<T>(val content: T)
+fun use() {
+    val names = listOf("a")
+    val written: List<String> = names
+    val box = Box(names)
+    var count = names.first().length
+    val (number, word) = 1 to "one"
+    names.map { it }
+}
+"#,
+    );
+    let file = fixture.file("/app/a/Use.kt");
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let hints = analysis(&fixture).inlay_hints(file, None).unwrap();
+    let rendered: Vec<String> = hints
+        .iter()
+        .map(|hint| {
+            let name_start = text[..hint.offset as usize]
+                .rfind(|char: char| !char.is_alphanumeric())
+                .map_or(0, |index| index + 1);
+            format!("{}{}", &text[name_start..hint.offset as usize], hint.label)
+        })
+        .collect();
+    expect![[r#"
+        names: List<String>
+        count: Int
+        number: Int
+        word: String"#]]
+    .assert_eq(&rendered.join("\n"));
+}

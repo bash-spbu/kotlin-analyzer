@@ -296,7 +296,15 @@ pub fn read_jar(path: &Path) -> Result<JarContents, ReadError> {
             continue;
         }
         if is_builtins {
-            contents.classes.extend(kotlin::read_builtins(&bytes));
+            for read in kotlin::read_builtins(&bytes, builtins_package(&name)) {
+                match read {
+                    ClassContents::Class(class) => contents.classes.push(class),
+                    ClassContents::PackageMembers(members) => {
+                        contents.package_members.push(members)
+                    }
+                    ClassContents::Nothing => {}
+                }
+            }
             continue;
         }
         match read_class(&bytes) {
@@ -350,12 +358,19 @@ impl Archive {
 /// `.sig`) or a Kotlin built-ins file.
 pub fn read_entry(name: &str, bytes: &[u8]) -> Vec<ClassContents> {
     if name.ends_with(".kotlin_builtins") {
-        return kotlin::read_builtins(bytes)
-            .into_iter()
-            .map(ClassContents::Class)
-            .collect();
+        return kotlin::read_builtins(bytes, builtins_package(name));
     }
     vec![read_class(bytes)]
+}
+
+/// The package a `.kotlin_builtins` entry describes, from its directory
+/// (`kotlin/collections/collections.kotlin_builtins`).
+fn builtins_package(name: &str) -> QualifiedPath {
+    let directory = name
+        .rsplit_once('/')
+        .map(|(directory, _)| directory)
+        .unwrap_or("");
+    QualifiedPath::parse(&directory.replace('/', "."))
 }
 
 /// What one class file declares.

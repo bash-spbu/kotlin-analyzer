@@ -20,7 +20,7 @@ empty until it has loaded.
 | `workspace/symbol` | workspace declarations (and, for queries of 3+ characters, library classes) matching the query fuzzily |
 | `textDocument/foldingRange` | blocks, import list, comment runs |
 | `textDocument/semanticTokens/full`, `/range` | classification of identifiers by what they resolve to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, annotation; modifiers: declaration, readonly (val), static (companion/object/Java static), deprecated, defaultLibrary (declared in a library) |
-| `textDocument/inlayHint` | inferred types of `val`/`var` without a type, of lambda parameters and `it`, of expression-bodied functions without a return type |
+| `textDocument/inlayHint` | inferred types of local `val`/`var` (and destructured components) that write no type, except where a constructor call makes it obvious (`val box = Box(…)`); later: lambda parameters and `it`, expression-bodied functions |
 | `textDocument/codeAction` | Import `a.b.Name` (for an unresolved name, one action per candidate); Remove unused import; Fill missing `when` branches; Add the expected `package` line |
 | `textDocument/publishDiagnostics` | see diagnostics.md; published with the document version they were computed for |
 

@@ -99,7 +99,7 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
 
 /// The classes of a `.kotlin_builtins` file: a version prefix, then a
 /// `PackageFragment` message with its own string tables.
-pub(crate) fn read_builtins(bytes: &[u8]) -> Vec<LibraryClass> {
+pub(crate) fn read_builtins(bytes: &[u8], package: Path) -> Vec<ClassContents> {
     // `BuiltInsBinaryVersion`: a big-endian count, then that many ints.
     let Some(count) = bytes
         .get(0..4)
@@ -112,12 +112,14 @@ pub(crate) fn read_builtins(bytes: &[u8]) -> Vec<LibraryClass> {
     };
     let mut strings = Vec::new();
     let mut qualified_names = Vec::new();
+    let mut package_message = None;
     let mut classes = Vec::new();
     let mut reader = Reader::new(fragment);
     while let Some((number, value)) = reader.field() {
         match number {
             1 => strings = read_string_table(value.as_bytes().unwrap_or_default()),
             2 => qualified_names = read_qualified_names(value.as_bytes().unwrap_or_default()),
+            3 => package_message = value.as_bytes(),
             4 => classes.extend(value.as_bytes()),
             _ => {}
         }
@@ -126,10 +128,19 @@ pub(crate) fn read_builtins(bytes: &[u8]) -> Vec<LibraryClass> {
         strings,
         qualified_names,
     };
-    classes
+    let mut contents: Vec<ClassContents> = classes
         .into_iter()
         .filter_map(|class| read_class(class, &names, None))
-        .collect()
+        .map(ClassContents::Class)
+        .collect();
+    // The package's own functions and properties (`arrayOf`, `emptyArray`).
+    if let Some(message) = package_message {
+        let members = read_package(message, &names, package, None);
+        if !members.members.is_empty() || !members.type_aliases.is_empty() {
+            contents.push(ClassContents::PackageMembers(members));
+        }
+    }
+    contents
 }
 
 /// `d1`'s strings back into bytes: UTF-8 mode (a leading `\0`, one byte per

@@ -4,8 +4,10 @@
 //! including overload resolution, lambdas and smart casts.
 
 pub mod display;
+pub mod infer;
 pub mod lower;
 pub mod members;
+pub mod signature;
 pub mod ty;
 
 pub use display::display;

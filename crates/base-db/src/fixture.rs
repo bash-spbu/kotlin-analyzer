@@ -220,3 +220,92 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
         None,
     )
 }
+
+/// The few `kotlin` and `java` declarations tests lean on, written as
+/// sources: enough of the standard library for calls, generics and lambdas.
+pub const MINI_STDLIB: &str = r#"
+//- /lib/kotlin/Any.kt
+package kotlin
+open class Any {
+    open fun toString(): String = TODO()
+    open fun hashCode(): Int = TODO()
+}
+class String : CharSequence, Comparable<String> {
+    val length: Int = 0
+    fun plus(other: Any?): String = TODO()
+}
+interface CharSequence
+interface Comparable<in T>
+fun interface Comparator<T> {
+    fun compare(a: T, b: T): Int
+}
+class Int : Number(), Comparable<Int> {
+    fun plus(other: Int): Int = TODO()
+}
+class Long : Number()
+abstract class Number
+class Boolean
+class Unit
+class Nothing
+class Array<T>(val size: Int) {
+    fun get(index: Int): T = TODO()
+}
+class IntArray(val size: Int)
+abstract class Enum<E : Enum<E>>(val name: String, val ordinal: Int)
+fun <T> T.also(block: (T) -> Unit): T = TODO()
+fun <T, R> T.let(block: (T) -> R): R = TODO()
+fun <T> T.apply(block: T.() -> Unit): T = TODO()
+fun TODO(): Nothing = TODO()
+fun println(message: Any?) {}
+fun println(message: Int) {}
+data class Pair<out A, out B>(val first: A, val second: B)
+infix fun <A, B> A.to(that: B): Pair<A, B> = TODO()
+//- /lib/kotlin/collections/Collections.kt
+package kotlin.collections
+interface Iterable<out T>
+interface Collection<out E> : Iterable<E> {
+    val size: Int
+}
+interface List<out E> : Collection<E> {
+    fun get(index: Int): E
+    fun first(): E
+}
+interface MutableList<E> : List<E> {
+    fun add(element: E): Boolean
+}
+interface Map<K, out V> {
+    fun get(key: K): V?
+    interface Entry<out K, out V> {
+        val key: K
+        val value: V
+    }
+}
+typealias ArrayList<E> = java.util.ArrayList<E>
+fun <T> listOf(vararg elements: T): List<T> = TODO()
+fun <T> emptyList(): List<T> = TODO()
+fun <T, R> Iterable<T>.map(transform: (T) -> R): List<R> = TODO()
+fun <T> Iterable<T>.forEach(action: (T) -> Unit) {}
+fun <T> Iterable<T>.sortedWith(comparator: Comparator<in T>): List<T> = TODO()
+fun <T> compareBy(vararg selectors: (T) -> Comparable<*>?): Comparator<T> = TODO()
+//- /lib/java/lang/Object.java
+package java.lang;
+public class Object {}
+//- /lib/java/lang/String.java
+package java.lang;
+public final class String {}
+//- /lib/java/util/List.java
+package java.util;
+public interface List<E> {}
+//- /lib/java/util/ArrayList.java
+package java.util;
+public class ArrayList<E> implements List<E> {
+    public E remove(int index) { return null; }
+}
+"#;
+
+impl Fixture {
+    /// `fixture` with [`MINI_STDLIB`] alongside.
+    pub fn with_mini_stdlib(fixture: &str) -> Fixture {
+        Fixture::parse(&format!("{MINI_STDLIB}{fixture}"))
+    }
+}

@@ -45,6 +45,17 @@ pub(crate) fn lower_kotlin(parse: &Parse) -> ItemTree {
     }
 }
 
+/// A type written in a Kotlin file (a type node: `user_type`,
+/// `nullable_type`, `function_type`, …), as a [`TypeRef`] — for the types
+/// bodies write, which the item tree doesn't hold.
+pub fn kotlin_type_ref(parse: &Parse, node: SyntaxNode<'_>) -> TypeRef {
+    let lowering = Lowering {
+        parse,
+        items: Vec::new(),
+    };
+    lowering.type_ref(node)
+}
+
 /// What a declaration is directly inside — which decides its defaults.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Container {
