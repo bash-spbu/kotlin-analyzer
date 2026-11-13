@@ -19,9 +19,17 @@ Rules:
 | `editors/gradle/kotlin-analyzer.init.gradle` | `contrib/gradle/kmp-lsp-deps.init.gradle` (author's own) | the idea of an init-script task exporting the build's resolved dependencies and generated source roots; rewritten for the new `project.json` model (modules, source sets, module dependencies, per-source-set libraries with sources JARs, JDK) and Gradle 9's per-project resolution |
 | `crates/syntax/src/pointer.rs` (`SyntaxNodePtr`) | `src/indexer/file_model/syntax_ptr.rs` (author's own) | the design: a node remembered by kind and range, found again by climbing from the smallest node spanning the range; rewritten |
 
+## Formats implemented from published specifications
+
+| here | specification | notes |
+|---|---|---|
+| `crates/classfile/src/class_file.rs`, `signature.rs` | The Java Virtual Machine Specification, chapter 4 (class file format, descriptors, generic signatures) | |
+| `crates/classfile/src/kotlin.rs` | Kotlin metadata, as published in JetBrains' Kotlin repository (Apache-2.0): `metadata.proto`, `jvm_metadata.proto`, `builtins.proto`, the flag layout of `Flags.java`, the byte packing of `BitEncoding`, the string table of `JvmNameResolverBase` | Implemented from the format definitions; the table of predefined strings (`PREDEFINED_STRINGS`) is format data, transcribed as is. |
+
 ## Third-party code used as dependencies
 
 | what | license | how |
 |---|---|---|
 | tree-sitter, tree-sitter-java, brokk-tree-sitter-kotlin | MIT | crates.io dependencies |
+| salsa, lsp-server, lsp-types, zip, rayon, serde, … | MIT / Apache-2.0 | crates.io dependencies (see `Cargo.lock`) |
 | `LICENSE` text | Apache-2.0 | the license's own text |

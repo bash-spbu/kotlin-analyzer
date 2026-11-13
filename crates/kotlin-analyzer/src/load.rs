@@ -15,9 +15,22 @@ use vfs::Vfs;
 pub struct LoadedFiles {
     pub model: Arc<ProjectModel>,
     pub files: Vec<(PathBuf, Arc<str>)>,
+    pub libraries: LoadedLibraries,
     pub model_time: Duration,
     pub discovery_time: Duration,
     pub read_time: Duration,
+    pub library_time: Duration,
+}
+
+/// Every library archive the workspace compiles against, indexed.
+#[derive(Default)]
+pub struct LoadedLibraries {
+    pub libraries: Vec<(hir::LibrarySource, hir::IndexedLibrary)>,
+    /// Per source set (by id), indices into `libraries`, in classpath order.
+    pub by_source_set: Vec<Vec<usize>>,
+    pub jdk: Option<usize>,
+    /// Archives that couldn't be read.
+    pub failures: Vec<(PathBuf, String)>,
 }
 
 pub fn read_workspace(root: &Path, project_json: Option<&Path>) -> Result<LoadedFiles, String> {
@@ -39,13 +52,107 @@ pub fn read_workspace(root: &Path, project_json: Option<&Path>) -> Result<Loaded
         })
         .collect();
     let read_time = started.elapsed();
+
+    let started = Instant::now();
+    let libraries = index_libraries(&model);
+    let library_time = started.elapsed();
     Ok(LoadedFiles {
         model: Arc::new(model),
         files,
+        libraries,
         model_time,
         discovery_time,
         read_time,
+        library_time,
     })
+}
+
+/// Indexes the JDK and every distinct JAR of the model's classpaths, in
+/// parallel.
+pub fn index_libraries(model: &ProjectModel) -> LoadedLibraries {
+    let mut sources: Vec<hir::LibrarySource> = Vec::new();
+    let mut by_source_set: Vec<Vec<usize>> = Vec::with_capacity(model.source_sets.len());
+    let mut positions: rustc_hash::FxHashMap<PathBuf, usize> = rustc_hash::FxHashMap::default();
+    for source_set in &model.source_sets {
+        let mut indices = Vec::with_capacity(source_set.libraries.len());
+        for library in &source_set.libraries {
+            let position = *positions.entry(library.jar.clone()).or_insert_with(|| {
+                sources.push(hir::LibrarySource {
+                    archive: library.jar.clone(),
+                    kind: hir::ArchiveKind::Jar,
+                    sources: library.sources_jar.clone(),
+                });
+                sources.len() - 1
+            });
+            indices.push(position);
+        }
+        by_source_set.push(indices);
+    }
+    let jdk = jdk_library(model).map(|jdk| {
+        sources.push(jdk);
+        sources.len() - 1
+    });
+    let indexed: Vec<Result<hir::IndexedLibrary, String>> =
+        sources.par_iter().map(hir::index_library).collect();
+    let mut libraries = Vec::with_capacity(sources.len());
+    let mut failures = Vec::new();
+    for (source, result) in sources.into_iter().zip(indexed) {
+        match result {
+            Ok(indexed) => libraries.push((source, indexed)),
+            Err(error) => {
+                failures.push((source.archive.clone(), error));
+                // Keep the position, so indices stay valid.
+                libraries.push((source, hir::IndexedLibrary::default()));
+            }
+        }
+    }
+    LoadedLibraries {
+        libraries,
+        by_source_set,
+        jdk,
+        failures,
+    }
+}
+
+/// The JDK's API (`lib/ct.sym`, for the project's release) and sources
+/// (`lib/src.zip`): from the model, or `JAVA_HOME`.
+fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
+    let home = model
+        .jdk
+        .as_ref()
+        .map(|jdk| jdk.home.clone())
+        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
+    let symbols = home.join("lib/ct.sym");
+    if !symbols.is_file() {
+        return None;
+    }
+    let release = model
+        .jdk
+        .as_ref()
+        .and_then(|jdk| jdk.release)
+        .or_else(|| java_version(&home))?;
+    let letter = hir::release_letter(release)?;
+    let source_archive = home.join("lib/src.zip");
+    Some(hir::LibrarySource {
+        archive: symbols,
+        kind: hir::ArchiveKind::JdkSymbols { release: letter },
+        sources: source_archive.is_file().then_some(source_archive),
+    })
+}
+
+/// The major version in a JDK's `release` file: `JAVA_VERSION="25.0.5"`.
+fn java_version(home: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(home.join("release")).ok()?;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("JAVA_VERSION="))?;
+    let version = line.trim_start_matches("JAVA_VERSION=").trim_matches('"');
+    let major = version.split('.').next()?;
+    // Java 8 reports `1.8.0_…`.
+    if major == "1" {
+        return version.split('.').nth(1)?.parse().ok();
+    }
+    major.parse().ok()
 }
 
 /// Every Kotlin and Java file under the model's source directories.
@@ -92,6 +199,11 @@ pub fn apply_files(
     let changes = file_changes(vfs, model);
     host.apply_change(changes);
     host.set_project_model(model.clone());
+}
+
+/// Hands the indexed libraries to `host`.
+pub fn apply_libraries(host: &mut AnalysisHost, libraries: LoadedLibraries) {
+    host.set_libraries(libraries.libraries, libraries.by_source_set, libraries.jdk);
 }
 
 /// The changes `vfs` recorded, as database file changes.

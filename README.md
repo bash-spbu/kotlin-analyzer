@@ -9,10 +9,13 @@ editor features as pure functions of a snapshot.
 Kotlin gets the full feature set. Java — in the workspace, the JDK and
 libraries — is read for navigation, hover and types.
 
-**Status:** early development. Working so far (milestone M1): the project
-model from Gradle, declarations of every Kotlin and Java file, name resolution
-of types per module, and the LSP requests `documentSymbol`, `workspace/symbol`,
-`definition` (types and imports) with syntax diagnostics. See `docs/spec/` for
+**Status:** early development. Working so far (milestones M1–M2): the
+project model from Gradle; declarations of every Kotlin and Java file and of
+every library on the classpath (read straight from class files and Kotlin
+metadata, the JDK from `ct.sym`); name resolution of types per module through
+sources and libraries; the LSP requests `documentSymbol`, `workspace/symbol`,
+`definition` (types and imports, into sources JARs and the JDK's `src.zip`)
+and `hover` (signature and KDoc/Javadoc), with syntax diagnostics. See `docs/spec/` for
 what it is being built to do.
 
 ## Project model
@@ -37,7 +40,7 @@ Without it, modules and source sets are guessed from directory layout.
 | `crates/hir-ty` | types, members, inference |
 | `crates/hir` | the semantic API features use |
 | `crates/ide` | editor features and diagnostics |
-| `crates/sidecar` | reading compiled classes through `jvm/sidecar` |
+| `crates/classfile` | compiled classes: JARs, class files, JVM signatures, Kotlin metadata |
 | `crates/kotlin-analyzer` | the server binary and its measuring tools |
 
 ## Building

@@ -66,6 +66,8 @@ The server watches `project.json`; when it changes the model is reloaded.
 ## Settings
 
 `initializationOptions`:
+- `projectJson`: where the exported model is, when not at
+  `.kotlin-analyzer/project.json` in the root;
 - `sourcePaths`: extra source directories (each becomes its own module);
 - `ignorePatterns`: gitignore-style patterns of files not to analyse;
 - `diagnostics.disabled`: names of checks to turn off.

@@ -7,12 +7,13 @@
 
 use std::sync::Arc;
 
-use base_db::{SourceDatabase, SourceFile, SourceSet};
+use base_db::{Library, SourceDatabase, SourceFile, SourceSet};
 use intern::{Name, Path};
 use rustc_hash::FxHashMap;
 
 use crate::item_tree::{ItemTree, Visibility};
-use crate::{ItemLocation, file_item_tree};
+use crate::library::library_package_tree;
+use crate::{ItemContainer, ItemLocation, file_item_tree};
 
 #[derive(PartialEq, Eq, Debug, Default)]
 pub struct DefMap {
@@ -63,14 +64,17 @@ fn add_file(map: &mut DefMap, file: SourceFile, tree: &ItemTree) {
         scope
             .entry(item.name)
             .or_default()
-            .push(ItemLocation { file, item: *index });
+            .push(ItemLocation::in_file(file, *index));
     }
 }
 
-/// The top-level declarations named `name` in `package` that `from` sees:
-/// its source set's and the source sets it depends on, minus what their
-/// visibility hides (`private` outside its file, `internal` outside its
-/// module).
+/// The top-level declarations named `name` in `package` that `from` sees.
+///
+/// Workspace sources first: its source set's and the source sets it depends
+/// on, minus what visibility hides (`private` outside its file, `internal`
+/// outside its module). Only when none has the name, libraries: the JDK,
+/// then the source set's classpath in order — the first library that
+/// declares the name wins, as it does for the compilers.
 pub fn visible_top_level(
     db: &dyn SourceDatabase,
     from: SourceFile,
@@ -91,22 +95,60 @@ pub fn visible_top_level(
         if tree.package == *package {
             for index in tree.top_level.iter() {
                 if tree.item(*index).name == name {
-                    found.push(ItemLocation {
-                        file: from,
-                        item: *index,
-                    });
+                    found.push(ItemLocation::in_file(from, *index));
                 }
             }
         }
     }
-    found
+    if !found.is_empty() {
+        return found;
+    }
+    for library in libraries_of(db, from) {
+        let Some(library_package) = library.packages(db).get(package).copied() else {
+            continue;
+        };
+        if !library_package.declares(db, name) {
+            continue;
+        }
+        let tree = library_package_tree(db, library_package);
+        let declared: Vec<ItemLocation> = tree
+            .top_level
+            .iter()
+            .filter(|index| tree.item(**index).name == name)
+            .map(|index| ItemLocation {
+                container: ItemContainer::Library(library_package),
+                item: *index,
+            })
+            .collect();
+        if !declared.is_empty() {
+            return declared;
+        }
+    }
+    Vec::new()
 }
 
-/// Whether any source set `from` sees declares the package `package`.
+/// The libraries `from` compiles against: the JDK, then its source set's
+/// classpath in order.
+pub fn libraries_of(db: &dyn SourceDatabase, from: SourceFile) -> Vec<Library> {
+    let classpaths = db.classpaths();
+    let mut libraries: Vec<Library> = classpaths.jdk(db).into_iter().collect();
+    if let Some(own) = from.source_set(db)
+        && let Some(classpath) = classpaths.by_source_set(db).get(own.0 as usize)
+    {
+        libraries.extend(classpath.iter().copied());
+    }
+    libraries
+}
+
+/// Whether any source set or library `from` sees declares the package.
 pub fn package_exists(db: &dyn SourceDatabase, from: SourceFile, package: &Path) -> bool {
-    visible_source_sets(db, from)
+    let in_sources = visible_source_sets(db, from)
         .iter()
-        .any(|source_set| source_set_def_map(db, *source_set).has_package(package))
+        .any(|source_set| source_set_def_map(db, *source_set).has_package(package));
+    in_sources
+        || libraries_of(db, from)
+            .into_iter()
+            .any(|library| library.packages(db).contains_key(package))
 }
 
 /// The inputs of the source sets `from` sees, its own first.
@@ -135,10 +177,14 @@ pub fn source_set_visibility(db: &dyn SourceDatabase, source_set: SourceSet) -> 
 }
 
 fn is_visible(db: &dyn SourceDatabase, from: SourceFile, location: ItemLocation) -> bool {
-    let tree = file_item_tree(db, location.file);
+    // Libraries only expose their public and protected declarations.
+    let Some(file) = location.file() else {
+        return true;
+    };
+    let tree = file_item_tree(db, file);
     match tree.item(location.item).visibility {
-        Visibility::Private => location.file == from,
-        Visibility::Internal => same_module(db, from, location.file),
+        Visibility::Private => file == from,
+        Visibility::Internal => same_module(db, from, file),
         Visibility::PackagePrivate => file_item_tree(db, from).package == tree.package,
         Visibility::Public | Visibility::Protected => true,
     }

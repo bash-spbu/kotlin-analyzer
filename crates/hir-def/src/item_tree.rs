@@ -24,6 +24,9 @@ pub struct ItemIndex(pub u32);
 pub struct ItemTree {
     /// The file's package; the root package when it declares none.
     pub package: Path,
+    /// For a library package: the source file each top-level item was
+    /// compiled from (`Strings.kt`), to find it in a sources archive.
+    pub source_files: Box<[(ItemIndex, Box<str>)]>,
     pub imports: Box<[Import]>,
     /// Every declaration of the file, nested ones included, in document
     /// order; `top_level` and each item's `children` index into it.
@@ -57,6 +60,11 @@ impl ItemTree {
             level = &self.item(found).children;
         }
         enclosing
+    }
+
+    /// One declaration as Kotlin-like text: `data class Point<T>(x: T) : Shape`.
+    pub fn signature(&self, index: ItemIndex) -> String {
+        pretty::header(self.item(index))
     }
 
     /// The tree as text, for snapshot tests and debugging.
@@ -283,6 +291,15 @@ pub enum TypeRef {
         suspend: bool,
         nullable: bool,
     },
+    /// A class as compiled code records it: package and nesting known
+    /// exactly, nothing to resolve by scope.
+    Qualified {
+        package: Path,
+        classes: Box<[TypeSegment]>,
+        nullable: bool,
+    },
+    /// A type parameter, as compiled code records it.
+    TypeParameter { name: Name, nullable: bool },
     /// A Java primitive or `void`: `int`, `boolean`.
     Primitive { name: Name },
     /// A Java array: `String[]`.

@@ -1,5 +1,5 @@
 [package]
-name = "sidecar"
+name = "classfile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rustc-hash.workspace = true
+intern.workspace = true
+zip.workspace = true
 
 
 [lints]

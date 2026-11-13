@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ide::{Analysis, Cancellable, NavigationTarget, SymbolKind};
+use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    DocumentSymbolRequest, GotoDefinition, Request as _, WorkspaceSymbolRequest,
+    DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -14,7 +14,7 @@ use lsp_types::{
 };
 use vfs::{FileId, LineIndex};
 
-use super::convert;
+use super::{convert, library_sources};
 
 /// What a request needs from the main thread.
 pub(super) struct Snapshot {
@@ -35,6 +35,9 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
     let result = match request.method.as_str() {
         GotoDefinition::METHOD => {
             params::<GotoDefinition>(request).map(|params| definition(&snapshot, params))
+        }
+        HoverRequest::METHOD => {
+            params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
         }
         DocumentSymbolRequest::METHOD => {
             params::<DocumentSymbolRequest>(request).map(|_| document_symbols(&snapshot))
@@ -85,14 +88,51 @@ fn definition(
     Ok(serde_json::to_value(GotoDefinitionResponse::Array(locations)).unwrap_or_default())
 }
 
+fn hover(snapshot: &Snapshot, params: lsp_types::HoverParams) -> Cancellable<serde_json::Value> {
+    let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(text) = snapshot.analysis.file_text(file)? else {
+        return Ok(serde_json::Value::Null);
+    };
+    let offset = convert::offset(&text, params.text_document_position_params.position);
+    let Some(result) = snapshot.analysis.hover(file, offset)? else {
+        return Ok(serde_json::Value::Null);
+    };
+    let index = LineIndex::new(&text);
+    let hover = lsp_types::Hover {
+        contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: result.markdown,
+        }),
+        range: Some(convert::range(&index, &text, result.range)),
+    };
+    Ok(serde_json::to_value(hover).unwrap_or_default())
+}
+
 fn location_of(snapshot: &Snapshot, target: &NavigationTarget) -> Cancellable<Option<Location>> {
-    let Some(text) = snapshot.analysis.file_text(target.file)? else {
-        return Ok(None);
+    let (path, text) = match &target.file {
+        NavigationFile::Workspace(file) => {
+            let Some(text) = snapshot.analysis.file_text(*file)? else {
+                return Ok(None);
+            };
+            let Some(path) = snapshot.paths.get(file.index()).cloned() else {
+                return Ok(None);
+            };
+            (path, text)
+        }
+        NavigationFile::Library {
+            archive,
+            entry,
+            text,
+        } => {
+            let Some(path) = library_sources::materialize(archive, entry, text) else {
+                return Ok(None);
+            };
+            (path, text.clone())
+        }
     };
-    let Some(path) = snapshot.paths.get(target.file.index()) else {
-        return Ok(None);
-    };
-    let Some(uri) = convert::uri_of(path) else {
+    let Some(uri) = convert::uri_of(&path) else {
         return Ok(None);
     };
     let index = LineIndex::new(&text);

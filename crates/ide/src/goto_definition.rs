@@ -1,6 +1,7 @@
-//! `textDocument/definition` for what M1 resolves: type names (written in
+//! What the name under the cursor refers to: type names (written in
 //! signatures, supertypes, type arguments — anywhere a `user_type` is), the
-//! segments of import paths, and declaration names themselves.
+//! segments of import paths, and declaration names themselves. Shared by
+//! `definition` and `hover`.
 
 use hir::{FileId, ItemLocation, Path, RootDatabase, SourceDatabase, SourceFile};
 use syntax::ast::AstNode;
@@ -9,26 +10,42 @@ use syntax::{Language, SyntaxNode, TextRange};
 
 use crate::NavigationTarget;
 
+/// The name under the cursor and the declarations it refers to.
+pub(crate) struct NameAt {
+    pub(crate) range: TextRange,
+    pub(crate) declarations: Vec<ItemLocation>,
+}
+
 pub(crate) fn goto_definition(
     db: &RootDatabase,
     file: FileId,
     offset: usize,
 ) -> Vec<NavigationTarget> {
-    let Some(source) = db.source_file(file) else {
+    let Some(name) = name_at(db, file, offset) else {
         return Vec::new();
     };
+    name.declarations
+        .into_iter()
+        .filter_map(|location| NavigationTarget::of(db, location))
+        .collect()
+}
+
+pub(crate) fn name_at(db: &RootDatabase, file: FileId, offset: usize) -> Option<NameAt> {
+    let source = db.source_file(file)?;
     let parse = hir::parse(db, source);
-    let Some(identifier) = identifier_at(parse.root(), offset) else {
-        return Vec::new();
-    };
-    let targets = match source.language(db) {
-        Language::Kotlin => kotlin_targets(db, source, parse, identifier),
+    let identifier = identifier_at(parse.root(), offset)?;
+    let range = TextRange::of(identifier);
+    let mut declarations = match source.language(db) {
+        Language::Kotlin => kotlin_declarations(db, source, parse, identifier),
         Language::Java => Vec::new(),
     };
-    if !targets.is_empty() {
-        return targets;
+    if declarations.is_empty() {
+        declarations = declaration_named_at(db, source, range);
     }
-    declaration_named_at(db, source, TextRange::of(identifier))
+    Some(NameAt {
+        range,
+        declarations,
+    })
 }
 
 /// The identifier under the cursor — or just before it, when the cursor
@@ -49,12 +66,12 @@ fn identifier_at(root: SyntaxNode<'_>, offset: usize) -> Option<SyntaxNode<'_>> 
         .filter(is_identifier)
 }
 
-fn kotlin_targets(
+fn kotlin_declarations(
     db: &RootDatabase,
     file: SourceFile,
     parse: &syntax::Parse,
     identifier: SyntaxNode<'_>,
-) -> Vec<NavigationTarget> {
+) -> Vec<ItemLocation> {
     let Some(parent) = identifier.parent() else {
         return Vec::new();
     };
@@ -93,11 +110,7 @@ fn kotlin_targets(
         }
         _ => return Vec::new(),
     };
-    resolution
-        .declarations()
-        .into_iter()
-        .map(|location| NavigationTarget::of(db, location))
-        .collect()
+    resolution.declarations()
 }
 
 fn is_import_path(identifier: SyntaxNode<'_>) -> bool {
@@ -111,10 +124,10 @@ fn declaration_named_at(
     db: &RootDatabase,
     file: SourceFile,
     range: TextRange,
-) -> Vec<NavigationTarget> {
+) -> Vec<ItemLocation> {
     let tree = hir::file_item_tree(db, file);
     tree.indexed_items()
         .filter(|(_, item)| item.name_range == range)
-        .map(|(index, _)| NavigationTarget::of(db, ItemLocation { file, item: index }))
+        .map(|(index, _)| ItemLocation::in_file(file, index))
         .collect()
 }

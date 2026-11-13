@@ -27,14 +27,17 @@ fn check_type(fixture: &str, path: &str, expected: Expect) {
 fn describe(fixture: &Fixture, resolution: &Resolution) -> String {
     let db = &fixture.database;
     let location = |location: &crate::ItemLocation| {
-        let tree = file_item_tree(db, location.file);
-        let path = fixture.vfs.path(location.file.file_id(db));
-        format!("{}:{}", path.display(), tree.item(location.item).name)
+        let tree = crate::item_tree(db, location.container);
+        let place = match location.file() {
+            Some(file) => fixture.vfs.path(file.file_id(db)).display().to_string(),
+            None => format!("library {}", tree.package),
+        };
+        format!("{place}:{}", tree.item(location.item).name)
     };
     match resolution {
         Resolution::Declaration(found) => location(found),
         Resolution::TypeParameter { owner, index } => {
-            let tree = file_item_tree(db, owner.file);
+            let tree = crate::item_tree(db, owner.container);
             let item = tree.item(owner.item);
             format!(
                 "type parameter {} of {}",
@@ -371,4 +374,109 @@ val request: Request$0? = null
     let user = db.source_file(parsed.file("/app/z/Use.kt")).unwrap();
     let helper = resolve_import_path(db, user, &Path::parse("y.helper"));
     expect!["/app/y/Util.kt:helper"].assert_eq(&describe(&parsed, &helper));
+}
+
+#[test]
+fn kotlin_default_imports_outrank_the_platform_ones() {
+    let fixture = r#"
+//- /lib/kotlin/String.kt
+package kotlin
+class String
+class Exception
+//- /lib/java/lang/String.java
+package java.lang;
+public final class String {}
+//- /lib/java/lang/Thread.java
+package java.lang;
+public class Thread {}
+//- /app/x/Use.kt
+package x
+val name: String$0? = null
+val thread: Thread? = null
+"#;
+    check_type(fixture, "String", expect!["/lib/kotlin/String.kt:String"]);
+    check_type(
+        fixture,
+        "Thread",
+        expect!["/lib/java/lang/Thread.java:Thread"],
+    );
+}
+
+/// The newest cached compiled JAR of `group:artifact` in the Gradle cache.
+fn cached_jar(group: &str, artifact: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let root = std::path::Path::new(&home)
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut jars: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .flat_map(|version| {
+            std::fs::read_dir(version.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .flat_map(|hash| {
+            std::fs::read_dir(hash.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            name.ends_with(".jar")
+                && !name.ends_with("-sources.jar")
+                && !name.ends_with("-javadoc.jar")
+        })
+        .collect();
+    jars.sort();
+    jars.pop()
+}
+
+#[test]
+fn library_types_resolve_through_the_classpath_and_a_workspace_class_wins() {
+    let Some(jar) = cached_jar("org.jetbrains.kotlin", "kotlin-stdlib") else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let mut parsed = Fixture::parse(
+        r#"
+//- /app/x/Pair.kt
+package x
+class Pair
+val text: String? = null
+val list: MutableList<Int>? = null
+val array: ArrayList<Int>? = null
+val pair: Pair? = null
+val entry: Map.Entry<String, Int>? = null
+"#,
+    );
+    let source = base_db::LibrarySource {
+        archive: jar,
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = crate::library::index_library(&source).expect("kotlin-stdlib indexes");
+    parsed
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let resolve =
+        |path: &str| describe(&parsed, &resolve_type_path(db, file, &Path::parse(path), 0));
+    assert_eq!(resolve("String"), "library kotlin:String");
+    assert_eq!(
+        resolve("MutableList"),
+        "library kotlin.collections:MutableList"
+    );
+    assert_eq!(resolve("ArrayList"), "library kotlin.collections:ArrayList");
+    assert_eq!(resolve("Map.Entry"), "library kotlin.collections:Entry");
+    // `kotlin.Pair` is a default import, but the file's own package wins.
+    assert_eq!(resolve("Pair"), "/app/x/Pair.kt:Pair");
 }

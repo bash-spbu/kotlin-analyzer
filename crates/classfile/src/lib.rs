@@ -1,0 +1,373 @@
+//! Compiled classes: the declarations a JAR offers, read straight from its
+//! class files — no JVM involved.
+//!
+//! - Java classes from their constant pools, access flags and generic
+//!   signatures ([`java`]).
+//! - Kotlin classes and top-level declarations from the `@kotlin.Metadata`
+//!   annotation the compiler writes into every class file: a protobuf
+//!   message that keeps what bytecode loses — nullability, default values,
+//!   `vararg`, extension receivers, `suspend` ([`kotlin`]).
+//! - Kotlin's built-in types (`kotlin.String`, `kotlin.collections.List`),
+//!   which have no class files, from the `.kotlin_builtins` files of the
+//!   standard library.
+//!
+//! The result is a neutral model ([`LibraryClass`], [`PackageMembers`]) that
+//! `hir-def` lowers into item trees.
+
+mod class_file;
+mod java;
+mod kotlin;
+mod protobuf;
+mod signature;
+
+use std::io::Read;
+use std::path::Path;
+
+use intern::{Name, Path as QualifiedPath};
+
+/// A class by package and nesting: `kotlin.collections` + `Map`, `Entry`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ClassName {
+    pub package: QualifiedPath,
+    /// Outermost first; never empty.
+    pub classes: Box<[Name]>,
+}
+
+impl ClassName {
+    /// From a Kotlin metadata name: `kotlin/collections/Map.Entry`.
+    pub fn from_kotlin_internal(name: &str) -> Option<ClassName> {
+        let (package, classes) = match name.rsplit_once('/') {
+            Some((package, classes)) => (package, classes),
+            None => ("", name),
+        };
+        let classes: Box<[Name]> = classes
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .map(Name::new)
+            .collect();
+        if classes.is_empty() {
+            return None;
+        }
+        Some(ClassName {
+            package: QualifiedPath::new(
+                package
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .map(Name::new),
+            ),
+            classes,
+        })
+    }
+
+    /// `kotlin.collections.Map.Entry`.
+    pub fn qualified(&self) -> String {
+        let mut text = self.package.to_string();
+        for class in self.classes.iter() {
+            if !text.is_empty() {
+                text.push('.');
+            }
+            text.push_str(class.as_str());
+        }
+        text
+    }
+
+    pub fn simple_name(&self) -> Name {
+        *self
+            .classes
+            .last()
+            .expect("a class name has at least one class")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    Kotlin,
+    Java,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClassKind {
+    Class,
+    Interface,
+    Enum,
+    Annotation,
+    Object,
+    CompanionObject,
+}
+
+/// Only declarations visible from outside their library are kept; this
+/// says which of the two kinds a kept one is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    Public,
+    Protected,
+}
+
+/// Modifiers that change what a declaration means to its users.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Modifiers {
+    pub is_abstract: bool,
+    pub is_open: bool,
+    pub is_sealed: bool,
+    pub is_data: bool,
+    pub is_inner: bool,
+    pub is_value: bool,
+    pub is_fun_interface: bool,
+    pub is_expect: bool,
+    /// A Java `static` member: called on the class.
+    pub is_static: bool,
+    pub is_suspend: bool,
+    pub is_inline: bool,
+    pub is_operator: bool,
+    pub is_infix: bool,
+    pub is_const: bool,
+    pub is_deprecated: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LibraryClass {
+    pub name: ClassName,
+    pub kind: ClassKind,
+    pub origin: Origin,
+    pub visibility: Visibility,
+    pub modifiers: Modifiers,
+    pub type_parameters: Vec<TypeParameter>,
+    pub supertypes: Vec<LibraryType>,
+    pub members: Vec<Member>,
+    pub enum_entries: Vec<Name>,
+    pub sealed_subclasses: Vec<ClassName>,
+    /// The source file the class was compiled from (`Strings.kt`), for
+    /// finding it in a sources JAR.
+    pub source_file: Option<String>,
+}
+
+/// The top-level functions, properties and type aliases of one Kotlin file
+/// (its `FileNameKt` class).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PackageMembers {
+    pub package: QualifiedPath,
+    pub members: Vec<Member>,
+    pub type_aliases: Vec<TypeAlias>,
+    pub source_file: Option<String>,
+}
+
+/// `typealias Name<T> = Expanded<T>`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeAlias {
+    pub name: Name,
+    pub type_parameters: Vec<TypeParameter>,
+    pub expanded: LibraryType,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MemberKind {
+    Function,
+    Property { mutable: bool },
+    Constructor,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Member {
+    pub name: Name,
+    pub kind: MemberKind,
+    pub visibility: Visibility,
+    pub modifiers: Modifiers,
+    pub type_parameters: Vec<TypeParameter>,
+    pub receiver: Option<LibraryType>,
+    pub parameters: Vec<ValueParameter>,
+    /// The function's result or the property's type; `None` for a
+    /// constructor.
+    pub return_type: Option<LibraryType>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ValueParameter {
+    pub name: Name,
+    /// For a `vararg`, the element type.
+    pub type_ref: LibraryType,
+    pub has_default: bool,
+    pub vararg: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeParameter {
+    pub name: Name,
+    pub bounds: Vec<LibraryType>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Variance {
+    Invariant,
+    In,
+    Out,
+}
+
+/// A type in a compiled signature; class names are always fully qualified.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum LibraryType {
+    Class {
+        name: ClassName,
+        arguments: Vec<TypeArgument>,
+        nullable: bool,
+    },
+    TypeParameter {
+        name: Name,
+        nullable: bool,
+    },
+    /// `suspend R.(A) -> B` — Kotlin's `FunctionN` types read as such.
+    Function {
+        receiver: Option<Box<LibraryType>>,
+        parameters: Vec<LibraryType>,
+        result: Box<LibraryType>,
+        suspend: bool,
+        nullable: bool,
+    },
+    /// A Java primitive or `void`.
+    Primitive(Name),
+    /// A Java array.
+    Array(Box<LibraryType>),
+    /// A type this reader doesn't follow (a local class, a malformed one).
+    Unreadable,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum TypeArgument {
+    Star,
+    Type {
+        variance: Variance,
+        type_ref: LibraryType,
+    },
+}
+
+/// Everything a JAR declares that its users can see.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct JarContents {
+    pub classes: Vec<LibraryClass>,
+    pub package_members: Vec<PackageMembers>,
+}
+
+/// Why a JAR couldn't be read.
+#[derive(Debug)]
+pub enum ReadError {
+    Io(std::io::Error),
+    Zip(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Io(error) => write!(formatter, "{error}"),
+            ReadError::Zip(error) => write!(formatter, "not a readable JAR: {error}"),
+        }
+    }
+}
+
+/// What one entry of a JAR contributes.
+pub enum ClassContents {
+    Class(LibraryClass),
+    PackageMembers(PackageMembers),
+    /// Synthetic, private, local, or not a class at all.
+    Nothing,
+}
+
+/// Reads every class file and Kotlin built-ins file of a JAR. Entries that
+/// fail to parse are skipped: one corrupt class doesn't hide the rest.
+pub fn read_jar(path: &Path) -> Result<JarContents, ReadError> {
+    let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| ReadError::Zip(error.to_string()))?;
+    let mut contents = JarContents::default();
+    let mut bytes = Vec::new();
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        let name = entry.name().to_owned();
+        let is_class = name.ends_with(".class")
+            && !name.starts_with("META-INF/")
+            && !name.ends_with("module-info.class")
+            && !name.ends_with("package-info.class");
+        let is_builtins = name.ends_with(".kotlin_builtins");
+        if !is_class && !is_builtins {
+            continue;
+        }
+        bytes.clear();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        if is_builtins {
+            contents.classes.extend(kotlin::read_builtins(&bytes));
+            continue;
+        }
+        match read_class(&bytes) {
+            ClassContents::Class(class) => contents.classes.push(class),
+            ClassContents::PackageMembers(members) => contents.package_members.push(members),
+            ClassContents::Nothing => {}
+        }
+    }
+    Ok(contents)
+}
+
+/// An archive opened for reading entries by index.
+pub struct Archive {
+    zip: zip::ZipArchive<std::fs::File>,
+}
+
+impl Archive {
+    pub fn open(path: &Path) -> Result<Archive, ReadError> {
+        let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+        let zip = zip::ZipArchive::new(file).map_err(|error| ReadError::Zip(error.to_string()))?;
+        Ok(Archive { zip })
+    }
+
+    pub fn len(&self) -> usize {
+        self.zip.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.zip.len() == 0
+    }
+
+    /// The entry's path inside the archive, without decompressing it.
+    pub fn name(&self, index: usize) -> Option<&str> {
+        self.zip.name_for_index(index)
+    }
+
+    pub fn read(&mut self, index: usize) -> Option<Vec<u8>> {
+        let mut entry = self.zip.by_index(index).ok()?;
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    /// The index of the entry at `name`.
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.zip.index_for_name(name)
+    }
+}
+
+/// What one archive entry declares: a class file (`.class`, or the JDK's
+/// `.sig`) or a Kotlin built-ins file.
+pub fn read_entry(name: &str, bytes: &[u8]) -> Vec<ClassContents> {
+    if name.ends_with(".kotlin_builtins") {
+        return kotlin::read_builtins(bytes)
+            .into_iter()
+            .map(ClassContents::Class)
+            .collect();
+    }
+    vec![read_class(bytes)]
+}
+
+/// What one class file declares.
+pub fn read_class(bytes: &[u8]) -> ClassContents {
+    let Some(class) = class_file::ClassFile::parse(bytes) else {
+        return ClassContents::Nothing;
+    };
+    match &class.kotlin_metadata {
+        Some(metadata) => kotlin::read(&class, metadata),
+        None => java::read(&class),
+    }
+}
+
+#[cfg(test)]
+mod tests;

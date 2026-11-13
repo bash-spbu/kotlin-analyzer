@@ -34,14 +34,7 @@ pub(crate) fn workspace_symbols(
                 }
                 let name = item.name.as_str();
                 if let Some(quality) = match_quality(name, query) {
-                    matches.push((
-                        quality,
-                        name.len(),
-                        ItemLocation {
-                            file: *file,
-                            item: index,
-                        },
-                    ));
+                    matches.push((quality, name.len(), ItemLocation::in_file(*file, index)));
                 }
             }
         }
@@ -50,7 +43,7 @@ pub(crate) fn workspace_symbols(
     matches
         .into_iter()
         .take(limit)
-        .map(|(_, _, location)| NavigationTarget::of(db, location))
+        .filter_map(|(_, _, location)| NavigationTarget::of(db, location))
         .collect()
 }
 

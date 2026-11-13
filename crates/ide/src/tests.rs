@@ -17,14 +17,17 @@ fn check_definition(fixture: &str, expected: Expect) {
     let described: Vec<String> = targets
         .iter()
         .map(|target| {
-            let text = fixture.vfs.contents(target.file).unwrap();
+            let crate::NavigationFile::Workspace(file) = target.file else {
+                return format!("library:{}", target.name);
+            };
+            let text = fixture.vfs.contents(file).unwrap();
             let line = text[..target.focus_range.start as usize]
                 .matches('\n')
                 .count()
                 + 1;
             format!(
                 "{}:{line}:{}",
-                fixture.vfs.path(target.file).display(),
+                fixture.vfs.path(file).display(),
                 target.name
             )
         })
@@ -160,4 +163,41 @@ fun rateOf() {}
         names,
         vec!["Rate", "rateOf", "RateService", "CurrencyRateProvider"]
     );
+}
+
+#[test]
+fn hover_shows_signature_documentation_and_place() {
+    let fixture = Fixture::parse(
+        r#"
+//- /app/x/Money.kt
+package x
+/**
+ * An amount in minor units.
+ * Never negative.
+ */
+@JvmInline
+value class Money(val cents: Long) {
+    fun plus(other: Money): Money = Money(cents + other.cents)
+}
+//- /app/x/Use.kt
+package x
+fun total(price: Mon$0ey): Money = price
+"#,
+    );
+    let (file, offset) = fixture.cursor();
+    let hover = analysis(&fixture).hover(file, offset).unwrap().unwrap();
+    expect![[r#"
+        ```kotlin
+        value class Money(cents: Long)
+        ```
+
+        ---
+
+        An amount in minor units.
+        Never negative.
+
+        ---
+
+        in `x`"#]]
+    .assert_eq(&hover.markdown);
 }

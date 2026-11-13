@@ -21,7 +21,7 @@ hir-def = { path = "crates/hir-def" }
 hir-ty = { path = "crates/hir-ty" }
 hir = { path = "crates/hir" }
 ide = { path = "crates/ide" }
-sidecar = { path = "crates/sidecar" }
+classfile = { path = "crates/classfile" }
 
 # External
 salsa = "0.28"
@@ -38,6 +38,8 @@ rayon = "1"
 walkdir = "2"
 expect-test = "1"
 memory-stats = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

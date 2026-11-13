@@ -26,9 +26,14 @@ level more than one candidate is an ambiguity (the answer is `Unknown`):
 4. explicit imports (`import a.b.C`, `import a.b.C as D`);
 5. the file's own package;
 6. star imports (`import a.b.*`);
-7. default imports: `kotlin.*`, `kotlin.annotation.*`, `kotlin.collections.*`,
-   `kotlin.comparisons.*`, `kotlin.io.*`, `kotlin.ranges.*`,
-   `kotlin.sequences.*`, `kotlin.text.*`, `java.lang.*`, `kotlin.jvm.*`.
+7. Kotlin's default imports: `kotlin.*`, `kotlin.annotation.*`,
+   `kotlin.collections.*`, `kotlin.comparisons.*`, `kotlin.io.*`,
+   `kotlin.ranges.*`, `kotlin.sequences.*`, `kotlin.text.*`;
+8. the platform's default imports: `java.lang.*`, `kotlin.jvm.*` — so
+   `String` is `kotlin.String`, not `java.lang.String`.
+
+Among libraries, workspace sources come first, then the JDK, then the
+source set's classpath in order: the first that declares a name has it.
 
 A qualified name (`a.b.C.D`) resolves its first segment as a package prefix or
 a classifier, then each following segment as a nested classifier.

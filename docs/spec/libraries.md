@@ -7,61 +7,26 @@ with a sources JAR, or the JDK.
 
 | source | read how | gives |
 |---|---|---|
-| sources JAR (`*-sources.jar`) | parsed like workspace files (Kotlin or Java) | declarations with signatures and documentation, navigable source |
-| compiled JAR | the JVM sidecar | declarations with exact signatures |
-| JDK | `lib/src.zip` of the project's JDK, modules `java.base`, `java.sql`, `java.net.http`, `java.logging`, `java.xml` by default | declarations and source |
+| compiled JAR | its class files, in-process: Java classes from their constant pools and generic signatures, Kotlin classes and top-level declarations from `@kotlin.Metadata`, Kotlin's built-in types from `.kotlin_builtins` | declarations with exact signatures: fully qualified types, nullability, defaults, `vararg`, extension receivers, `suspend` |
+| JDK | `lib/ct.sym`, the `.sig` class files of the project's release (`P` for 25) | the JDK's API, as declarations |
+| sources JAR / JDK `src.zip` | one entry at a time, parsed like a workspace file | where a declaration is written (navigation) and its documentation (hover) |
 
-When both a sources JAR and the compiled JAR exist, declarations come from
-sources (they carry documentation and parameter names); the compiled JAR is
-used for what sources lack. A library's declarations are computed once per
-JAR content (size + modification time + path) and stored on disk; nothing is
-recomputed while the JAR is unchanged.
+Each archive is indexed once at load: per package, its top-level names and
+which entries hold its declarations. A package's declarations are read when a
+query first needs them and kept while recently used. Nothing runs on a JVM.
 
-## Sidecar protocol
+## Which library a name comes from
 
-`jvm/sidecar` is a small JVM program started once per server, speaking
-newline-delimited JSON on stdin/stdout.
+Workspace sources first (see resolution.md); then the JDK; then the source
+set's classpath in the build's order — the first library that declares a
+name has it, as for the compilers. A source set sees only its own classpath:
+a dependency module's `implementation` libraries aren't on it.
 
-Request: `{"read": "/path/to/lib.jar"}` — reply: one line,
-```json
-{"jar": "/path/to/lib.jar", "classes": [ <class>, … ], "packageMembers": [ <member>, … ]}
-```
-or `{"jar": …, "error": "message"}`. `{"shutdown": true}` ends it.
+## Navigation into libraries
 
-A `<class>`:
-```json
-{
-  "fqName": "org.example.Outer.Inner",
-  "kind": "class | interface | object | companionObject | enum | annotation",
-  "modifiers": ["data", "sealed", "abstract", "open", "inner", "value", "fun", "expect"],
-  "visibility": "public | protected | internal | private",
-  "typeParameters": [{ "name": "T", "upperBounds": [<type>] }],
-  "supertypes": [<type>],
-  "members": [<member>],
-  "enumEntries": ["RED", "GREEN"],
-  "sealedSubclasses": ["org.example.Outer.A"],
-  "origin": "kotlin | java",
-  "deprecated": false
-}
-```
-A `<member>`:
-```json
-{
-  "name": "map",
-  "kind": "function | property | constructor | field",
-  "static": false,
-  "visibility": "public",
-  "typeParameters": [ … ],
-  "receiver": <type> | null,
-  "parameters": [{ "name": "transform", "type": <type>, "hasDefault": false, "vararg": false }],
-  "returnType": <type>,
-  "modifiers": ["suspend", "inline", "operator", "infix", "const", "var", "override"],
-  "deprecated": false
-}
-```
-A `<type>`: `{"class": "kotlin.collections.List", "arguments": [<projection>], "nullable": false}`,
-`{"typeParameter": "T", "nullable": true}`, or
-`{"function": {"receiver": <type>|null, "parameters": [<type>], "returns": <type>, "suspend": false}, "nullable": false}`;
-a `<projection>` is `{"variance": "in|out|invariant", "type": <type>}` or `"*"`.
-Java types are reported as written in bytecode signatures; Kotlin maps them
-(see resolution.md, *mapped types*). Class names are always fully qualified.
+The declaration's source is found in the sources archive by the file its
+class was compiled from (the `SourceFile` attribute), or else by searching
+its package's directory, then by its chain of names (class, nested class,
+member). The entry is written to
+`$XDG_CACHE_HOME/kotlin-analyzer/library-sources/<archive>-<hash>/<entry>`
+for the editor to open.

@@ -9,9 +9,9 @@ use intern::{Name, Path};
 
 use crate::def_map::{package_exists, visible_top_level};
 use crate::item_tree::{ImportTarget, ItemIndex, Signature, TypeRef};
-use crate::{ItemLocation, file_item_tree};
+use crate::{ItemContainer, ItemLocation, file_item_tree, item_tree};
 
-/// Kotlin's default imports on the JVM, in the order the spec lists them.
+/// Kotlin's own default imports.
 pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
     "kotlin",
     "kotlin.annotation",
@@ -21,9 +21,11 @@ pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
     "kotlin.ranges",
     "kotlin.sequences",
     "kotlin.text",
-    "java.lang",
-    "kotlin.jvm",
 ];
+
+/// The JVM platform's default imports, one level below Kotlin's own:
+/// `String` is `kotlin.String`, not `java.lang.String`.
+pub const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
 /// How far supertypes are followed looking for a nested classifier.
 const MAX_SUPERTYPE_DEPTH: usize = 16;
@@ -80,7 +82,7 @@ pub fn resolve_type_path(
     };
     let head = resolve_simple_classifier(db, file, first, offset, 0);
     match head {
-        Some(Resolution::Declaration(location)) => walk_nested(db, location, rest, 0),
+        Some(Resolution::Declaration(location)) => walk_nested(db, file, location, rest, 0),
         Some(Resolution::TypeParameter { .. }) if rest.is_empty() => {
             head.unwrap_or(Resolution::Unresolved)
         }
@@ -137,7 +139,7 @@ fn resolve_classifier_by_package(
                 .collect();
         match Resolution::of_candidates(classes) {
             Some(Resolution::Declaration(class)) => {
-                return walk_nested(db, class, &segments[package_length + 1..], 0);
+                return walk_nested(db, file, class, &segments[package_length + 1..], 0);
             }
             Some(ambiguous) => return ambiguous,
             None => {}
@@ -168,7 +170,7 @@ fn resolve_simple_classifier(
             .position(|parameter| parameter.name == name)
         {
             return Some(Resolution::TypeParameter {
-                owner: ItemLocation { file, item: *index },
+                owner: ItemLocation::in_file(file, *index),
                 index: position,
             });
         }
@@ -178,8 +180,8 @@ fn resolve_simple_classifier(
         if !tree.item(*index).kind.is_classifier() {
             continue;
         }
-        let class = ItemLocation { file, item: *index };
-        let found = nested_classifiers(db, class, name, depth);
+        let class = ItemLocation::in_file(file, *index);
+        let found = nested_classifiers(db, file, class, name, depth);
         if let Some(resolution) = Resolution::of_candidates(found) {
             return Some(resolution);
         }
@@ -212,18 +214,23 @@ fn resolve_simple_classifier(
         }
         // `import a.b.Outer.*` imports Outer's nested classifiers.
         if let Resolution::Declaration(class) = resolve_import_path(db, file, &import.path) {
-            from_star_imports.extend(nested_classifiers(db, class, name, depth));
+            from_star_imports.extend(nested_classifiers(db, file, class, name, depth));
         }
     }
     if let Some(resolution) = Resolution::of_candidates(from_star_imports) {
         return Some(resolution);
     }
 
-    let defaults: Vec<ItemLocation> = DEFAULT_IMPORT_PACKAGES
-        .iter()
-        .flat_map(|package| classifiers_in_package(db, file, &Path::parse(package), name))
-        .collect();
-    Resolution::of_candidates(defaults)
+    for level in [DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES] {
+        let defaults: Vec<ItemLocation> = level
+            .iter()
+            .flat_map(|package| classifiers_in_package(db, file, &Path::parse(package), name))
+            .collect();
+        if let Some(resolution) = Resolution::of_candidates(defaults) {
+            return Some(resolution);
+        }
+    }
+    None
 }
 
 fn classifiers_in_package(
@@ -239,7 +246,7 @@ fn classifiers_in_package(
 }
 
 fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
-    file_item_tree(db, location.file)
+    item_tree(db, location.container)
         .item(location.item)
         .kind
         .is_classifier()
@@ -248,13 +255,14 @@ fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
 /// Follows `rest` from `class` through nested classifiers.
 fn walk_nested(
     db: &dyn SourceDatabase,
+    from: SourceFile,
     class: ItemLocation,
     rest: &[Name],
     depth: usize,
 ) -> Resolution {
     let mut current = class;
     for name in rest {
-        match Resolution::of_candidates(nested_classifiers(db, current, *name, depth)) {
+        match Resolution::of_candidates(nested_classifiers(db, from, current, *name, depth)) {
             Some(Resolution::Declaration(nested)) => current = nested,
             Some(ambiguous) => return ambiguous,
             None => return Resolution::Unresolved,
@@ -272,7 +280,7 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
         let Some(&container) = current.first() else {
             return Resolution::Unresolved;
         };
-        let tree = file_item_tree(db, container.file);
+        let tree = item_tree(db, container.container);
         let members: Vec<ItemLocation> = tree
             .item(container.item)
             .children
@@ -280,7 +288,7 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
             .filter(|child| tree.item(**child).name == *name)
             .filter(|child| is_last || tree.item(**child).kind.is_classifier())
             .map(|child| ItemLocation {
-                file: container.file,
+                container: container.container,
                 item: *child,
             })
             .collect();
@@ -294,14 +302,16 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
 
 /// The classifiers named `name` nested in `class`, or else in its
 /// supertypes (Kotlin sees a supertype's nested classes by their simple
-/// name inside the subclass).
+/// name inside the subclass). `from` is the file asking: library types
+/// resolve through its classpath.
 pub fn nested_classifiers(
     db: &dyn SourceDatabase,
+    from: SourceFile,
     class: ItemLocation,
     name: Name,
     depth: usize,
 ) -> Vec<ItemLocation> {
-    let tree = file_item_tree(db, class.file);
+    let tree = item_tree(db, class.container);
     let item = tree.item(class.item);
     let own: Vec<ItemLocation> = item
         .children
@@ -311,7 +321,7 @@ pub fn nested_classifiers(
             child.name == name && child.kind.is_classifier()
         })
         .map(|child| ItemLocation {
-            file: class.file,
+            container: class.container,
             item: *child,
         })
         .collect();
@@ -323,36 +333,73 @@ pub fn nested_classifiers(
     };
     let mut inherited = Vec::new();
     for supertype in supertypes.iter() {
-        let Some(super_class) = resolve_supertype(db, class, supertype, depth) else {
+        let Some(super_class) = resolve_supertype(db, from, class, supertype, depth) else {
             continue;
         };
         if super_class == class {
             continue;
         }
-        inherited.extend(nested_classifiers(db, super_class, name, depth + 1));
+        inherited.extend(nested_classifiers(db, from, super_class, name, depth + 1));
     }
     inherited
 }
 
-/// The class a supertype reference names, resolved where the class header
-/// is written (outside the class's own body).
+/// The class a supertype reference names: for a workspace class, resolved
+/// where its header is written (outside its own body); for a library class,
+/// by the fully qualified name it records, through `from`'s classpath.
 pub fn resolve_supertype(
     db: &dyn SourceDatabase,
+    from: SourceFile,
     class: ItemLocation,
     supertype: &TypeRef,
     depth: usize,
 ) -> Option<ItemLocation> {
-    let path = supertype.path()?;
-    let tree = file_item_tree(db, class.file);
-    let header = header_offset(&tree, class.item);
-    let (&first, rest) = path.segments().split_first()?;
-    let head = resolve_simple_classifier(db, class.file, first, header, depth + 1)?;
-    match head {
-        Resolution::Declaration(location) => match walk_nested(db, location, rest, depth + 1) {
+    if let TypeRef::Qualified {
+        package, classes, ..
+    } = supertype
+    {
+        let names: Vec<Name> = classes.iter().map(|segment| segment.name).collect();
+        return match resolve_qualified(db, from, package, &names, depth) {
             Resolution::Declaration(found) => Some(found),
             _ => None,
-        },
+        };
+    }
+    let ItemContainer::File(file) = class.container else {
+        return None;
+    };
+    let path = supertype.path()?;
+    let tree = file_item_tree(db, file);
+    let header = header_offset(&tree, class.item);
+    let (&first, rest) = path.segments().split_first()?;
+    let head = resolve_simple_classifier(db, file, first, header, depth + 1)?;
+    match head {
+        Resolution::Declaration(location) => {
+            match walk_nested(db, file, location, rest, depth + 1) {
+                Resolution::Declaration(found) => Some(found),
+                _ => None,
+            }
+        }
         _ => None,
+    }
+}
+
+/// A class named by its exact package and nesting, as compiled code
+/// records it.
+pub fn resolve_qualified(
+    db: &dyn SourceDatabase,
+    from: SourceFile,
+    package: &Path,
+    classes: &[Name],
+    depth: usize,
+) -> Resolution {
+    let Some((&outermost, rest)) = classes.split_first() else {
+        return Resolution::Unresolved;
+    };
+    let candidates = classifiers_in_package(db, from, package, outermost);
+    match Resolution::of_candidates(candidates) {
+        Some(Resolution::Declaration(class)) => walk_nested(db, from, class, rest, depth),
+        Some(ambiguous) => ambiguous,
+        None => Resolution::Unresolved,
     }
 }
 

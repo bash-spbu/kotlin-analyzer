@@ -33,6 +33,7 @@ pub(crate) fn lower_java(parse: &Parse) -> ItemTree {
     }
     ItemTree {
         package,
+        source_files: Box::new([]),
         imports: imports.into_boxed_slice(),
         items: lowering.items.into_boxed_slice(),
         top_level: top_level.into_boxed_slice(),

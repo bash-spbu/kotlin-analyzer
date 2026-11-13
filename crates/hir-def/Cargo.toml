@@ -8,6 +8,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+classfile.workspace = true
 intern.workspace = true
 salsa.workspace = true
 rustc-hash.workspace = true

@@ -38,6 +38,7 @@ pub(crate) fn lower_kotlin(parse: &Parse) -> ItemTree {
         .collect();
     ItemTree {
         package,
+        source_files: Box::new([]),
         imports,
         items: lowering.items.into_boxed_slice(),
         top_level,

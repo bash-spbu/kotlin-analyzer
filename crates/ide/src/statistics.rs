@@ -16,25 +16,40 @@ pub struct DeclarationStatistics {
     pub unresolved: usize,
     /// Unresolved first segments by how often they occur, most first.
     pub top_unresolved: Vec<(String, usize)>,
+    /// Ambiguous first segments by how often they occur, most first.
+    pub top_ambiguous: Vec<(String, usize)>,
 }
 
 pub(crate) fn declaration_statistics(db: &RootDatabase) -> DeclarationStatistics {
     let mut statistics = DeclarationStatistics::default();
     let mut unresolved_names: FxHashMap<Name, usize> = FxHashMap::default();
+    let mut ambiguous_names: FxHashMap<Name, usize> = FxHashMap::default();
     for file in db.all_files() {
         let tree = hir::file_item_tree(db, file);
         statistics.declarations += tree.items.len();
         for type_ref in written_types(&tree) {
-            count(db, file, type_ref, &mut statistics, &mut unresolved_names);
+            count(
+                db,
+                file,
+                type_ref,
+                &mut statistics,
+                &mut unresolved_names,
+                &mut ambiguous_names,
+            );
         }
     }
-    let mut top: Vec<(String, usize)> = unresolved_names
+    statistics.top_unresolved = ranked(unresolved_names);
+    statistics.top_ambiguous = ranked(ambiguous_names);
+    statistics
+}
+
+fn ranked(counts: FxHashMap<Name, usize>) -> Vec<(String, usize)> {
+    let mut top: Vec<(String, usize)> = counts
         .into_iter()
         .map(|(name, count)| (name.to_string(), count))
         .collect();
     top.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-    statistics.top_unresolved = top;
-    statistics
+    top
 }
 
 /// Every type reference in the tree's signatures, type arguments included.
@@ -110,7 +125,10 @@ fn collect_nested<'tree>(type_ref: &'tree TypeRef, output: &mut Vec<&'tree TypeR
             collect_nested(result, output);
         }
         TypeRef::Array { element } => collect_nested(element, output),
-        TypeRef::Primitive { .. } | TypeRef::Unreadable => {}
+        TypeRef::Qualified { .. }
+        | TypeRef::TypeParameter { .. }
+        | TypeRef::Primitive { .. }
+        | TypeRef::Unreadable => {}
     }
 }
 
@@ -120,6 +138,7 @@ fn count(
     type_ref: &TypeRef,
     statistics: &mut DeclarationStatistics,
     unresolved_names: &mut FxHashMap<Name, usize>,
+    ambiguous_names: &mut FxHashMap<Name, usize>,
 ) {
     let TypeRef::Named { range, .. } = type_ref else {
         return;
@@ -131,7 +150,12 @@ fn count(
     match hir::resolve_type_path(db, file, &path, range.start as usize) {
         Resolution::Declaration(_) => statistics.resolved += 1,
         Resolution::TypeParameter { .. } => statistics.type_parameters += 1,
-        Resolution::Ambiguous(_) => statistics.ambiguous += 1,
+        Resolution::Ambiguous(_) => {
+            statistics.ambiguous += 1;
+            if let Some(first) = path.segments().first() {
+                *ambiguous_names.entry(*first).or_default() += 1;
+            }
+        }
         Resolution::Package(_) | Resolution::Unresolved => {
             statistics.unresolved += 1;
             if let Some(first) = path.segments().first() {

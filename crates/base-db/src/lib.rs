@@ -4,11 +4,15 @@
 //! edit invalidates exactly what depends on it.
 
 pub mod fixture;
+mod library;
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+pub use library::{
+    ArchiveKind, Classpaths, IndexedLibrary, IndexedPackage, Library, LibraryPackage, LibrarySource,
+};
 pub use project_model::{ProjectModel, SourceSetId};
 pub use salsa;
 pub use syntax::{Language, Parse};
@@ -52,6 +56,7 @@ pub struct Workspace {
 pub trait SourceDatabase: salsa::Database {
     fn workspace(&self) -> Workspace;
     fn source_file(&self, file: FileId) -> Option<SourceFile>;
+    fn classpaths(&self) -> Classpaths;
 }
 
 /// The syntax tree of a file. Kept for the files used recently; any other is
@@ -69,15 +74,19 @@ pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     workspace: Option<Workspace>,
     files: Arc<FxHashMap<FileId, SourceFile>>,
+    classpaths: Option<Classpaths>,
 }
 
 impl Default for RootDatabase {
     fn default() -> Self {
-        Self {
+        let mut database = Self {
             storage: salsa::Storage::new(None),
             workspace: None,
             files: Arc::default(),
-        }
+            classpaths: None,
+        };
+        database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None));
+        database
     }
 }
 
@@ -93,6 +102,11 @@ impl SourceDatabase for RootDatabase {
 
     fn source_file(&self, file: FileId) -> Option<SourceFile> {
         self.files.get(&file).copied()
+    }
+
+    fn classpaths(&self) -> Classpaths {
+        self.classpaths
+            .expect("classpaths are set when the database is created")
     }
 }
 
@@ -199,6 +213,51 @@ impl RootDatabase {
             files.sort_by_key(|file| file.file_id(self));
             source_set.set_files(self).to(files.into());
         }
+    }
+
+    /// Sets the libraries: each indexed archive, which of them each source
+    /// set sees (indices into `libraries`), and which one is the JDK.
+    pub fn set_libraries(
+        &mut self,
+        libraries: Vec<(LibrarySource, IndexedLibrary)>,
+        by_source_set: Vec<Vec<usize>>,
+        jdk: Option<usize>,
+    ) {
+        use salsa::Setter;
+        let mut inputs: Vec<Library> = Vec::with_capacity(libraries.len());
+        for (source, indexed) in libraries {
+            let library = Library::new(self, Arc::new(source), Arc::default());
+            let packages: FxHashMap<intern::Path, LibraryPackage> = indexed
+                .packages
+                .into_iter()
+                .map(|package| {
+                    let input = LibraryPackage::new(
+                        self,
+                        library,
+                        package.package.clone(),
+                        package.names.into(),
+                        package.entries.into(),
+                        package.module,
+                    );
+                    (package.package, input)
+                })
+                .collect();
+            library.set_packages(self).to(Arc::new(packages));
+            inputs.push(library);
+        }
+        let by_source_set: Arc<[Arc<[Library]>]> = by_source_set
+            .into_iter()
+            .map(|indices| {
+                indices
+                    .into_iter()
+                    .filter_map(|index| inputs.get(index).copied())
+                    .collect()
+            })
+            .collect();
+        let jdk = jdk.and_then(|index| inputs.get(index).copied());
+        let classpaths = self.classpaths();
+        classpaths.set_by_source_set(self).to(by_source_set);
+        classpaths.set_jdk(self).to(jdk);
     }
 
     /// Every file the database knows.

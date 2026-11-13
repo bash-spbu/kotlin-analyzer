@@ -7,6 +7,7 @@
 
 mod document_symbols;
 mod goto_definition;
+mod hover;
 mod navigation_target;
 mod statistics;
 mod workspace_symbols;
@@ -19,7 +20,8 @@ use syntax::{SyntaxError, TextRange};
 
 pub use document_symbols::DocumentSymbol;
 pub use hir::salsa::Cancelled;
-pub use navigation_target::{NavigationTarget, SymbolKind};
+pub use hover::HoverResult;
+pub use navigation_target::{NavigationFile, NavigationTarget, SymbolKind};
 pub use statistics::DeclarationStatistics;
 
 /// A result that a newer change may have cancelled.
@@ -38,6 +40,17 @@ impl AnalysisHost {
 
     pub fn apply_change(&mut self, changes: Vec<FileChange>) {
         self.db.apply_change(changes);
+    }
+
+    /// Sets the indexed libraries, which of them each source set sees, and
+    /// which one is the JDK.
+    pub fn set_libraries(
+        &mut self,
+        libraries: Vec<(hir::LibrarySource, hir::IndexedLibrary)>,
+        by_source_set: Vec<Vec<usize>>,
+        jdk: Option<usize>,
+    ) {
+        self.db.set_libraries(libraries, by_source_set, jdk);
     }
 
     /// A snapshot to answer questions with, possibly on another thread.
@@ -82,6 +95,11 @@ impl Analysis {
         limit: usize,
     ) -> Cancellable<Vec<NavigationTarget>> {
         self.with_db(|db| workspace_symbols::workspace_symbols(db, query, limit))
+    }
+
+    /// What the name at `offset` is: its signature, documentation, place.
+    pub fn hover(&self, file: FileId, offset: usize) -> Cancellable<Option<HoverResult>> {
+        self.with_db(|db| hover::hover(db, file, offset))
     }
 
     /// The declarations the name at `offset` refers to.

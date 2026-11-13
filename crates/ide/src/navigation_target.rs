@@ -1,5 +1,8 @@
 //! A declaration as a place to go to.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use hir::{ClassKind, FileId, ItemKind, ItemLocation, RootDatabase};
 use syntax::TextRange;
 
@@ -39,10 +42,24 @@ impl SymbolKind {
     }
 }
 
+/// Where a navigation target's text lives.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NavigationFile {
+    /// A workspace file.
+    Workspace(FileId),
+    /// An entry of a library's sources archive, with its text (the server
+    /// writes it somewhere the editor can open).
+    Library {
+        archive: PathBuf,
+        entry: String,
+        text: Arc<str>,
+    },
+}
+
 /// A declaration to navigate to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NavigationTarget {
-    pub file: FileId,
+    pub file: NavigationFile,
     pub name: String,
     pub kind: SymbolKind,
     /// The whole declaration.
@@ -54,21 +71,41 @@ pub struct NavigationTarget {
 }
 
 impl NavigationTarget {
-    pub fn of(db: &RootDatabase, location: ItemLocation) -> NavigationTarget {
-        let tree = hir::file_item_tree(db, location.file);
+    /// `None` for a library declaration whose source isn't available.
+    pub fn of(db: &RootDatabase, location: ItemLocation) -> Option<NavigationTarget> {
+        let tree = hir::item_tree(db, location.container);
         let item = tree.item(location.item);
         let container = match item.parent {
             Some(parent) => Some(tree.item(parent).name.to_string()),
             None if tree.package.is_root() => None,
             None => Some(tree.package.to_string()),
         };
-        NavigationTarget {
-            file: location.file.file_id(db),
+        let (file, full_range, focus_range) = match location.file() {
+            Some(file) => (
+                NavigationFile::Workspace(file.file_id(db)),
+                item.range,
+                item.name_range,
+            ),
+            None => {
+                let source = hir::library_declaration_source(db, location)?;
+                (
+                    NavigationFile::Library {
+                        archive: source.archive,
+                        entry: source.entry,
+                        text: source.text,
+                    },
+                    source.full_range,
+                    source.name_range,
+                )
+            }
+        };
+        Some(NavigationTarget {
+            file,
             name: item.name.to_string(),
             kind: SymbolKind::of(item.kind, item.parent.is_some()),
-            full_range: item.range,
-            focus_range: item.name_range,
+            full_range,
+            focus_range,
             container,
-        }
+        })
     }
 }

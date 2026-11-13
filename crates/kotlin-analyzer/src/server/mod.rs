@@ -8,6 +8,7 @@
 
 mod convert;
 mod handlers;
+mod library_sources;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +40,12 @@ pub fn run() -> Result<(), String> {
     let params: InitializeParams =
         serde_json::from_value(initialize_params).map_err(|error| error.to_string())?;
     let root = workspace_root(&params);
+    let project_json = params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("projectJson"))
+        .and_then(|path| path.as_str())
+        .map(PathBuf::from);
     let result = InitializeResult {
         capabilities: capabilities(),
         server_info: Some(ServerInfo {
@@ -52,7 +59,7 @@ pub fn run() -> Result<(), String> {
             serde_json::to_value(result).map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
-    let mut state = GlobalState::new(connection.sender.clone(), root);
+    let mut state = GlobalState::new(connection.sender.clone(), root, project_json);
     state.start_loading();
     state.main_loop(&connection.receiver)?;
     drop(state);
@@ -64,6 +71,7 @@ fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         definition_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
@@ -100,6 +108,8 @@ enum Task {
 struct GlobalState {
     sender: Sender<Message>,
     root: PathBuf,
+    /// Where the exported project model is, when not in the workspace.
+    project_json: Option<PathBuf>,
     host: AnalysisHost,
     vfs: Vfs,
     model: Arc<ProjectModel>,
@@ -116,7 +126,7 @@ struct GlobalState {
 }
 
 impl GlobalState {
-    fn new(sender: Sender<Message>, root: PathBuf) -> GlobalState {
+    fn new(sender: Sender<Message>, root: PathBuf, project_json: Option<PathBuf>) -> GlobalState {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded();
         let threads = std::thread::available_parallelism()
             .map(|count| count.get().min(8))
@@ -125,6 +135,7 @@ impl GlobalState {
             sender,
             model: Arc::new(ProjectModel::empty(root.clone())),
             root,
+            project_json,
             host: AnalysisHost::default(),
             vfs: Vfs::default(),
             open_documents: FxHashMap::default(),
@@ -184,11 +195,12 @@ impl GlobalState {
             percentage: None,
         }));
         let root = self.root.clone();
+        let project_json = self.project_json.clone();
         let sender = self.task_sender.clone();
         std::thread::Builder::new()
             .name("kotlin-analyzer-loader".to_owned())
             .spawn(move || {
-                let loaded = load::read_workspace(&root, None);
+                let loaded = load::read_workspace(&root, project_json.as_deref());
                 let _ = sender.send(Task::Loaded(loaded));
             })
             .expect("a thread can be spawned");
@@ -212,6 +224,7 @@ impl GlobalState {
                     loaded.files,
                     |path| open.iter().any(|open_path| open_path == path),
                 );
+                load::apply_libraries(&mut self.host, loaded.libraries);
                 // Open documents get their source sets now that the model exists.
                 for file in self.open_documents.keys().copied().collect::<Vec<_>>() {
                     let path = self.vfs.path(file).to_path_buf();

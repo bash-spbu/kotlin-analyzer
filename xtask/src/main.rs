@@ -15,7 +15,7 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
     ("vfs", &[]),
     ("syntax", &[]),
     ("project-model", &["intern"]),
-    ("sidecar", &[]),
+    ("classfile", &["intern"]),
     ("base-db", &["intern", "vfs", "syntax", "project-model"]),
     (
         "hir-def",
@@ -25,7 +25,7 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
             "syntax",
             "vfs",
             "project-model",
-            "sidecar",
+            "classfile",
         ],
     ),
     ("hir-ty", &["intern", "hir-def", "base-db", "syntax", "vfs"]),
@@ -57,7 +57,7 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
             "hir-ty",
             "hir",
             "ide",
-            "sidecar",
+            "classfile",
         ],
     ),
 ];

@@ -8,7 +8,7 @@ rust-analyzer's architecture — never from another implementation's source.
 |---|---|
 | [project-model.md](project-model.md) | what a workspace is: modules, source sets, classpaths, generated code, the JDK |
 | [resolution.md](resolution.md) | which declaration a name means, per the Kotlin spec |
-| [libraries.md](libraries.md) | compiled JARs, sources JARs, the JDK, and the sidecar protocol |
+| [libraries.md](libraries.md) | compiled JARs, sources JARs, the JDK |
 | [lsp.md](lsp.md) | the LSP requests served and what each answers |
 | [diagnostics.md](diagnostics.md) | the checks, when they report, and the corpus gate |
 | [cli.md](cli.md) | command-line tools |
@@ -24,5 +24,5 @@ rust-analyzer's architecture — never from another implementation's source.
    function body re-analyses that body, not the declarations of the module.
 4. **Low memory.** Declarations are stored compactly with interned names;
    source text of libraries is read on demand; caches can be evicted.
-5. **No external tools.** No `rg`, `fd` or IDE exports; only the JVM sidecar
-   for compiled classes.
+5. **No external tools.** No `rg`, `fd`, IDE exports or JVM: compiled classes
+   are read in-process.

@@ -41,7 +41,8 @@ fn print_item(tree: &ItemTree, index: ItemIndex, depth: usize, output: &mut Stri
     }
 }
 
-fn header(item: &Item) -> String {
+/// One declaration's line: modifiers, keyword, name, signature.
+pub(crate) fn header(item: &Item) -> String {
     let mut words: Vec<String> = Vec::new();
     match item.visibility {
         Visibility::Public => {}
@@ -214,6 +215,29 @@ pub fn type_text(type_ref: &TypeRef) -> String {
             } else {
                 function
             }
+        }
+        TypeRef::Qualified {
+            package,
+            classes,
+            nullable,
+        } => {
+            let mut segments: Vec<String> = package
+                .segments()
+                .iter()
+                .map(|segment| segment.to_string())
+                .collect();
+            for class in classes.iter() {
+                let named = TypeRef::Named {
+                    segments: Box::new([class.clone()]),
+                    nullable: false,
+                    range: syntax::TextRange::default(),
+                };
+                segments.push(type_text(&named));
+            }
+            format!("{}{}", segments.join("."), if *nullable { "?" } else { "" })
+        }
+        TypeRef::TypeParameter { name, nullable } => {
+            format!("{name}{}", if *nullable { "?" } else { "" })
         }
         TypeRef::Primitive { name } => name.to_string(),
         TypeRef::Array { element } => format!("{}[]", type_text(element)),

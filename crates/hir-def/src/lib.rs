@@ -10,20 +10,54 @@
 
 pub mod def_map;
 pub mod item_tree;
+pub mod library;
 pub mod resolver;
 
 use std::sync::Arc;
 
-use base_db::{Language, SourceDatabase, SourceFile};
+use base_db::{Language, LibraryPackage, SourceDatabase, SourceFile};
 
 pub use def_map::{DefMap, source_set_def_map};
 pub use item_tree::{ItemIndex, ItemTree};
 
-/// A declaration anywhere in the workspace: a file and an item in it.
+/// Where declarations come from: a workspace file, or a package of a
+/// library.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ItemContainer {
+    File(SourceFile),
+    Library(LibraryPackage),
+}
+
+/// A declaration anywhere: its container and its item there.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ItemLocation {
-    pub file: SourceFile,
+    pub container: ItemContainer,
     pub item: ItemIndex,
+}
+
+impl ItemLocation {
+    pub fn in_file(file: SourceFile, item: ItemIndex) -> ItemLocation {
+        ItemLocation {
+            container: ItemContainer::File(file),
+            item,
+        }
+    }
+
+    /// The workspace file that declares it; `None` for a library.
+    pub fn file(self) -> Option<SourceFile> {
+        match self.container {
+            ItemContainer::File(file) => Some(file),
+            ItemContainer::Library(_) => None,
+        }
+    }
+}
+
+/// The declarations of a container.
+pub fn item_tree(db: &dyn SourceDatabase, container: ItemContainer) -> Arc<ItemTree> {
+    match container {
+        ItemContainer::File(file) => file_item_tree(db, file),
+        ItemContainer::Library(package) => library::library_package_tree(db, package),
+    }
 }
 
 /// The declarations of a file.
