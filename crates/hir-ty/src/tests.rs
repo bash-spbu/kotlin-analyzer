@@ -1338,6 +1338,27 @@ val result = second()
 }
 
 #[test]
+fn defaults_see_every_parameter_and_a_function_property_is_called_when_no_function_fits() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+class Detail(val text: String)
+open class Failure { val cause: Detail? = null }
+class Wrapped(
+    message: String = cause.text,
+    cause: Detail,
+) : Failure()
+class Mapper<R>(private val notFound: (String) -> R) {
+    fun notFound(): R = notFound("missing")
+}
+fun later(first: String = second.text, second: Detail) {}
+"#,
+        expect![""],
+    );
+}
+
+#[test]
 fn negated_type_tests_nullable_receiver_extensions_and_safe_call_tests() {
     check_facts(
         r#"

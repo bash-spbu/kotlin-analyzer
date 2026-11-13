@@ -157,6 +157,17 @@ impl<'db> Inferrer<'db> {
             return result;
         }
         let levels = self.simple_levels(name, callee.start_byte());
+        // A function and a property of function type may share the name
+        // (`fun notFound()` next to `val notFound: (InputStream) -> R`):
+        // the property is called when no function takes the arguments.
+        if let Some((location, function)) = self.function_property_in_scope(name)
+            && function.parameters.len() == arguments.len()
+            && !self.any_shape_fits(&levels, name, arguments)
+        {
+            let result = self.invoke(Some(function), arguments);
+            self.record(callee, Reference::Declaration(location), result.clone());
+            return result;
+        }
         if let Some(result) = self.resolve(
             Some(callee),
             name,
@@ -174,6 +185,36 @@ impl<'db> Inferrer<'db> {
         }
         self.type_remaining(arguments);
         Ty::Unknown
+    }
+
+    /// The innermost implicit receiver's property `name`, when its type is
+    /// a function type.
+    fn function_property_in_scope(&mut self, name: Name) -> Option<(ItemLocation, FunctionType)> {
+        let receivers: Vec<Ty> = self
+            .receivers
+            .iter()
+            .rev()
+            .map(|receiver| receiver.ty.clone())
+            .collect();
+        for receiver in receivers {
+            if let Some((location, ty)) = self.property_of(&receiver, name) {
+                return match ty {
+                    Ty::Function(function) => Some((location, *function)),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
+    /// Whether any function `levels` give for `name` takes the arguments'
+    /// shape (count, names).
+    fn any_shape_fits(&mut self, levels: &[Level], name: Name, arguments: &[Argument<'_>]) -> bool {
+        levels.iter().any(|level| {
+            self.level_candidates(level, name)
+                .iter()
+                .any(|candidate| match_arguments(&candidate.signature, arguments).is_some())
+        })
     }
 
     /// `receiver.name(…)` and `receiver?.name(…)`.

@@ -613,22 +613,32 @@ impl<'db> Inferrer<'db> {
         }
     }
 
+    /// The parameters are all declared before any default value is
+    /// inferred: a name in a default means a parameter — even one declared
+    /// after it — before a member of the class.
     fn constructor_parameters(&mut self, node: SyntaxNode<'_>) {
-        for parameter in named_children(node).filter(|child| child.kind() == "class_parameter") {
+        let parameters: Vec<SyntaxNode<'_>> = named_children(node)
+            .filter(|child| child.kind() == "class_parameter")
+            .collect();
+        let mut types = Vec::with_capacity(parameters.len());
+        for parameter in &parameters {
             let ty = self
-                .type_child(parameter)
+                .type_child(*parameter)
                 .map(|written| self.written_type(written))
                 .unwrap_or(Ty::Unknown);
-            let default = named_children(parameter)
+            if let Some(name) =
+                named_children(*parameter).find(|child| child.kind() == "simple_identifier")
+            {
+                self.declare_node(name, ty.clone(), LocalKind::Parameter);
+            }
+            types.push(ty);
+        }
+        for (parameter, ty) in parameters.iter().zip(&types) {
+            let default = named_children(*parameter)
                 .skip_while(|child| !syntax::ast::kotlin::is_type(*child))
                 .nth(1);
             if let Some(default) = default {
-                self.expression(default, Some(&ty));
-            }
-            if let Some(name) =
-                named_children(parameter).find(|child| child.kind() == "simple_identifier")
-            {
-                self.declare_node(name, ty, LocalKind::Parameter);
+                self.expression(default, Some(ty));
             }
         }
     }
@@ -697,8 +707,11 @@ impl<'db> Inferrer<'db> {
 
     /// A function's parameters, declared as locals; their default values
     /// inferred.
+    /// A function's parameters, all declared before any default value is
+    /// inferred (see [`Self::constructor_parameters`]).
     fn parameters(&mut self, node: SyntaxNode<'_>) {
         let mut vararg = false;
+        let mut defaults: Vec<(SyntaxNode<'_>, Ty)> = Vec::new();
         let mut last_type = Ty::Unknown;
         for child in named_children(node) {
             match child.kind() {
@@ -729,11 +742,11 @@ impl<'db> Inferrer<'db> {
                     last_type = written;
                     vararg = false;
                 }
-                _ => {
-                    let expected = last_type.clone();
-                    self.expression(child, Some(&expected));
-                }
+                _ => defaults.push((child, last_type.clone())),
             }
+        }
+        for (default, expected) in defaults {
+            self.expression(default, Some(&expected));
         }
     }
 

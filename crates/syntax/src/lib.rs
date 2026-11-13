@@ -74,13 +74,47 @@ pub fn parse(text: Arc<str>, language: Language) -> Parse {
     parser
         .set_language(&language.grammar())
         .expect("the bundled grammar matches the tree-sitter version");
+    let parsed_text = match language {
+        Language::Kotlin => soft_keywords_as_names(&text),
+        Language::Java => std::borrow::Cow::Borrowed(&*text),
+    };
     let tree = parser
-        .parse(text.as_bytes(), None)
+        .parse(parsed_text.as_bytes(), None)
         .expect("parsing without a timeout or cancellation flag always yields a tree");
     Parse {
         text,
         tree,
         language,
+    }
+}
+
+/// `text` as the grammar is given it: `where` — a soft keyword, which
+/// Kotlin code may name a value (`val where = WhereBuilder()`), but the
+/// grammar always reads as the keyword — spelled differently where it can
+/// only be a name: followed by `.`, `?`, `!`, `)`, `,`, `[`, `]`, `=`, `:`
+/// or `;` (a type constraint, `where T : Bound`, is followed by a name).
+/// The replacement has the same length, so every node keeps its range, and
+/// the [`Parse`] keeps the original text.
+fn soft_keywords_as_names(text: &str) -> std::borrow::Cow<'_, str> {
+    const KEYWORD: &str = "where";
+    const AS_NAME: &str = "wherE";
+    let is_name_char = |char: char| char.is_alphanumeric() || char == '_' || char == '`';
+    let mut replaced: Option<String> = None;
+    for (start, _) in text.match_indices(KEYWORD) {
+        let end = start + KEYWORD.len();
+        let starts_word = !text[..start].chars().next_back().is_some_and(is_name_char);
+        let ends_word = !text[end..].chars().next().is_some_and(is_name_char);
+        let next = text[end..].chars().find(|char| !char.is_whitespace());
+        let used_as_name = next.is_some_and(|next| ".?!),[]=:;".contains(next));
+        if starts_word && ends_word && used_as_name {
+            replaced
+                .get_or_insert_with(|| text.to_owned())
+                .replace_range(start..end, AS_NAME);
+        }
+    }
+    match replaced {
+        Some(text) => std::borrow::Cow::Owned(text),
+        None => std::borrow::Cow::Borrowed(text),
     }
 }
 
@@ -273,6 +307,21 @@ mod tests {
         assert!(valid.errors().is_empty(), "{:?}", valid.errors());
         let broken = parse(Arc::from("class A { fun f( }\n"), Language::Kotlin);
         assert!(!broken.errors().is_empty());
+    }
+
+    #[test]
+    fn where_named_like_a_value_parses_and_constraints_stay_constraints() {
+        let code = "fun f() {\n    val where = Builder()\n    where.and(1)\n    where\n        .or(2)\n    use(where, where?.x, where!!)\n}\nfun <T> g(t: T): T where T : Comparable<T> = t\n";
+        let parse = parse(Arc::from(code), Language::Kotlin);
+        assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+        assert_eq!(parse.text(), code);
+        let names: Vec<&str> = descendants(parse.root())
+            .filter(|node| node.kind() == "simple_identifier")
+            .map(|node| parse.text_of(node))
+            .filter(|name| *name == "where")
+            .collect();
+        assert_eq!(names.len(), 6);
+        assert!(descendants(parse.root()).any(|node| node.kind() == "type_constraints"));
     }
 
     #[test]
