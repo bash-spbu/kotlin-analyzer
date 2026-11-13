@@ -122,6 +122,45 @@ pub fn resolve_import_path(db: &dyn SourceDatabase, file: SourceFile, path: &Pat
     Resolution::Unresolved
 }
 
+/// The top-level declarations of any kind named `name` that `file` sees,
+/// level by level: explicit imports, the file's package, star imports,
+/// Kotlin's default imports, the platform's. Expressions take the first
+/// level where a candidate fits — which may not be the first non-empty one
+/// (an imported `max(Int, Int)` doesn't stop `kotlin.comparisons.max` for
+/// other arguments).
+pub fn top_level_levels(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    name: Name,
+) -> Vec<Vec<ItemLocation>> {
+    let tree = file_item_tree(db, file);
+    let mut levels = Vec::with_capacity(5);
+    levels.push(
+        tree.imports
+            .iter()
+            .filter(|import| import.visible_name() == Some(name))
+            .flat_map(|import| resolve_import_path(db, file, &import.path).declarations())
+            .collect(),
+    );
+    levels.push(visible_top_level(db, file, &tree.package, name));
+    let mut from_star_imports = Vec::new();
+    for import in tree.imports.iter() {
+        if import.target == ImportTarget::Everything {
+            from_star_imports.extend(visible_top_level(db, file, &import.path, name));
+        }
+    }
+    levels.push(from_star_imports);
+    for level in [DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES] {
+        levels.push(
+            level
+                .iter()
+                .flat_map(|package| visible_top_level(db, file, &Path::parse(package), name))
+                .collect(),
+        );
+    }
+    levels
+}
+
 /// `a.b.C.D` read as package `a.b`, class `C`, nested `D` — the longest
 /// package prefix that has the class wins.
 fn resolve_classifier_by_package(

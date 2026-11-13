@@ -276,8 +276,13 @@ name = "hir-ty"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "expect-test",
  "hir-def",
+ "intern",
+ "rustc-hash",
+ "salsa",
  "syntax",
+ "vfs",
 ]
 
 [[package]]

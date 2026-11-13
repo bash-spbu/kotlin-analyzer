@@ -181,8 +181,10 @@ impl Modifiers {
     /// Java `final` on a class or method.
     pub const FINAL: Modifiers = Modifiers(1 << 17);
     pub const DEPRECATED: Modifiers = Modifiers(1 << 18);
+    /// Compiled from Java: its types' nullability is unknown to Kotlin.
+    pub const PLATFORM: Modifiers = Modifiers(1 << 19);
 
-    const NAMES: [(Modifiers, &'static str); 19] = [
+    const NAMES: [(Modifiers, &'static str); 20] = [
         (Modifiers::DATA, "data"),
         (Modifiers::SEALED, "sealed"),
         (Modifiers::ABSTRACT, "abstract"),
@@ -202,6 +204,7 @@ impl Modifiers {
         (Modifiers::STATIC, "static"),
         (Modifiers::FINAL, "final"),
         (Modifiers::DEPRECATED, "@Deprecated"),
+        (Modifiers::PLATFORM, "(java)"),
     ];
 
     pub fn contains(self, other: Modifiers) -> bool {

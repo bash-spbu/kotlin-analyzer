@@ -269,6 +269,11 @@ impl Builder {
             classfile::ClassKind::CompanionObject => ClassKind::CompanionObject,
         };
         let primary_constructor = None;
+        let is_java = class.origin == classfile::Origin::Java;
+        let mut class_modifiers = modifiers(&class.modifiers);
+        if is_java {
+            class_modifiers.insert(Modifiers::PLATFORM);
+        }
         let index = self.push(
             Item {
                 name: class.name.simple_name(),
@@ -278,7 +283,7 @@ impl Builder {
                 parent,
                 children: Box::new([]),
                 visibility: visibility(class.visibility),
-                modifiers: modifiers(&class.modifiers),
+                modifiers: class_modifiers,
                 type_parameters: type_parameters(&class.type_parameters),
                 signature: Signature::Class {
                     supertypes: class.supertypes.iter().map(type_ref).collect(),
@@ -287,7 +292,6 @@ impl Builder {
             },
             parent,
         );
-        let is_java = class.origin == classfile::Origin::Java;
         for entry in class.enum_entries {
             self.push(
                 Item {
@@ -320,6 +324,9 @@ impl Builder {
         let mut kept = modifiers(&member.modifiers);
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
+        }
+        if is_java {
+            kept.insert(Modifiers::PLATFORM);
         }
         let (kind, signature) = match member.kind {
             MemberKind::Function => (
