@@ -35,7 +35,9 @@ See `docs/spec/` for what each does, and when it stays silent.
 1. `cargo install --path crates/kotlin-analyzer` puts `kotlin-analyzer` on
    the PATH.
 2. *zed: install dev extension* → `editors/zed` (see its README for
-   settings). Highlighting comes from Zed's Kotlin and Java extensions.
+   settings). It provides the Kotlin language as well — highlighting,
+   outline, brackets, indentation — so no other Kotlin extension is needed;
+   Java's grammar comes from Zed's Java extension.
 
 ## Project model
 

@@ -1,10 +1,17 @@
 id = "kotlin-analyzer"
 name = "kotlin-analyzer"
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["Alexander Bashkirov"]
-description = "The kotlin-analyzer language server for Kotlin (and read-only Java). The Kotlin and Java languages themselves come from their own extensions."
+description = "Kotlin for Zed: the language (highlighting, outline, brackets, indentation, text objects) and the kotlin-analyzer language server, also for Java."
 repository = "https://github.com/bash-spbu/kotlin-analyzer"
+languages = ["languages/kotlin"]
+
+# The revision Zed's Java extension uses for its Gradle Kotlin scripts:
+# grammar names are global in Zed, so both stay on the same parser.
+[grammars.kotlin]
+repository = "https://github.com/fwcd/tree-sitter-kotlin"
+rev = "1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1"
 
 [language_servers.kotlin-analyzer]
 name = "kotlin-analyzer"

@@ -32,5 +32,7 @@ Rules:
 | what | license | how |
 |---|---|---|
 | tree-sitter, tree-sitter-java, brokk-tree-sitter-kotlin | MIT | crates.io dependencies |
+| fwcd/tree-sitter-kotlin | MIT | the Zed extension's grammar, fetched and built by Zed at a pinned revision (not vendored); the extension's queries (`editors/zed/languages/kotlin/*.scm`) are written for this project |
+| zed_extension_api | Apache-2.0 | the Zed extension's dependency |
 | salsa, lsp-server, lsp-types, zip, rayon, serde, … | MIT / Apache-2.0 | crates.io dependencies (see `Cargo.lock`) |
 | `LICENSE` text | Apache-2.0 | the license's own text |
