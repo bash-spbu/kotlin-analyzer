@@ -18,7 +18,7 @@ use super::{ArgumentMismatch, Certainty, LocalId, NameSite, Reference};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::{Member, class_substitution};
 use crate::signature::{Callable, CallableSignature, ParameterSignature};
-use crate::ty::{FunctionType, Substitution, Ty, TypeParameterId};
+use crate::ty::{FunctionType, Nullability, Substitution, Ty, TypeParameterId};
 
 /// An argument of a call, typed when the call's resolution needs it.
 pub(super) struct Argument<'tree> {
@@ -79,6 +79,10 @@ struct Shaped {
 
 /// Where a call's candidates come from, in the order Kotlin looks.
 enum Level {
+    /// On a nullable receiver called with a plain `.`: the extensions (of
+    /// any level) declared on a nullable receiver. Kotlin calls one of
+    /// those before a member, which would need the receiver non-null.
+    NullableReceiverExtensions(Ty),
     /// Member functions of a receiver's type.
     Members(Ty),
     /// Constructors of the `inner` classes of a receiver's type
@@ -209,7 +213,14 @@ impl<'db> Inferrer<'db> {
                 self.type_remaining(arguments);
                 return Ty::Unknown;
             }
-            Typed::Value(receiver_type) => self.receiver_levels(receiver_type),
+            Typed::Value(receiver_type) => {
+                let mut levels = Vec::new();
+                if !safe && receiver_type.nullability() == Nullability::Nullable {
+                    levels.push(Level::NullableReceiverExtensions(receiver_type.clone()));
+                }
+                levels.extend(self.receiver_levels(receiver_type));
+                levels
+            }
             Typed::Class(class) => self.static_levels(*class),
             Typed::Package(package) => {
                 let found = hir_def::def_map::visible_top_level(self.db, self.file, package, name);
@@ -496,6 +507,25 @@ impl<'db> Inferrer<'db> {
                     .iter()
                     .filter_map(|location| self.extension_candidate(*location, receiver))
                     .collect()
+            }
+            Level::NullableReceiverExtensions(receiver) => {
+                let mut found =
+                    self.level_candidates(&Level::MemberExtensions(receiver.clone()), name);
+                for level in 0..TOP_LEVEL_LEVELS {
+                    let extensions = Level::Extensions {
+                        receiver: receiver.clone(),
+                        level,
+                    };
+                    found.extend(self.level_candidates(&extensions, name));
+                }
+                found.retain(|candidate| {
+                    candidate
+                        .signature
+                        .receiver
+                        .as_ref()
+                        .is_some_and(|declared| declared.nullability() == Nullability::Nullable)
+                });
+                found
             }
             Level::InnerConstructors(receiver) => self
                 .types

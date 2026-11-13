@@ -115,7 +115,7 @@ impl Parse {
                     range: TextRange::of(node),
                     message: format!("missing `{}`", node.kind()),
                 });
-            } else if node.is_error() {
+            } else if node.is_error() && !is_grammar_gap(node) {
                 errors.push(SyntaxError {
                     range: TextRange::of(node),
                     message: "syntax error".to_owned(),
@@ -166,6 +166,20 @@ impl Parse {
 pub struct SyntaxError {
     pub range: TextRange,
     pub message: String,
+}
+
+/// Whether an error node is the grammar's, not the code's: Kotlin the
+/// grammar doesn't know. So far, an anonymous function's parameters
+/// without types (`fun(_, value) = …`, which Kotlin allows where the
+/// function's type is known).
+fn is_grammar_gap(error: SyntaxNode<'_>) -> bool {
+    let in_anonymous_function_parameters = error
+        .parent()
+        .filter(|parameters| parameters.kind() == "function_value_parameters")
+        .and_then(|parameters| parameters.parent())
+        .is_some_and(|function| function.kind() == "anonymous_function");
+    in_anonymous_function_parameters
+        && named_children(error).all(|child| child.kind() == "simple_identifier")
 }
 
 /// Every node under `root` (itself included), in document order, walked
@@ -258,6 +272,20 @@ mod tests {
         let valid = parse(Arc::from("class A { fun f() = 1 }\n"), Language::Kotlin);
         assert!(valid.errors().is_empty(), "{:?}", valid.errors());
         let broken = parse(Arc::from("class A { fun f( }\n"), Language::Kotlin);
+        assert!(!broken.errors().is_empty());
+    }
+
+    #[test]
+    fn an_anonymous_functions_untyped_parameters_are_valid_kotlin() {
+        let valid = parse(
+            Arc::from("fun f() { listen(fun(_, value) = load(value)) }\n"),
+            Language::Kotlin,
+        );
+        assert!(valid.errors().is_empty(), "{:?}", valid.errors());
+        let broken = parse(
+            Arc::from("fun f() { listen(fun(1 +) = 2) }\n"),
+            Language::Kotlin,
+        );
         assert!(!broken.errors().is_empty());
     }
 

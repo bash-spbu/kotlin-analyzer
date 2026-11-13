@@ -46,7 +46,9 @@ errors gets only `syntax` diagnostics.
 On projects that compile, every error or warning a check reports is a false
 positive by definition. `kotlin-analyzer diagnostics <root>` runs all checks
 over every workspace file and exits non-zero on any finding; the gate is zero
-findings on `finops-mono` and `crypto-gateway-be`. Known exceptions are
+findings on `finops-mono`, `crypto-gateway-be`, `billing-mono`,
+`jvm-common-tools`, `onewintoken-mono` and `lottery-backend-mono`. Known
+exceptions are
 findings against generated code that is stale on disk (its source spec newer
 than the generated file) — these are true.
 
@@ -56,6 +58,14 @@ Status (2026-11-13), stable checks:
 |---|---|---|---|
 | finops-mono | 3677 | 1 | `argument-mismatch` against a stale generated client |
 | crypto-gateway-be | 8364 | 2 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none |
+| billing-mono | 4416 | 0 | |
+| jvm-common-tools | 1149 | 0 | |
+| onewintoken-mono | 631 | 0 | |
+| lottery-backend-mono | 260 | 0 | |
+
+(The last four weren't built: their generated sources aren't on disk, so
+names from them stay unresolved — and the checks silent there.)
 
 The pass checks files in batches of 128 and evicts cached results between
-them: peak RSS ≈ 260 MB (finops-mono), ≈ 400 MB (crypto-gateway-be).
+them: peak RSS ≈ 290 MB (finops-mono, billing-mono), ≈ 440 MB
+(crypto-gateway-be).

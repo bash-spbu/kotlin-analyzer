@@ -5,6 +5,7 @@
 
 use hir_def::item_tree::{ClassKind, ItemKind, Modifiers, Signature};
 use hir_def::{ItemContainer, ItemLocation};
+use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
@@ -103,7 +104,7 @@ impl Inferrer<'_> {
                 let value = named_children(condition).next()?;
                 match value.kind() {
                     "type_test" => {
-                        if has_token(value, "!is") {
+                        if TypeTest::of(value) == TypeTest::IsNot {
                             return None;
                         }
                         let target = self.type_child(value)?;

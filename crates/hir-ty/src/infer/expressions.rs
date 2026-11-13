@@ -5,6 +5,7 @@ use hir_def::ItemLocation;
 use hir_def::item_tree::{ItemKind, Signature};
 use hir_def::resolver::{Resolution, resolve_type_path};
 use intern::{Name, Path};
+use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
@@ -962,6 +963,10 @@ impl Inferrer<'_> {
                     let (ty, is_else) = self.when_entry(child, subject, expected);
                     has_else |= is_else;
                     branches.push(ty);
+                    // Later branches run only when this one's condition
+                    // was false.
+                    let when_false = self.narrowed_when_entry_false(child, subject);
+                    self.narrow(&when_false);
                 }
                 _ => {}
             }
@@ -1055,6 +1060,31 @@ impl Inferrer<'_> {
         (ty, is_else)
     }
 
+    /// What a branch whose one condition is `!is T` tells the branches
+    /// after it: the subject is a `T`.
+    fn narrowed_when_entry_false(
+        &self,
+        entry: SyntaxNode<'_>,
+        subject: WhenSubject<'_>,
+    ) -> Vec<(LocalId, Ty)> {
+        let conditions: Vec<SyntaxNode<'_>> = named_children(entry)
+            .filter(|child| child.kind() == "when_condition")
+            .collect();
+        let [condition] = conditions[..] else {
+            return Vec::new();
+        };
+        let (Some(local), Some(test)) = (subject.local, named_children(condition).next()) else {
+            return Vec::new();
+        };
+        let is_negated_type_test =
+            test.kind() == "type_test" && TypeTest::of(test) == TypeTest::IsNot;
+        let Some(target) = self.type_child(test).filter(|_| is_negated_type_test) else {
+            return Vec::new();
+        };
+        let target = self.written_type(target);
+        vec![(local, self.smart_cast(&self.local_type(local), target))]
+    }
+
     fn when_condition(
         &mut self,
         node: SyntaxNode<'_>,
@@ -1070,7 +1100,7 @@ impl Inferrer<'_> {
                         continue;
                     };
                     let target_type = self.written_type(target);
-                    let negated = has_token(child, "!is");
+                    let negated = TypeTest::of(child) == TypeTest::IsNot;
                     if negated {
                         continue;
                     }

@@ -269,6 +269,33 @@ fn receiver_type(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
     named_children(receiver).find(|child| is_type(*child))
 }
 
+/// Which way a type test (`x is T`, `x !is T`, a `when` branch's `is T`)
+/// goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeTest {
+    Is,
+    IsNot,
+    /// Not a type test (`x in range`).
+    None,
+}
+
+impl TypeTest {
+    /// The test `node` (a `check_expression` or `type_test`) makes. `!is`
+    /// is two tokens, `!` then `is`.
+    pub fn of(node: SyntaxNode<'_>) -> TypeTest {
+        let mut previous_was_bang = false;
+        for child in crate::children(node).filter(|child| !child.is_named()) {
+            match child.kind() {
+                "is" if previous_was_bang => return TypeTest::IsNot,
+                "is" => return TypeTest::Is,
+                "!" => previous_was_bang = true,
+                _ => previous_was_bang = false,
+            }
+        }
+        TypeTest::None
+    }
+}
+
 /// Whether `node` is a type: a reference, a nullable or function type.
 pub fn is_type(node: SyntaxNode<'_>) -> bool {
     matches!(

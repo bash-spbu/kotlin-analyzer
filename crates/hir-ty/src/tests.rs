@@ -1336,3 +1336,36 @@ val result = second()
             second@4 -> app.second: Unit"#]],
     );
 }
+
+#[test]
+fn negated_type_tests_nullable_receiver_extensions_and_safe_call_tests() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+class Recorder { fun snapshot(): Int = 1 }
+class Currency(val value: String)
+class Deposit(val fiat: Currency?)
+class Stats {
+    fun direct(recorder: Recorder?): Int = recorder.snapshot()
+    private fun Recorder?.snapshot(): Int = this?.snapshot() ?: 0
+    fun resolve(scenario: Any?): Any? {
+        if (scenario !is Map<*, *>) return scenario
+        return scenario.label("name")
+    }
+    private fun Map<*, *>.label(field: String): String = field
+    fun fiat(deposit: Deposit?): String {
+        if (deposit?.fiat != null) {
+            return deposit.fiat.value
+        }
+        return ""
+    }
+    fun branch(value: Any): Int = when (value) {
+        !is Recorder -> 0
+        else -> value.snapshot()
+    }
+}
+"#,
+        expect![""],
+    );
+}

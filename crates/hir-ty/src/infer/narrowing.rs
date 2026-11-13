@@ -4,6 +4,7 @@
 
 use hir_def::ItemLocation;
 use hir_def::item_tree::Signature;
+use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
@@ -33,14 +34,21 @@ const CONDITION_CONTRACTS: &[&str] = &["require", "check", "assert"];
 /// Standard-library functions that throw when their argument is null.
 const NOT_NULL_CONTRACTS: &[&str] = &["requireNotNull", "checkNotNull"];
 
-/// An expression as data flow compares it: its text without whitespace
-/// and without a leading `this.` — `this.user` and `user` are one path.
+/// An expression as data flow compares it: its text without whitespace,
+/// without a leading `this.`, and with `?.` and `!!.` read as `.` —
+/// `this.user`, `user`, and the `user?.name` of `user?.name != null` and
+/// the `user.name` after it are one path.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct StablePath(String);
 
 impl StablePath {
     pub(super) fn of(text: &str) -> StablePath {
-        let compact: String = text.chars().filter(|char| !char.is_whitespace()).collect();
+        let compact: String = text
+            .chars()
+            .filter(|char| !char.is_whitespace())
+            .collect::<String>()
+            .replace("?.", ".")
+            .replace("!!.", ".");
         match compact.strip_prefix("this.") {
             Some(member) => StablePath(member.to_owned()),
             None => StablePath(compact),
@@ -174,7 +182,8 @@ impl Inferrer<'_> {
             return Narrowing::default();
         };
         self.expression(operand, None);
-        let is_type_check = has_token(node, "is") || has_token(node, "!is");
+        let test = TypeTest::of(node);
+        let is_type_check = test != TypeTest::None;
         if !is_type_check {
             for other in rest {
                 self.expression(*other, None);
@@ -188,7 +197,7 @@ impl Inferrer<'_> {
             return Narrowing::default();
         };
         let target_type = self.written_type(*target);
-        if operand.kind() == "this_expression" && !has_token(node, "!is") {
+        if operand.kind() == "this_expression" && test == TypeTest::Is {
             return Narrowing {
                 receiver_when_true: Some(target_type),
                 ..Narrowing::default()
@@ -203,7 +212,7 @@ impl Inferrer<'_> {
             return Narrowing::default();
         };
         let narrowed = vec![(local, self.smart_cast(&self.local_type(local), target_type))];
-        if has_token(node, "!is") {
+        if test == TypeTest::IsNot {
             Narrowing {
                 when_false: narrowed,
                 ..Narrowing::default()
@@ -306,7 +315,7 @@ impl Inferrer<'_> {
                     _ => Vec::new(),
                 }
             }
-            "check_expression" if has_token(condition, "is") && !has_token(condition, "!is") => {
+            "check_expression" if TypeTest::of(condition) == TypeTest::Is => {
                 let mut children = named_children(condition);
                 let Some(operand) = children.next() else {
                     return Vec::new();
