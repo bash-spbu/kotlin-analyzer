@@ -63,6 +63,19 @@ impl ItemTree {
         enclosing
     }
 
+    /// The items `index` is declared in, outermost first — the scope its
+    /// header sees (its own body is not around its header).
+    pub fn ancestors(&self, index: ItemIndex) -> Vec<ItemIndex> {
+        let mut ancestors = Vec::new();
+        let mut current = self.item(index).parent;
+        while let Some(parent) = current {
+            ancestors.push(parent);
+            current = self.item(parent).parent;
+        }
+        ancestors.reverse();
+        ancestors
+    }
+
     /// One declaration as Kotlin-like text: `data class Point<T>(x: T) : Shape`.
     pub fn signature(&self, index: ItemIndex) -> String {
         pretty::header(self.item(index))

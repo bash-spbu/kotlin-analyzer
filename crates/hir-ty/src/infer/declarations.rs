@@ -55,6 +55,20 @@ pub(super) struct ImplicitReceiver {
     pub(super) ty: Ty,
     /// What `this@label` calls it: the class's or the function's name.
     pub(super) label: Option<Name>,
+    pub(super) super_of: SuperOf,
+}
+
+/// What `super` means where a receiver is in scope.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SuperOf {
+    /// A class body: the class's direct supertypes.
+    Class(ItemLocation),
+    /// An object literal's body: its supertype, which is its receiver's
+    /// type.
+    ObjectLiteral,
+    /// No `super` of its own: an extension's or a lambda's receiver, a
+    /// companion's, a smart-cast `this`.
+    Nothing,
 }
 
 pub(crate) struct Inferrer<'db> {
@@ -236,12 +250,23 @@ impl<'db> Inferrer<'db> {
     }
 
     /// A type whose members are all known: not unknown, and every
-    /// supertype in its hierarchy resolves.
+    /// supertype in its hierarchy resolves (a type parameter's: its
+    /// bounds').
     fn is_fully_known(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Unknown => false,
             Ty::Class(class) => self.types.hierarchy_complete(class.class),
-            Ty::TypeParameter { .. } | Ty::Function(_) | Ty::Nothing { .. } => true,
+            // A bound that is another type parameter is judged where that
+            // one is used (bounds may refer to each other in a cycle).
+            Ty::TypeParameter { parameter, .. } => self
+                .types
+                .type_parameter_bounds(*parameter)
+                .iter()
+                .all(|bound| match bound {
+                    Ty::TypeParameter { .. } => true,
+                    other => self.is_fully_known(other),
+                }),
+            Ty::Function(_) | Ty::Nothing { .. } => true,
         }
     }
 
@@ -369,7 +394,21 @@ impl<'db> Inferrer<'db> {
     }
 
     pub(super) fn push_receiver(&mut self, ty: Ty, label: Option<Name>) {
-        self.receivers.push(ImplicitReceiver { ty, label });
+        self.receivers.push(ImplicitReceiver {
+            ty,
+            label,
+            super_of: SuperOf::Nothing,
+        });
+    }
+
+    /// A class body's (or an object literal's) `this`, which `super` refers
+    /// past.
+    pub(super) fn push_body_receiver(&mut self, ty: Ty, label: Option<Name>, super_of: SuperOf) {
+        self.receivers.push(ImplicitReceiver {
+            ty,
+            label,
+            super_of,
+        });
     }
 
     pub(super) fn pop_receiver(&mut self) {
@@ -544,7 +583,7 @@ impl<'db> Inferrer<'db> {
         let tree = hir_def::item_tree(self.db, class.container);
         let label = tree.item(class.item).name;
         let ty = Ty::Class(self.types.self_type(class));
-        self.push_receiver(ty, Some(label));
+        self.push_body_receiver(ty, Some(label), SuperOf::Class(class));
         pushed + 1
     }
 
@@ -750,36 +789,46 @@ impl<'db> Inferrer<'db> {
         if let Some(receiver) = receiver_type {
             self.push_receiver(receiver, None);
         }
+        // Smart casts in one member's initializer stay there.
+        self.push_scope();
         let initialized = self.property_initializer(node, written.as_ref());
-        for child in named_children(node) {
-            match child.kind() {
-                "getter" => {
-                    if let Some(body) =
-                        named_children(child).find(|part| part.kind() == "function_body")
-                    {
-                        self.push_scope_of(ScopeKind::Function);
-                        let ty = self.function_body(body, written.as_ref());
-                        self.pop_scope();
-                        if written.is_none() && initialized.is_none() && has_token(body, "=") {
-                            if pushed_receiver {
-                                self.pop_receiver();
-                            }
-                            return ty;
-                        }
-                    }
-                }
-                "setter" => self.setter(child, written.clone().or(initialized.clone())),
-                _ => {}
+        self.pop_scope();
+        let stored = written.clone().or(initialized.clone());
+        let mut from_getter = None;
+        for accessor in accessors(node) {
+            match accessor.kind() {
+                "getter" => from_getter = self.getter(accessor, stored.as_ref()),
+                _ => self.setter(accessor, stored.as_ref()),
             }
         }
         if pushed_receiver {
             self.pop_receiver();
         }
-        written.or(initialized).unwrap_or(Ty::Unknown)
+        stored.or(from_getter).unwrap_or(Ty::Unknown)
     }
 
-    fn setter(&mut self, node: SyntaxNode<'_>, property_type: Option<Ty>) {
+    /// A getter's body, with `field` in scope; an expression body's type
+    /// (what an unwritten property type comes from).
+    fn getter(&mut self, node: SyntaxNode<'_>, stored: Option<&Ty>) -> Option<Ty> {
+        let body = named_children(node).find(|part| part.kind() == "function_body")?;
         self.push_scope_of(ScopeKind::Function);
+        self.declare_backing_field(node, stored);
+        let ty = self.function_body(body, stored);
+        self.pop_scope();
+        has_token(body, "=").then_some(ty)
+    }
+
+    /// `field` of the property whose accessor `accessor` is.
+    fn declare_backing_field(&mut self, accessor: SyntaxNode<'_>, stored: Option<&Ty>) {
+        let ty = stored.cloned().unwrap_or(Ty::Unknown);
+        let at = TextRange::new(accessor.start_byte(), accessor.start_byte());
+        self.declare(Name::new("field"), at, ty, LocalKind::BackingField);
+    }
+
+    fn setter(&mut self, node: SyntaxNode<'_>, stored: Option<&Ty>) {
+        self.push_scope_of(ScopeKind::Function);
+        self.declare_backing_field(node, stored);
+        let property_type = stored.cloned();
         for child in named_children(node) {
             match child.kind() {
                 "parameter_with_optional_type" | "simple_identifier" => {
@@ -885,7 +934,11 @@ impl<'db> Inferrer<'db> {
             }
             "label" | "line_comment" | "multiline_comment" => self.types.builtin("Unit"),
             "statements" => self.block(node),
-            _ => self.expression(node, None),
+            _ => {
+                let ty = self.expression(node, None);
+                self.narrow_after_contract(node);
+                ty
+            }
         }
     }
 
@@ -1037,4 +1090,18 @@ fn ancestor_spanning(node: SyntaxNode<'_>, range: TextRange) -> Option<SyntaxNod
         current = candidate.parent();
     }
     None
+}
+
+/// A property's accessors: the grammar puts a `get()`/`set()` on its own
+/// line after the declaration, as its sibling; on the declaration's line,
+/// as its child.
+fn accessors(property: SyntaxNode<'_>) -> Vec<SyntaxNode<'_>> {
+    let is_accessor = |node: &SyntaxNode<'_>| matches!(node.kind(), "getter" | "setter");
+    let mut found: Vec<SyntaxNode<'_>> = named_children(property).filter(is_accessor).collect();
+    let mut next = property.next_named_sibling();
+    while let Some(sibling) = next.filter(is_accessor) {
+        found.push(sibling);
+        next = sibling.next_named_sibling();
+    }
+    found
 }

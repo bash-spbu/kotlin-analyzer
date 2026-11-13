@@ -47,7 +47,13 @@ impl std::fmt::Display for RenameError {
 /// with.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Target {
-    Local { file: FileId, declared: TextRange },
+    Local {
+        file: FileId,
+        declared: TextRange,
+        /// `it` and `field` aren't declared in the source: no declaration
+        /// to list, nothing to rename.
+        implicit: bool,
+    },
     Declarations(Vec<ItemLocation>),
 }
 
@@ -58,6 +64,7 @@ impl Target {
             NameTarget::Local { local, .. } => Target::Local {
                 file,
                 declared: local.name_range,
+                implicit: !local.kind.is_written(),
             },
             NameTarget::Declarations(declarations) if declarations.is_empty() => return None,
             NameTarget::Declarations(declarations) => Target::Declarations(declarations),
@@ -148,6 +155,7 @@ pub(crate) fn rename(
 
 fn check_renameable(db: &RootDatabase, target: &Target) -> Result<(), RenameError> {
     match target {
+        Target::Local { implicit: true, .. } => Err(RenameError::NothingToRename),
         Target::Local { .. } => Ok(()),
         Target::Declarations(declarations) => {
             let all_kotlin_sources =
@@ -210,7 +218,8 @@ fn is_valid_name(name: &str) -> bool {
 /// Where the target is declared.
 fn declaration_ranges(db: &RootDatabase, target: &Target) -> Vec<FileRange> {
     match target {
-        Target::Local { file, declared } => vec![FileRange {
+        Target::Local { implicit: true, .. } => Vec::new(),
+        Target::Local { file, declared, .. } => vec![FileRange {
             file: *file,
             range: *declared,
         }],

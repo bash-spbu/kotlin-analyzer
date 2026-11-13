@@ -86,9 +86,10 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
     match local.kind {
         LocalKind::Value => format!("val {}: {ty}", local.name),
         LocalKind::Variable => format!("var {}: {ty}", local.name),
-        LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::ImplicitIt => {
-            format!("{}: {ty}", local.name)
-        }
+        LocalKind::Parameter
+        | LocalKind::LambdaParameter
+        | LocalKind::ImplicitIt
+        | LocalKind::BackingField => format!("{}: {ty}", local.name),
         LocalKind::Function => format!("fun {}: {ty}", local.name),
     }
 }

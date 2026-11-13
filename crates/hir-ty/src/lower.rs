@@ -123,7 +123,7 @@ pub fn builtin(
     arguments: Vec<Ty>,
 ) -> Ty {
     let names: Vec<Name> = name.split('.').map(Name::new).collect();
-    match resolve_qualified(db, from, &Path::parse(package), &names, 0) {
+    match resolve_qualified(db, from, &Path::parse(package), &names) {
         Resolution::Declaration(class) => Ty::Class(ClassType {
             class,
             arguments: arguments.into_boxed_slice(),
@@ -177,7 +177,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                 .map(|segment| lower_arguments(db, scope, &segment.arguments, depth))
                 .unwrap_or_default();
             let names: Vec<Name> = classes.iter().map(|segment| segment.name).collect();
-            match resolve_qualified(db, scope.from, package, &names, 0) {
+            match resolve_qualified(db, scope.from, package, &names) {
                 Resolution::Declaration(class) => {
                     class_type(db, scope, class, arguments, nullability, depth)
                 }
@@ -252,7 +252,7 @@ pub fn lower_supertype(
     let TypeRef::Named { segments, .. } = supertype else {
         return lower(db, scope, supertype, 0).class().cloned();
     };
-    let location = resolve_supertype(db, from, class, supertype, 0)?;
+    let location = resolve_supertype(db, from, class, supertype)?;
     let arguments = segments
         .last()
         .map(|segment| lower_arguments(db, scope, &segment.arguments, 0))
@@ -392,7 +392,7 @@ fn kotlin_view(db: &dyn SourceDatabase, from: SourceFile, class: ItemLocation) -
         return class;
     };
     let (package, classes) = split_kotlin_name(kotlin);
-    match resolve_qualified(db, from, &package, &classes, 0) {
+    match resolve_qualified(db, from, &package, &classes) {
         Resolution::Declaration(mapped) => mapped,
         _ => class,
     }

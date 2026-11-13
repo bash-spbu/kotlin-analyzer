@@ -9,6 +9,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
 use super::fit::Fit;
+use super::narrowing::StablePath;
 use super::{NonExhaustiveWhen, Reference};
 use crate::lower::lower_supertype;
 use crate::ty::{Nullability, Ty};
@@ -55,18 +56,11 @@ impl Inferrer<'_> {
                     .types
                     .iter()
                     .any(|ty| self.types.fits(subject_type, ty) == Fit::Yes);
-                if whole_enum_covered {
-                    Vec::new()
-                } else {
-                    let enum_name = subject_type
-                        .class()
-                        .map(|class| crate::display::class_name(self.db, class.class))
-                        .unwrap_or_default();
-                    entries
-                        .into_iter()
-                        .filter(|entry| !covered.declarations.contains(entry))
-                        .map(|entry| format!("{enum_name}.{}", self.item_name(entry)))
-                        .collect()
+                match subject_type.class() {
+                    Some(enum_type) if !whole_enum_covered => {
+                        self.uncovered_entries(enum_type.class, entries, &covered)
+                    }
+                    _ => Vec::new(),
                 }
             }
             Cases::Inheritors(inheritors) => {
@@ -144,17 +138,21 @@ impl Inferrer<'_> {
         else {
             return true;
         };
-        let path = path_text(self.text(subject));
+        let path = StablePath::of(self.text(subject));
         let scope = enclosing_body(node);
         syntax::descendants(scope)
             .filter(|candidate| candidate.end_byte() <= node.start_byte())
-            .filter(|candidate| {
-                matches!(
-                    candidate.kind(),
-                    "equality_expression" | "check_expression" | "when_subject"
-                )
-            })
-            .any(|test| named_children(test).any(|operand| path_text(self.text(operand)) == path))
+            .any(|candidate| self.compares(candidate, &path) || self.guards(candidate, &path))
+    }
+
+    /// Whether `node` compares the expression spelled `path` with anything,
+    /// or tests its type.
+    fn compares(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
+        let is_test = matches!(
+            node.kind(),
+            "equality_expression" | "check_expression" | "when_subject"
+        );
+        is_test && named_children(node).any(|operand| StablePath::of(self.text(operand)) == *path)
     }
 
     fn cases_of(&self, subject_type: &Ty) -> Option<Cases> {
@@ -166,21 +164,7 @@ impl Inferrer<'_> {
         let item = tree.item(class.item);
         match item.kind {
             ItemKind::Class(ClassKind::Enum) => {
-                let entries = item
-                    .children
-                    .iter()
-                    .filter(|child| tree.item(**child).kind == ItemKind::EnumEntry)
-                    .map(|child| ItemLocation {
-                        container: class.container,
-                        item: *child,
-                    })
-                    .collect::<Vec<_>>();
-                // A compiled Java enum lists its entries as statics, not as
-                // entries: unknown.
-                if entries.is_empty() {
-                    return None;
-                }
-                Some(Cases::EnumEntries(entries))
+                Some(Cases::EnumEntries(self.entries_of_enum(class)?))
             }
             ItemKind::Class(_) if item.modifiers.contains(Modifiers::SEALED) => {
                 Some(Cases::Inheritors(self.sealed_inheritors(class)?))
@@ -247,6 +231,17 @@ impl Inferrer<'_> {
         }
         let tree = hir_def::item_tree(self.db, inheritor.container);
         let item = tree.item(inheritor.item);
+        if item.kind == ItemKind::Class(ClassKind::Enum) {
+            let Some(entries) = self.entries_of_enum(inheritor) else {
+                return InheritorCoverage::Unknown;
+            };
+            let missing = self.uncovered_entries(inheritor, entries, covered);
+            return if missing.is_empty() {
+                InheritorCoverage::Covered
+            } else {
+                InheritorCoverage::Missing(missing)
+            };
+        }
         if item.modifiers.contains(Modifiers::SEALED) && depth < 8 {
             let Some(own) = self.sealed_inheritors(inheritor) else {
                 return InheritorCoverage::Unknown;
@@ -274,6 +269,38 @@ impl Inferrer<'_> {
         }])
     }
 
+    /// An enum's entries; `None` for a compiled Java enum, which lists them
+    /// as statics, not as entries.
+    fn entries_of_enum(&self, enum_class: ItemLocation) -> Option<Vec<ItemLocation>> {
+        let tree = hir_def::item_tree(self.db, enum_class.container);
+        let entries: Vec<ItemLocation> = tree
+            .item(enum_class.item)
+            .children
+            .iter()
+            .filter(|child| tree.item(**child).kind == ItemKind::EnumEntry)
+            .map(|child| ItemLocation {
+                container: enum_class.container,
+                item: *child,
+            })
+            .collect();
+        (!entries.is_empty()).then_some(entries)
+    }
+
+    /// The entries no branch names, qualified: `Side.SELL`.
+    fn uncovered_entries(
+        &self,
+        enum_class: ItemLocation,
+        entries: Vec<ItemLocation>,
+        covered: &Covered,
+    ) -> Vec<String> {
+        let enum_name = crate::display::class_name(self.db, enum_class);
+        entries
+            .into_iter()
+            .filter(|entry| !covered.declarations.contains(entry))
+            .map(|entry| format!("{enum_name}.{}", self.item_name(entry)))
+            .collect()
+    }
+
     fn item_name(&self, location: ItemLocation) -> String {
         let tree = hir_def::item_tree(self.db, location.container);
         let item = tree.item(location.item);
@@ -299,10 +326,6 @@ fn last_identifier(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
         }),
         _ => None,
     }
-}
-
-fn path_text(text: &str) -> String {
-    text.chars().filter(|char| !char.is_whitespace()).collect()
 }
 
 /// The function (or other member-level declaration) around `node`.

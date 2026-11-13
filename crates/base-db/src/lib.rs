@@ -184,7 +184,10 @@ impl RootDatabase {
             let existing = self.files.get(&change.file).copied();
             match (existing, change.text) {
                 (Some(file), Some(text)) => {
-                    file.set_text(self).to(text);
+                    // The same text again (a reload) invalidates nothing.
+                    if *file.text(self) != text {
+                        file.set_text(self).to(text);
+                    }
                     if *file.directory_package(self) != change.directory_package {
                         file.set_directory_package(self)
                             .to(change.directory_package);

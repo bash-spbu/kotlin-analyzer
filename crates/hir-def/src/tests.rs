@@ -277,6 +277,60 @@ class Screen : Base() {
 }
 
 #[test]
+fn a_supertype_cycle_ends_and_still_finds_what_is_outside_it() {
+    let fixture = r#"
+//- /app/x/Cycle.kt
+package x
+interface Holder { class Found }
+interface A : B, D, Holder
+interface B : A, D, Holder
+interface D : A, B, Holder
+class Use : A {
+    val found: Found? = null
+    val missing: Missing$0? = null
+}
+"#;
+    let started = std::time::Instant::now();
+    check_type(fixture, "Missing", expect!["unresolved"]);
+    check_type(fixture, "Found", expect!["/app/x/Cycle.kt:Found"]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn a_nested_class_reached_through_a_diamond_is_one_class() {
+    check_type(
+        r#"
+//- /app/x/Diamond.kt
+package x
+interface Root { class Key }
+interface Left : Root
+interface Right : Root
+class Leaf : Left, Right {
+    val key: Key$0? = null
+}
+"#,
+        "Key",
+        expect!["/app/x/Diamond.kt:Key"],
+    );
+}
+
+#[test]
+fn a_class_at_the_start_of_its_file_resolves_its_supertypes_outside_itself() {
+    let fixture = r#"
+//- /app/Screen.kt
+class Screen : First, Second, Third {
+    val state: State$0? = null
+}
+interface First
+interface Second
+interface Third { class State }
+"#;
+    let started = std::time::Instant::now();
+    check_type(fixture, "State", expect!["/app/Screen.kt:State"]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
 fn qualified_names_resolve_by_package_or_by_outer_class() {
     let fixture = r#"
 //- /app/a/b/Outer.kt

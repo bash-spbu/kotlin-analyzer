@@ -4,7 +4,7 @@
 use intern::{Name, Path};
 use rustc_hash::FxHashMap;
 
-use crate::{ClassName, LibraryType, TypeArgument, TypeParameter, Variance};
+use crate::{ClassName, LibraryType, Nesting, TypeArgument, TypeParameter, Variance};
 
 /// Binary names of nested classes, `a/Outer$Inner` → (`a/Outer`, `Inner`),
 /// from a class file's `InnerClasses` attribute — the only reliable way to
@@ -74,6 +74,7 @@ pub(crate) struct Parser<'text, 'names> {
     text: &'text [u8],
     position: usize,
     names: &'names NestedNames,
+    nesting: Nesting,
 }
 
 impl<'text, 'names> Parser<'text, 'names> {
@@ -82,6 +83,7 @@ impl<'text, 'names> Parser<'text, 'names> {
             text: text.as_bytes(),
             position: 0,
             names,
+            nesting: Nesting::TOP,
         }
     }
 
@@ -170,6 +172,15 @@ impl<'text, 'names> Parser<'text, 'names> {
         Some(parameters)
     }
 
+    /// Reads a type one level deeper: an array's element, a type argument.
+    fn nested_type(&mut self, read: fn(&mut Self) -> Option<LibraryType>) -> Option<LibraryType> {
+        let outer = self.nesting;
+        self.nesting = outer.deeper()?;
+        let type_ref = read(self);
+        self.nesting = outer;
+        type_ref
+    }
+
     fn type_signature(&mut self) -> Option<LibraryType> {
         let primitive = match self.peek()? {
             b'B' => "byte",
@@ -197,7 +208,9 @@ impl<'text, 'names> Parser<'text, 'names> {
                     nullable: false,
                 })
             }
-            b'[' => Some(LibraryType::Array(Box::new(self.type_signature()?))),
+            b'[' => Some(LibraryType::Array(Box::new(
+                self.nested_type(Self::type_signature)?,
+            ))),
             _ => None,
         }
     }
@@ -237,19 +250,19 @@ impl<'text, 'names> Parser<'text, 'names> {
                     self.position += 1;
                     TypeArgument::Type {
                         variance: Variance::Out,
-                        type_ref: self.field_type()?,
+                        type_ref: self.nested_type(Self::field_type)?,
                     }
                 }
                 b'-' => {
                     self.position += 1;
                     TypeArgument::Type {
                         variance: Variance::In,
-                        type_ref: self.field_type()?,
+                        type_ref: self.nested_type(Self::field_type)?,
                     }
                 }
                 _ => TypeArgument::Type {
                     variance: Variance::Invariant,
-                    type_ref: self.field_type()?,
+                    type_ref: self.nested_type(Self::field_type)?,
                 },
             };
             arguments.push(argument);
@@ -292,6 +305,16 @@ mod tests {
             LibraryType::Array(element) => format!("{}[]", render(element)),
             _ => "?".to_owned(),
         }
+    }
+
+    #[test]
+    fn arrays_and_type_arguments_nested_past_the_limit_do_not_parse() {
+        let names = NestedNames::new(&[]);
+        let arrays = format!("{}I", "[".repeat(100_000));
+        assert!(Parser::new(&arrays, &names).field_signature().is_none());
+        let generics = format!("{}Ljava/lang/String;", "Ljava/util/List<".repeat(50_000));
+        assert!(Parser::new(&generics, &names).field_signature().is_none());
+        assert!(Parser::new("[[[I", &names).field_signature().is_some());
     }
 
     #[test]

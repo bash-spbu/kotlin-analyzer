@@ -11,6 +11,7 @@ use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::lower::{TypeScope, builtin, lower_supertype, lower_type};
+use crate::signature::Callable;
 use crate::ty::{ClassType, Nullability, Substitution, Ty, TypeParameterId};
 
 /// How many supertypes a type's members are looked up in, at most.
@@ -236,49 +237,103 @@ impl<'db> Types<'db> {
     /// `receiver` has, the most derived first; an inherited member a nearer
     /// class overrides (same kind, same number of parameters) is left out.
     pub fn members_named(&self, receiver: &Ty, name: Name) -> Vec<Member> {
-        let mut found: Vec<(Member, MemberShape)> = Vec::new();
+        self.visible_members(receiver, |candidate| candidate == name)
+    }
+
+    /// The non-static members of `receiver`'s hierarchy whose name `wanted`
+    /// takes, the most derived first. Overloads of one class all stay; a
+    /// nearer class's member hides (overrides) a farther one of the same
+    /// name, shape and parameter types — compared in terms of the
+    /// receiver's class's own type parameters, so an argument not inferred
+    /// yet (`buildList { add(…) }`) doesn't hide an override.
+    fn visible_members(&self, receiver: &Ty, wanted: impl Fn(Name) -> bool) -> Vec<Member> {
+        struct Found {
+            member: Member,
+            name: Name,
+            shape: MemberShape,
+            generic: Member,
+        }
+        let mut found: Vec<Found> = Vec::new();
         for holder in self.member_holders(receiver) {
+            let generic_supertypes = self.all_supertypes(&self.self_type(holder.class));
             for class_type in self.all_supertypes(&holder) {
                 let tree = item_tree(self.db, class_type.class.container);
-                let mut substitution = None;
-                // Overloads of one class all stay; only nearer classes'
-                // members hide (override) farther ones.
                 let from_nearer_classes = found.len();
+                let mut substitutions = None;
                 for child in tree.item(class_type.class.item).children.iter() {
                     let item = tree.item(*child);
-                    if item.name != name || item.modifiers.contains(Modifiers::STATIC) {
+                    if !wanted(item.name) || item.modifiers.contains(Modifiers::STATIC) {
                         continue;
                     }
                     let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
                         continue;
                     };
-                    if found[..from_nearer_classes]
-                        .iter()
-                        .any(|(_, known)| *known == shape)
-                    {
-                        continue;
-                    }
-                    let substitution =
-                        substitution.get_or_insert_with(|| class_substitution(&class_type));
-                    found.push((
-                        Member {
-                            location: ItemLocation {
-                                container: class_type.class.container,
-                                item: *child,
+                    let (substitution, generic_substitution) = substitutions
+                        .get_or_insert_with(|| {
+                            let generic = generic_supertypes
+                                .iter()
+                                .find(|generic| generic.class == class_type.class)
+                                .map(class_substitution)
+                                .unwrap_or_default();
+                            (class_substitution(&class_type), generic)
+                        })
+                        .clone();
+                    let location = ItemLocation {
+                        container: class_type.class.container,
+                        item: *child,
+                    };
+                    let generic = Member {
+                        location,
+                        substitution: generic_substitution,
+                    };
+                    let overridden = found[..from_nearer_classes].iter().any(|known| {
+                        known.name == item.name
+                            && known.shape == shape
+                            && self.same_signature(&known.generic, &generic)
+                    });
+                    if !overridden {
+                        found.push(Found {
+                            member: Member {
+                                location,
+                                substitution,
                             },
-                            substitution: substitution.clone(),
-                        },
-                        shape,
-                    ));
+                            name: item.name,
+                            shape,
+                            generic,
+                        });
+                    }
                 }
             }
         }
-        found.into_iter().map(|(member, _)| member).collect()
+        found.into_iter().map(|found| found.member).collect()
+    }
+
+    /// The `inner` classes named `name` of `receiver`'s class and its
+    /// supertypes: what `outer.Inner(…)` constructs.
+    pub fn inner_classes_named(&self, receiver: &Ty, name: Name) -> Vec<ItemLocation> {
+        let mut found = Vec::new();
+        for holder in self.member_holders(receiver) {
+            for class_type in self.all_supertypes(&holder) {
+                let tree = item_tree(self.db, class_type.class.container);
+                for child in tree.item(class_type.class.item).children.iter() {
+                    let item = tree.item(*child);
+                    let is_inner_class =
+                        item.kind.is_classifier() && item.modifiers.contains(Modifiers::INNER);
+                    if item.name == name && is_inner_class {
+                        found.push(ItemLocation {
+                            container: class_type.class.container,
+                            item: *child,
+                        });
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// Which parameters of the member function `member` have a default
-    /// value declared by a function it overrides (same name, same number
-    /// of parameters, in a supertype of `receiver`'s).
+    /// value declared by a function it overrides (same name, same
+    /// parameter types, in a supertype of `receiver`'s).
     pub fn inherited_defaults(&self, receiver: &Ty, member: ItemLocation) -> Vec<bool> {
         let tree = item_tree(self.db, member.container);
         let item = tree.item(member.item);
@@ -289,24 +344,47 @@ impl<'db> Types<'db> {
             .iter()
             .map(|parameter| parameter.has_default)
             .collect();
-        for holder in self.member_holders(receiver) {
-            for class_type in self.all_supertypes(&holder) {
-                let class_tree = item_tree(self.db, class_type.class.container);
-                for child in class_tree.item(class_type.class.item).children.iter() {
-                    let candidate = class_tree.item(*child);
-                    let Signature::Function {
-                        parameters: overridden,
-                        ..
-                    } = &candidate.signature
-                    else {
-                        continue;
-                    };
-                    if candidate.name != item.name || overridden.len() != defaults.len() {
-                        continue;
-                    }
-                    for (has_default, parameter) in defaults.iter_mut().zip(overridden.iter()) {
-                        *has_default |= parameter.has_default;
-                    }
+        // Compared in the receiver's class's own type parameters, as
+        // overriding is (see `visible_members`).
+        let class_types: Vec<ClassType> = self
+            .member_holders(receiver)
+            .iter()
+            .flat_map(|holder| self.all_supertypes(&self.self_type(holder.class)))
+            .collect();
+        let declaring = class_types.iter().find(|class_type| {
+            Some(class_type.class.item) == item.parent
+                && class_type.class.container == member.container
+        });
+        let member = Member {
+            location: member,
+            substitution: declaring.map(class_substitution).unwrap_or_default(),
+        };
+        for class_type in &class_types {
+            let class_tree = item_tree(self.db, class_type.class.container);
+            for child in class_tree.item(class_type.class.item).children.iter() {
+                let candidate = class_tree.item(*child);
+                let Signature::Function {
+                    parameters: overridden,
+                    ..
+                } = &candidate.signature
+                else {
+                    continue;
+                };
+                if candidate.name != item.name || overridden.len() != defaults.len() {
+                    continue;
+                }
+                let candidate = Member {
+                    location: ItemLocation {
+                        container: class_type.class.container,
+                        item: *child,
+                    },
+                    substitution: class_substitution(class_type),
+                };
+                if !self.same_signature(&member, &candidate) {
+                    continue;
+                }
+                for (has_default, parameter) in defaults.iter_mut().zip(overridden.iter()) {
+                    *has_default |= parameter.has_default;
                 }
             }
         }
@@ -316,82 +394,53 @@ impl<'db> Types<'db> {
     /// Every function and property a value of type `receiver` has, the
     /// most derived first; overridden ones left out.
     pub fn all_members(&self, receiver: &Ty) -> Vec<Member> {
-        let mut found: Vec<(Member, Name, MemberShape)> = Vec::new();
-        for holder in self.member_holders(receiver) {
-            for class_type in self.all_supertypes(&holder) {
-                let tree = item_tree(self.db, class_type.class.container);
-                let from_nearer_classes = found.len();
-                let substitution = class_substitution(&class_type);
-                for child in tree.item(class_type.class.item).children.iter() {
-                    let item = tree.item(*child);
-                    if item.modifiers.contains(Modifiers::STATIC) {
-                        continue;
-                    }
-                    let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
-                        continue;
-                    };
-                    let overridden = found[..from_nearer_classes]
-                        .iter()
-                        .any(|(_, name, known)| *name == item.name && *known == shape);
-                    if overridden {
-                        continue;
-                    }
-                    found.push((
-                        Member {
-                            location: ItemLocation {
-                                container: class_type.class.container,
-                                item: *child,
-                            },
-                            substitution: substitution.clone(),
-                        },
-                        item.name,
-                        shape,
-                    ));
-                }
-            }
-        }
-        found.into_iter().map(|(member, _, _)| member).collect()
+        self.visible_members(receiver, |_| true)
     }
 
     /// The property name Kotlin gives a Java getter (`getTitle` → `title`,
-    /// `isOpen` → `open`), when `member` is one.
+    /// `getURL` → `url`, `isOpen` stays), when `member` is one.
     pub fn java_property_name(&self, member: ItemLocation) -> Option<String> {
         if !is_java_getter(self.db, member) {
             return None;
         }
         let tree = item_tree(self.db, member.container);
-        let name = tree.item(member.item).name.as_str();
-        let rest = name
-            .strip_prefix("get")
-            .or_else(|| name.strip_prefix("is"))?;
-        let first = rest.chars().next().filter(|first| first.is_uppercase())?;
-        Some(first.to_lowercase().chain(rest.chars().skip(1)).collect())
+        getter_property_name(tree.item(member.item).name.as_str())
     }
 
-    /// The getter a Java class has for the property `name` Kotlin lets you
-    /// write (`user.name` for `getName()`, `user.active` for `isActive()`).
+    /// The getters a Java class has for the property `name` Kotlin lets you
+    /// write: `user.name` for `getName()`, `page.url` for `getURL()`,
+    /// `user.isActive` for `isActive()`.
     pub fn java_getters(&self, receiver: &Ty, name: Name) -> Vec<Member> {
         let spelled = name.as_str();
+        let names_property = |member: &Member| {
+            is_java_getter(self.db, member.location)
+                && self.java_property_name(member.location).as_deref() == Some(spelled)
+        };
         let Some(first) = spelled.chars().next() else {
             return Vec::new();
         };
-        if !first.is_lowercase() {
-            return Vec::new();
-        }
         let capitalized: String = first
             .to_uppercase()
             .chain(spelled.chars().skip(1))
             .collect();
-        let mut getters = Vec::new();
-        for prefix in ["get", "is"] {
-            let getter = Name::new(&format!("{prefix}{capitalized}"));
-            getters.extend(
-                self.members_named(receiver, getter)
-                    .into_iter()
-                    .filter(|member| is_java_getter(self.db, member.location)),
-            );
+        let likely_getter = if getter_property_name(spelled).as_deref() == Some(spelled) {
+            name
+        } else {
+            Name::new(&format!("get{capitalized}"))
+        };
+        let getters: Vec<Member> = self
+            .members_named(receiver, likely_getter)
+            .into_iter()
+            .filter(names_property)
+            .collect();
+        if !getters.is_empty() {
+            return getters;
         }
-        getters
+        // An acronym's getter: `getURL` for `url`, `getURLName` for `urlName`.
+        self.all_members(receiver)
+            .into_iter()
+            .filter(names_property)
+            .collect()
     }
 
     /// What a class's name means where a value is expected: an object's
@@ -443,26 +492,30 @@ impl<'db> Types<'db> {
                 item: *child,
             })
             .collect();
-        // Java statics are inherited: `ArrayList.copyOf` is not a thing, but
-        // `MyHandler.INSTANCE` of a superclass is.
-        if found.is_empty() && item.modifiers.contains(Modifiers::PLATFORM) {
-            for supertype in self.hierarchy(class).iter() {
-                let tree = item_tree(self.db, supertype.class.container);
-                found.extend(
-                    tree.item(supertype.class.item)
-                        .children
-                        .iter()
-                        .filter(|child| {
-                            let child = tree.item(**child);
-                            child.name == name && child.modifiers.contains(Modifiers::STATIC)
-                        })
-                        .map(|child| ItemLocation {
-                            container: supertype.class.container,
-                            item: *child,
-                        }),
-                );
-                if !found.is_empty() {
-                    break;
+        // Java statics are inherited: `MyHandler.INSTANCE` of a superclass
+        // is reachable through the subclass, and so are a superclass's
+        // overloads of a static method — unless the nearer class hides one
+        // with the same parameter types.
+        if !is_java(self.db, class) {
+            return found;
+        }
+        for supertype in self.hierarchy(class).iter() {
+            let tree = item_tree(self.db, supertype.class.container);
+            let from_nearer_classes = found.len();
+            for child in tree.item(supertype.class.item).children.iter() {
+                let candidate = tree.item(*child);
+                if candidate.name != name || !candidate.modifiers.contains(Modifiers::STATIC) {
+                    continue;
+                }
+                let location = ItemLocation {
+                    container: supertype.class.container,
+                    item: *child,
+                };
+                let hidden = found[..from_nearer_classes]
+                    .iter()
+                    .any(|nearer| self.hides_static(*nearer, location));
+                if !hidden {
+                    found.push(location);
                 }
             }
         }
@@ -495,6 +548,45 @@ fn is_java_getter(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
     is_java(db, location) && takes_nothing
 }
 
+/// The property name Kotlin gives a Java getter named `getter`:
+/// `getTitle` → `title`, `getURL` → `url`, `getURLName` → `urlName`, and a
+/// boolean `isActive` keeps its name. `None` for a name that isn't a
+/// getter's (`getaway`, `island`).
+fn getter_property_name(getter: &str) -> Option<String> {
+    let starts_a_word = |rest: &str| {
+        rest.chars()
+            .next()
+            .is_some_and(|first| !first.is_ascii_lowercase())
+    };
+    if let Some(rest) = getter.strip_prefix("is")
+        && starts_a_word(rest)
+    {
+        return Some(getter.to_owned());
+    }
+    let rest = getter.strip_prefix("get")?;
+    starts_a_word(rest).then(|| decapitalize_acronym(rest))
+}
+
+/// `Title` → `title`; a leading acronym lowered whole, up to the next
+/// word's capital: `URL` → `url`, `URLName` → `urlName`.
+fn decapitalize_acronym(word: &str) -> String {
+    let characters: Vec<char> = word.chars().collect();
+    let lowered = match characters
+        .iter()
+        .position(|char| !char.is_ascii_uppercase())
+    {
+        None => characters.len(),
+        Some(0) => 0,
+        Some(1) => 1,
+        Some(next_word_lowercase) => next_word_lowercase - 1,
+    };
+    characters[..lowered]
+        .iter()
+        .map(char::to_ascii_lowercase)
+        .chain(characters[lowered..].iter().copied())
+        .collect()
+}
+
 /// Whether a declaration is Java's.
 pub fn is_java(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
     match location.container {
@@ -503,6 +595,91 @@ pub fn is_java(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
             .item(location.item)
             .modifiers
             .contains(Modifiers::PLATFORM),
+    }
+}
+
+/// A type as overriding compares parameters: by class, as the JVM erases
+/// it. A function's own type parameter counts by its position (`<T>
+/// f(T)` overrides `<U> f(U)`); a class's, as itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ErasedType {
+    Class(ItemLocation),
+    OwnTypeParameter(u32),
+    TypeParameter(TypeParameterId),
+    Function { parameters: usize },
+}
+
+impl ErasedType {
+    /// `None` for a type not known well enough to compare.
+    fn of(ty: &Ty, function: ItemLocation) -> Option<ErasedType> {
+        match ty {
+            Ty::Class(class) => Some(ErasedType::Class(class.class)),
+            Ty::TypeParameter { parameter, .. } if parameter.owner == function => {
+                Some(ErasedType::OwnTypeParameter(parameter.index))
+            }
+            Ty::TypeParameter { parameter, .. } => Some(ErasedType::TypeParameter(*parameter)),
+            Ty::Function(function_type) => Some(ErasedType::Function {
+                parameters: function_type.parameters.len()
+                    + usize::from(function_type.receiver.is_some()),
+            }),
+            Ty::Nothing { .. } | Ty::Unknown => None,
+        }
+    }
+}
+
+impl Types<'_> {
+    /// Whether `nearer` overrides `farther` (both found on one receiver, of
+    /// one shape): the same erased receiver and parameter types. When a
+    /// type isn't known, they count as different — two candidates leave a
+    /// call ambiguous, where one wrongly hidden would make it a mismatch.
+    fn same_signature(&self, nearer: &Member, farther: &Member) -> bool {
+        match (
+            self.erased_signature(nearer),
+            self.erased_signature(farther),
+        ) {
+            (Some(nearer), Some(farther)) => nearer == farther,
+            _ => false,
+        }
+    }
+
+    /// A member's receiver and parameter types as the receiver's class sees
+    /// them, erased; `None` when one isn't known.
+    fn erased_signature(&self, member: &Member) -> Option<Vec<ErasedType>> {
+        let location = member.location;
+        let erase = |ty: &Ty| ErasedType::of(&ty.substitute(&member.substitution), location);
+        let tree = item_tree(self.db, location.container);
+        if matches!(tree.item(location.item).kind, ItemKind::Property { .. }) {
+            return self.property_receiver(location).iter().map(erase).collect();
+        }
+        let signature = self.signature(Callable::Function(location))?;
+        signature
+            .receiver
+            .iter()
+            .chain(signature.parameters.iter().map(|parameter| &parameter.ty))
+            .map(erase)
+            .collect()
+    }
+
+    /// Whether the nearer class's static `nearer` hides its superclass's
+    /// `farther`: a field hides a field of its name, a method one with the
+    /// same parameter types.
+    fn hides_static(&self, nearer: ItemLocation, farther: ItemLocation) -> bool {
+        let kind_of = |location: ItemLocation| {
+            item_tree(self.db, location.container)
+                .item(location.item)
+                .kind
+        };
+        match (kind_of(nearer), kind_of(farther)) {
+            (ItemKind::Property { .. }, ItemKind::Property { .. }) => true,
+            (ItemKind::Function, ItemKind::Function) => {
+                let unbound = |location| Member {
+                    location,
+                    substitution: Substitution::default(),
+                };
+                self.same_signature(&unbound(nearer), &unbound(farther))
+            }
+            _ => false,
+        }
     }
 }
 

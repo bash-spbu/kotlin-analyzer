@@ -664,6 +664,24 @@ fun use() = a.Clock.no$0w()
         analysis(&java).rename(file, offset, "fun").unwrap(),
         Err(crate::RenameError::ReadOnly)
     ));
+
+    let backing_field = Fixture::with_mini_stdlib(
+        r#"
+//- /app/b/Use.kt
+package b
+class Account {
+    var balance: Long = 0
+        set(value) { fie$0ld = value }
+}
+"#,
+    );
+    let (file, offset) = backing_field.cursor();
+    assert_eq!(
+        analysis(&backing_field)
+            .rename(file, offset, "stored")
+            .unwrap(),
+        Err(crate::RenameError::NothingToRename)
+    );
 }
 
 #[test]
@@ -676,6 +694,8 @@ const val LIMIT = 10
 class Account(val owner: String) {
     companion object { val ZERO = 0 }
     var balance: Long = 0
+        set(value) { field = value }
+    val twice: (Int) -> Int = { it }
     fun describe(prefix: String): String {
         val label = prefix + owner
         return label
@@ -711,6 +731,13 @@ class Account(val owner: String) {
         ZERO Property declaration,readonly,static
         balance Property declaration,mutable
         Long Class 
+        value Parameter declaration,readonly
+        field Variable mutable
+        value Parameter readonly
+        twice Property declaration,readonly
+        Int Class 
+        Int Class 
+        it Parameter readonly
         describe Method declaration
         prefix Parameter declaration,readonly
         String Class 

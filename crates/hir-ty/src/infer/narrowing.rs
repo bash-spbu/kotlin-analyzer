@@ -7,7 +7,7 @@ use hir_def::item_tree::Signature;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
-use super::{LocalId, UnsafeCall};
+use super::{LocalId, Reference, UnsafeCall};
 use crate::ty::{Nullability, Ty};
 
 /// Members every value has, which Kotlin also offers on a nullable
@@ -24,6 +24,33 @@ const ASSERTIONS: &[&str] = &[
     "assertNotNull",
     "assertThat",
 ];
+
+/// Standard-library functions that throw unless their condition holds:
+/// after `require(x != null)` the code sees `x` as not null.
+const CONDITION_CONTRACTS: &[&str] = &["require", "check", "assert"];
+
+/// Standard-library functions that throw when their argument is null.
+const NOT_NULL_CONTRACTS: &[&str] = &["requireNotNull", "checkNotNull"];
+
+/// An expression as data flow compares it: its text without whitespace
+/// and without a leading `this.` — `this.user` and `user` are one path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct StablePath(String);
+
+impl StablePath {
+    pub(super) fn of(text: &str) -> StablePath {
+        let compact: String = text.chars().filter(|char| !char.is_whitespace()).collect();
+        match compact.strip_prefix("this.") {
+            Some(member) => StablePath(member.to_owned()),
+            None => StablePath(compact),
+        }
+    }
+
+    /// Whether `text` mentions the path anywhere (an assertion's argument).
+    fn mentioned_in(&self, text: &str) -> bool {
+        text.replace(char::is_whitespace, "").contains(&self.0)
+    }
+}
 
 /// The locals a condition narrows, and to what.
 #[derive(Default)]
@@ -174,7 +201,7 @@ impl Inferrer<'_> {
         let Some(local) = local else {
             return Narrowing::default();
         };
-        let narrowed = vec![(local, target_type)];
+        let narrowed = vec![(local, self.smart_cast(&self.local_type(local), target_type))];
         if has_token(node, "!is") {
             Narrowing {
                 when_false: narrowed,
@@ -187,6 +214,133 @@ impl Inferrer<'_> {
             }
         }
     }
+}
+
+impl Inferrer<'_> {
+    /// What `x is target` makes a local of type `current`: the more
+    /// specific of the two when one is a subtype of the other. Unrelated
+    /// types would make it both at once, which a `Ty` can't say: unknown.
+    pub(super) fn smart_cast(&self, current: &Ty, target: Ty) -> Ty {
+        let Some(target_class) = target.class().map(|class| class.class) else {
+            return target.non_null();
+        };
+        let holders = self.types.member_holders(current);
+        if holders.is_empty() {
+            return target.non_null();
+        }
+        if self.types.as_supertype(current, target_class).is_some() {
+            return current.clone().non_null();
+        }
+        let target_is_narrower = holders
+            .iter()
+            .all(|holder| self.types.as_supertype(&target, holder.class).is_some());
+        if target_is_narrower {
+            target.non_null()
+        } else {
+            Ty::Unknown
+        }
+    }
+
+    /// After a statement `require(x != null)`, `check(x is T)` or
+    /// `requireNotNull(x)` — a standard-library call that throws otherwise —
+    /// what follows sees its condition hold.
+    pub(super) fn narrow_after_contract(&mut self, statement: SyntaxNode<'_>) {
+        if statement.kind() != "call_expression" {
+            return;
+        }
+        let mut children = named_children(statement);
+        let (Some(callee), Some(suffix)) = (children.next(), children.next()) else {
+            return;
+        };
+        if callee.kind() != "simple_identifier" || !self.resolves_into_kotlin(callee) {
+            return;
+        }
+        let Some(argument) = first_argument(suffix) else {
+            return;
+        };
+        let callee = self.text(callee);
+        let narrowings = if CONDITION_CONTRACTS.contains(&callee) {
+            self.asserted(argument)
+        } else if NOT_NULL_CONTRACTS.contains(&callee) {
+            self.asserted_not_null(argument).into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        self.narrow(&narrowings);
+    }
+
+    /// Whether the name resolved to the `kotlin` package's declaration —
+    /// not a namesake that may not throw.
+    fn resolves_into_kotlin(&self, name: SyntaxNode<'_>) -> bool {
+        let Some(resolved) = self.recorded_at(name) else {
+            return false;
+        };
+        let Reference::Declaration(location) = resolved.reference else {
+            return false;
+        };
+        hir_def::item_tree(self.db, location.container)
+            .package
+            .to_string()
+            == "kotlin"
+    }
+
+    /// What a condition known to hold says, read without inferring it again
+    /// (it already was, as an argument): `x != null`, `x is T`, joined by
+    /// `&&`.
+    fn asserted(&self, condition: SyntaxNode<'_>) -> Vec<(LocalId, Ty)> {
+        match condition.kind() {
+            "parenthesized_expression" => named_children(condition)
+                .next()
+                .map(|inner| self.asserted(inner))
+                .unwrap_or_default(),
+            "conjunction_expression" => named_children(condition)
+                .flat_map(|operand| self.asserted(operand))
+                .collect(),
+            "equality_expression" if has_token(condition, "!=") => {
+                let operands: Vec<SyntaxNode<'_>> = named_children(condition).collect();
+                match operands[..] {
+                    [checked, other] | [other, checked] if other.kind() == "null_literal" => {
+                        self.asserted_not_null(checked).into_iter().collect()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            "check_expression" if has_token(condition, "is") && !has_token(condition, "!is") => {
+                let mut children = named_children(condition);
+                let Some(operand) = children.next() else {
+                    return Vec::new();
+                };
+                let target = children.find(|child| syntax::ast::kotlin::is_type(*child));
+                let local = (operand.kind() == "simple_identifier")
+                    .then(|| self.lookup_local(self.name(operand)))
+                    .flatten();
+                match (local, target) {
+                    (Some(local), Some(target)) => {
+                        let target = self.written_type(target);
+                        vec![(local, self.smart_cast(&self.local_type(local), target))]
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `x` known not to be null.
+    pub(super) fn asserted_not_null(&self, node: SyntaxNode<'_>) -> Option<(LocalId, Ty)> {
+        if node.kind() != "simple_identifier" {
+            return None;
+        }
+        let local = self.lookup_local(self.name(node))?;
+        Some((local, self.local_type(local).non_null()))
+    }
+}
+
+/// A call suffix's first value argument's expression.
+fn first_argument(suffix: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let arguments = named_children(suffix).find(|part| part.kind() == "value_arguments")?;
+    let argument = named_children(arguments).find(|child| child.kind() == "value_argument")?;
+    named_children(argument).last()
 }
 
 impl Inferrer<'_> {
@@ -211,7 +365,7 @@ impl Inferrer<'_> {
         if NULL_SAFE_MEMBERS.contains(&self.text(name)) || !self.is_own_member(member) {
             return;
         }
-        let path = stable_path(self.text(receiver));
+        let path = StablePath::of(self.text(receiver));
         if self.null_guarded(receiver, &path) {
             return;
         }
@@ -241,14 +395,16 @@ impl Inferrer<'_> {
     /// Whether the expression spelled `path` is checked for `null` (or
     /// asserted, assigned, used null-safely) anywhere in the declaration
     /// around `node`.
-    fn null_guarded(&self, node: SyntaxNode<'_>, path: &str) -> bool {
+    fn null_guarded(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
         let scope = enclosing_declaration(node);
         syntax::descendants(scope).any(|candidate| self.guards(candidate, path))
     }
 
-    fn guards(&self, node: SyntaxNode<'_>, path: &str) -> bool {
+    /// Whether `node` compares the expression spelled `path` with `null`,
+    /// type-checks, asserts, assigns or uses it null-safely.
+    pub(super) fn guards(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
         let spelled = |child: Option<SyntaxNode<'_>>| {
-            child.is_some_and(|child| stable_path(self.text(child)) == path)
+            child.is_some_and(|child| StablePath::of(self.text(child)) == *path)
         };
         let mut children = named_children(node);
         match node.kind() {
@@ -261,7 +417,7 @@ impl Inferrer<'_> {
             }
             "check_expression" | "postfix_expression" | "elvis_expression" | "when_subject"
             | "assignment" => spelled(children.next()),
-            "directly_assignable_expression" => stable_path(self.text(node)) == path,
+            "directly_assignable_expression" => StablePath::of(self.text(node)) == *path,
             "navigation_expression" => {
                 let receiver = children.next();
                 let suffix = children.next();
@@ -279,28 +435,18 @@ impl Inferrer<'_> {
                     .map(|callee| self.text(callee))
                     .unwrap_or("");
                 let asserts = ASSERTIONS.contains(&callee) || callee.starts_with("assert");
-                asserts
-                    && self
-                        .text(node)
-                        .replace(char::is_whitespace, "")
-                        .contains(path)
+                asserts && path.mentioned_in(self.text(node))
             }
             "variable_declaration" => {
                 // `var x: T? = value`: what was assigned may have been
                 // non-null.
                 named_children(node)
                     .next()
-                    .is_some_and(|name| self.text(name) == path)
+                    .is_some_and(|name| StablePath::of(self.text(name)) == *path)
             }
             _ => false,
         }
     }
-}
-
-/// An expression's text without whitespace, to compare paths like
-/// `this.user` and `account.owner.name`.
-fn stable_path(text: &str) -> String {
-    text.chars().filter(|char| !char.is_whitespace()).collect()
 }
 
 /// The member-level declaration around `node` (a function, an accessor,

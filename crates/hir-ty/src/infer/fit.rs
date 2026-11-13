@@ -105,6 +105,10 @@ impl Types<'_> {
         {
             return Fit::Yes;
         }
+        // A supertype that didn't resolve may be the expected one.
+        if !self.hierarchy_complete(value.class) {
+            return Fit::Unknown;
+        }
         Fit::No
     }
 
@@ -304,15 +308,31 @@ impl Types<'_> {
             return Ty::Unknown;
         };
         let second_supertypes = self.all_supertypes(second_class);
-        self.all_supertypes(first_class)
+        let shared: Vec<ClassType> = self
+            .all_supertypes(first_class)
             .into_iter()
-            .find(|supertype| {
-                second_supertypes
+            .filter_map(|supertype| {
+                let other = second_supertypes
                     .iter()
-                    .any(|other| other.class == supertype.class)
+                    .find(|other| other.class == supertype.class)?;
+                Some(agreeing_arguments(supertype, other))
             })
-            .map(Ty::Class)
-            .unwrap_or(Ty::Unknown)
+            .collect();
+        let mut least = shared.iter().filter(|candidate| {
+            !shared.iter().any(|other| {
+                other.class != candidate.class
+                    && self
+                        .all_supertypes(other)
+                        .iter()
+                        .any(|above| above.class == candidate.class)
+            })
+        });
+        // Two least common supertypes (`Comparable` and `Serializable`) make
+        // the type both at once, which a `Ty` can't say: unknown.
+        match (least.next(), least.next()) {
+            (Some(only), None) => Ty::Class(only.clone()),
+            _ => Ty::Unknown,
+        }
     }
 
     /// The function a functional interface stands for (`Runnable` → `()
@@ -374,4 +394,22 @@ fn is_object_method(item: &tree::Item) -> bool {
 /// How many values a function takes, its receiver included.
 fn arity(function: &FunctionType) -> usize {
     function.parameters.len() + usize::from(function.receiver.is_some())
+}
+
+/// One class seen as a supertype of two types: its arguments where both
+/// agree, unknown where they don't (`List<Int>` and `List<String>`).
+fn agreeing_arguments(first: ClassType, second: &ClassType) -> ClassType {
+    let arguments = first
+        .arguments
+        .iter()
+        .zip(second.arguments.iter())
+        .map(|(first, second)| {
+            if first == second {
+                first.clone()
+            } else {
+                Ty::Unknown
+            }
+        })
+        .collect();
+    ClassType { arguments, ..first }
 }

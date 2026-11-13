@@ -7,8 +7,8 @@ use hir_def::resolver::{Resolution, resolve_type_path};
 use intern::{Name, Path};
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
-use super::declarations::Inferrer;
-use super::{LocalKind, NameSite, Reference};
+use super::declarations::{Inferrer, SuperOf};
+use super::{LocalId, LocalKind, NameSite, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
 
@@ -96,7 +96,7 @@ impl Inferrer<'_> {
                 self.types.builtin("String")
             }
             "this_expression" => self.this(node),
-            "super_expression" => self.super_type(),
+            "super_expression" => self.super_type(node),
             "prefix_expression" => self.prefix(node, expected),
             "postfix_expression" => self.postfix(node),
             "as_expression" => self.cast(node),
@@ -380,11 +380,11 @@ impl Inferrer<'_> {
         let (Some(receiver_node), Some(suffix)) = (children.next(), children.next()) else {
             return Typed::Value(Ty::Unknown);
         };
-        let receiver = self.typed(receiver_node, None);
+        let name_node = named_children(suffix).find(|child| child.kind() == "simple_identifier");
+        let member = name_node.map(|name| self.name(name));
+        let receiver = self.member_receiver(receiver_node, member);
         let safe = has_token(suffix, "?.");
-        let Some(name_node) =
-            named_children(suffix).find(|child| child.kind() == "simple_identifier")
-        else {
+        let Some(name_node) = name_node else {
             // `Foo::class` and the like.
             return Typed::Value(Ty::Unknown);
         };
@@ -594,22 +594,80 @@ impl Inferrer<'_> {
             .unwrap_or(Ty::Unknown)
     }
 
-    /// `super`: the class's superclass (or first supertype).
-    fn super_type(&mut self) -> Ty {
-        let Some(this) = self
-            .receivers
+    /// `super` on its own: the supertype it names, when only one can be
+    /// meant.
+    fn super_type(&mut self, node: SyntaxNode<'_>) -> Ty {
+        match &self.super_candidates(node)[..] {
+            [only] => only.clone(),
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// `super.member`: of the supertypes `super` may name, the one that has
+    /// `member` (Kotlin looks the member up in all of them).
+    pub(super) fn super_with_member(&mut self, node: SyntaxNode<'_>, member: Name) -> Ty {
+        let candidates = self.super_candidates(node);
+        let mut having = candidates
             .iter()
-            .rev()
-            .find_map(|receiver| receiver.ty.class().cloned())
-        else {
-            return Ty::Unknown;
+            .filter(|candidate| !self.types.members_named(candidate, member).is_empty());
+        match (having.next(), having.next()) {
+            (Some(only), None) => only.clone(),
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// The direct supertypes `super` may mean here: of the innermost class
+    /// body (or the one `super@Label` names), narrowed to `C` by
+    /// `super<C>`.
+    fn super_candidates(&self, node: SyntaxNode<'_>) -> Vec<Ty> {
+        let label = named_children(node)
+            .find(|child| child.kind() == "type_identifier" || child.kind() == "simple_identifier")
+            .map(|label| self.name(label));
+        let Some(body) = self.receivers.iter().rev().find(|receiver| {
+            let has_super = receiver.super_of != SuperOf::Nothing;
+            has_super && (label.is_none() || receiver.label == label)
+        }) else {
+            return Vec::new();
         };
-        self.types
-            .direct_supertypes(&this)
+        let candidates: Vec<Ty> = match body.super_of {
+            SuperOf::Class(class) => self
+                .types
+                .direct_supertypes(&self.types.self_type(class))
+                .into_iter()
+                .map(Ty::Class)
+                .collect(),
+            SuperOf::ObjectLiteral => vec![body.ty.clone()],
+            SuperOf::Nothing => Vec::new(),
+        };
+        let Some(qualifier) = named_children(node).find(|child| child.kind() == "user_type") else {
+            return candidates;
+        };
+        let named = self.written_type(qualifier);
+        let Some(named_class) = named.class().map(|class| class.class) else {
+            return Vec::new();
+        };
+        candidates
             .into_iter()
-            .next()
-            .map(Ty::Class)
-            .unwrap_or(Ty::Unknown)
+            .filter(|candidate| {
+                candidate
+                    .class()
+                    .is_some_and(|class| class.class == named_class)
+            })
+            .collect()
+    }
+
+    /// A member access's receiver: `super` is the supertype with the member.
+    pub(super) fn member_receiver(
+        &mut self,
+        receiver: SyntaxNode<'_>,
+        member: Option<Name>,
+    ) -> Typed {
+        match (receiver.kind(), member) {
+            ("super_expression", Some(member)) => {
+                Typed::Value(self.super_with_member(receiver, member))
+            }
+            _ => self.typed(receiver, None),
+        }
     }
 
     fn prefix(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
@@ -635,6 +693,10 @@ impl Inferrer<'_> {
         };
         let operand_type = self.expression(operand, None);
         if has_token(node, "!!") {
+            // `x!!` throws on null: from here on `x` isn't null.
+            if let Some(narrowing) = self.asserted_not_null(operand) {
+                self.narrow(&[narrowing]);
+            }
             return operand_type.non_null();
         }
         operand_type
@@ -648,10 +710,17 @@ impl Inferrer<'_> {
         self.expression(operand, None);
         let target_type = self.written_type(target);
         if has_token(node, "as?") {
-            target_type.nullable()
-        } else {
-            target_type
+            return target_type.nullable();
         }
+        // `x as T` throws unless `x` is a `T`: from here on it is one.
+        let local = (operand.kind() == "simple_identifier")
+            .then(|| self.lookup_local(self.name(operand)))
+            .flatten();
+        if let Some(local) = local {
+            let narrowed = self.smart_cast(&self.local_type(local), target_type.clone());
+            self.narrow(&[(local, narrowed)]);
+        }
+        target_type
     }
 
     /// `a + b`, `a * b`, `a..b`: the operator function of `a`'s type.
@@ -952,22 +1021,21 @@ impl Inferrer<'_> {
         subject: WhenSubject<'_>,
         expected: Option<&Ty>,
     ) -> (Ty, bool) {
-        let mut narrowings = Vec::new();
+        let mut each_condition = Vec::new();
         let mut receivers = Vec::new();
-        let mut is_else = true;
         let mut body = None;
         for child in named_children(node) {
             match child.kind() {
                 "when_condition" => {
-                    is_else = false;
-                    narrowings.extend(self.when_condition(child, subject, &mut receivers));
+                    each_condition.push(self.when_condition(child, subject, &mut receivers));
                 }
                 "control_structure_body" => body = Some(child),
                 _ => {}
             }
         }
+        let is_else = each_condition.is_empty();
         self.push_scope();
-        self.narrow(&narrowings);
+        self.narrow(&narrowed_by_every(each_condition));
         // A branch with one `is T` of `this` sees `this` as a `T`.
         let narrowed_receiver = match &receivers[..] {
             [only] => Some(only.clone()),
@@ -1007,7 +1075,8 @@ impl Inferrer<'_> {
                         continue;
                     }
                     if let Some(local) = subject.local {
-                        narrowings.push((local, target_type));
+                        let narrowed = self.smart_cast(&self.local_type(local), target_type);
+                        narrowings.push((local, narrowed));
                     } else if subject.is_this {
                         receivers.push(target_type);
                     }
@@ -1313,29 +1382,65 @@ impl Inferrer<'_> {
 
     /// `object : Base() { … }`: its body sees the object as `this`.
     fn object_literal(&mut self, node: SyntaxNode<'_>) -> Ty {
-        let mut supertype = None;
+        let mut supertypes = Vec::new();
         for child in named_children(node) {
             if child.kind() == "delegation_specifier" {
                 self.delegation(child);
-                if supertype.is_none() {
-                    supertype = syntax::descendants(child)
-                        .find(|part| part.kind() == "user_type")
-                        .map(|written| self.written_type(written));
+                if let Some(written) =
+                    syntax::descendants(child).find(|part| part.kind() == "user_type")
+                {
+                    supertypes.push(self.written_type(written));
                 }
             }
         }
-        // Without a supertype the object's own members are its type's, which
-        // aren't modelled: unknown rather than `Any`.
-        let ty = supertype.unwrap_or(Ty::Unknown);
-        for child in named_children(node) {
-            if child.kind() == "class_body" {
-                self.push_receiver(ty.clone(), None);
-                for declaration in named_children(child) {
-                    self.declaration(declaration);
-                }
-                self.pop_receiver();
+        let body = named_children(node).find(|child| child.kind() == "class_body");
+        // The object's type is its supertype's only when it adds nothing to
+        // it; its own members, or two supertypes at once, make a type that
+        // isn't modelled: unknown rather than a type that lacks them.
+        let adds_members = body.is_some_and(|body| self.declares_own_members(body));
+        let ty = match &supertypes[..] {
+            [only] if !adds_members => only.clone(),
+            _ => Ty::Unknown,
+        };
+        if let Some(body) = body {
+            self.push_body_receiver(ty.clone(), None, SuperOf::ObjectLiteral);
+            for declaration in named_children(body) {
+                self.declaration(declaration);
             }
+            self.pop_receiver();
         }
         ty
     }
+
+    /// Whether a class body declares a function or property that doesn't
+    /// override one.
+    fn declares_own_members(&self, body: SyntaxNode<'_>) -> bool {
+        named_children(body)
+            .filter(|member| {
+                matches!(
+                    member.kind(),
+                    "function_declaration" | "property_declaration"
+                )
+            })
+            .any(|member| {
+                let overrides = named_children(member)
+                    .filter(|part| part.kind() == "modifiers")
+                    .any(|modifiers| {
+                        syntax::descendants(modifiers).any(|part| self.text(part) == "override")
+                    });
+                !overrides
+            })
+    }
+}
+
+/// A branch's conditions are alternatives (`is A, is B ->`): a local is
+/// narrowed in the branch only to what every one of them narrows it to.
+fn narrowed_by_every(mut each_condition: Vec<Vec<(LocalId, Ty)>>) -> Vec<(LocalId, Ty)> {
+    let Some(first) = each_condition.pop() else {
+        return Vec::new();
+    };
+    first
+        .into_iter()
+        .filter(|narrowing| each_condition.iter().all(|other| other.contains(narrowing)))
+        .collect()
 }

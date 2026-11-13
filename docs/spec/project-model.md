@@ -61,9 +61,13 @@ are ordinary source directories that happen to be produced by the build.
    model to the cache (`$XDG_CACHE_HOME/kotlin-analyzer/projects/<root>-<hash>/project.json`),
    so nothing lands in the project besides Gradle's own `build/` output.
    The workspace loads by convention meanwhile and reloads when the export
-   finishes. The export is redone when a build file (`build.gradle(.kts)`,
-   `settings.gradle(.kts)`, `gradle.properties`, `libs.versions.toml`) is
-   newer than the cached model. A failed export is reported with
+   finishes. The export is redone when the build files
+   (`build.gradle(.kts)`, `settings.gradle(.kts)`, `gradle.properties`,
+   `libs.versions.toml`) changed since it was made: the newest one's
+   modification time is recorded next to the model (`project.stamp`) and
+   compared — at startup and on reload — off the main thread. (Comparing
+   with the model's own time would export forever after a build file
+   stamped in the future.) A failed export is reported with
    `window/showMessage`. `gradleExport: false` turns this off.
 2. **Fallback by convention** when the file is missing: every directory with a
    `build.gradle(.kts)` is a module; `src/<set>/kotlin` and `src/<set>/java`
@@ -72,7 +76,12 @@ are ordinary source directories that happen to be produced by the build.
    unknown (navigation into libraries is limited, diagnostics that need
    library completeness stay silent).
 
-The server watches `project.json`; when it changes the model is reloaded.
+`workspace/executeCommand` `kotlin-analyzer.reloadWorkspace` re-exports the
+model if the build files changed and reads the workspace again: new files
+appear, files gone from disk or from the model are dropped, and every file
+is placed by the new model (source set, package directory) even where its
+text didn't change. A load started while another runs supersedes it.
+*(Later: watching the files and the model instead of a command.)*
 
 ## Settings
 

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use ide::AnalysisHost;
 use project_model::ProjectModel;
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use syntax::Language;
 use vfs::Vfs;
 
@@ -181,8 +182,10 @@ pub fn source_paths(model: &ProjectModel) -> Vec<PathBuf> {
     paths
 }
 
-/// Records each file's text in `vfs` (unless `keep` says an open editor
-/// buffer owns it) and hands the resulting changes to `host`.
+/// Puts a (re)loaded workspace into `host`: each file's text (unless
+/// `keep` says an open editor buffer owns it), files no longer in the
+/// workspace removed, and every file's source set and package directory
+/// read from `model` again — a reload changes those where no text changed.
 pub fn apply_files(
     host: &mut AnalysisHost,
     vfs: &mut Vfs,
@@ -190,13 +193,32 @@ pub fn apply_files(
     files: Vec<(PathBuf, Arc<str>)>,
     keep: impl Fn(&Path) -> bool,
 ) {
+    let loaded: FxHashSet<PathBuf> = files.iter().map(|(path, _)| path.clone()).collect();
     for (path, text) in files {
         if keep(&path) {
             continue;
         }
         vfs.set_contents(&path, Some(text));
     }
-    let changes = file_changes(vfs, model);
+    let gone: Vec<PathBuf> = vfs
+        .existing_files()
+        .map(|file| vfs.path(file).to_path_buf())
+        .filter(|path| !loaded.contains(path) && !keep(path))
+        .collect();
+    for path in gone {
+        vfs.set_contents(&path, None);
+    }
+    let mut changes = file_changes(vfs, model);
+    let changed: FxHashSet<vfs::FileId> = changes.iter().map(|change| change.file).collect();
+    let unchanged: Vec<vfs::FileId> = vfs
+        .existing_files()
+        .filter(|file| !changed.contains(file))
+        .collect();
+    changes.extend(
+        unchanged
+            .into_iter()
+            .filter_map(|file| file_change(vfs, model, file, vfs.contents(file).cloned())),
+    );
     host.apply_change(changes);
     host.set_project_model(model.clone());
 }
@@ -211,19 +233,28 @@ pub fn file_changes(vfs: &mut Vfs, model: &ProjectModel) -> Vec<hir::FileChange>
     vfs.take_changes()
         .into_iter()
         .filter_map(|changed| {
-            let path = vfs.path(changed.file).to_path_buf();
-            let language = Language::of_path(&path)?;
             let text = match changed.change {
                 vfs::Change::Written(text) => Some(text),
                 vfs::Change::Deleted => None,
             };
-            Some(hir::FileChange {
-                file: changed.file,
-                text,
-                language,
-                source_set: model.source_set_of(&path),
-                directory_package: model.directory_package(&path),
-            })
+            file_change(vfs, model, changed.file, text)
         })
         .collect()
+}
+
+/// `file` with `text` (`None`: deleted), placed by `model`.
+fn file_change(
+    vfs: &Vfs,
+    model: &ProjectModel,
+    file: vfs::FileId,
+    text: Option<Arc<str>>,
+) -> Option<hir::FileChange> {
+    let path = vfs.path(file);
+    Some(hir::FileChange {
+        file,
+        text,
+        language: Language::of_path(path)?,
+        source_set: model.source_set_of(path),
+        directory_package: model.directory_package(path),
+    })
 }

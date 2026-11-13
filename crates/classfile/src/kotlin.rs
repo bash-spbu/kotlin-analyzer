@@ -8,6 +8,7 @@
 use intern::{Name, Path};
 use rustc_hash::FxHashSet;
 
+use crate::Nesting;
 use crate::class_file::{ClassFile, KotlinMetadata, latin1_bytes};
 use crate::protobuf::Reader;
 use crate::{
@@ -155,6 +156,15 @@ pub(crate) fn read_builtins(bytes: &[u8], package: Path) -> Vec<ClassContents> {
     contents
 }
 
+/// `text` without its first and last characters (an internal name's `L`
+/// and `;`), empty when it has fewer than two.
+fn without_first_and_last(text: &str) -> String {
+    let mut characters = text.chars();
+    characters.next();
+    characters.next_back();
+    characters.collect()
+}
+
 /// `d1`'s strings back into bytes: UTF-8 mode (a leading `\0`, one byte per
 /// character) or the older 7-bit packing.
 fn decode_bytes(strings: &[String]) -> Vec<u8> {
@@ -241,9 +251,10 @@ impl NameTable {
             match number {
                 1 => {
                     let record = read_record(value.as_bytes().unwrap_or_default());
-                    for _ in 0..record.range.max(1) {
-                        records.push(record.clone());
-                    }
+                    // A record covers `range` strings; none past the last.
+                    let room = strings.len().saturating_sub(records.len());
+                    let covered = usize::try_from(record.range.max(1)).unwrap_or(1).min(room);
+                    records.extend(std::iter::repeat_n(record, covered));
                 }
                 5 => value.push_integers(&mut local_names),
                 _ => {}
@@ -288,9 +299,7 @@ impl NameTable {
                 match record.operation {
                     1 => text = text.replace('$', "."),
                     2 => {
-                        if text.len() >= 2 {
-                            text = text[1..text.len() - 1].to_owned();
-                        }
+                        text = without_first_and_last(&text);
                         text = text.replace('$', ".");
                     }
                     _ => {}
@@ -870,12 +879,22 @@ struct RawArgument {
 
 impl RawType {
     fn read(bytes: &[u8]) -> RawType {
+        RawType::read_nested(bytes, Nesting::TOP)
+    }
+
+    /// A type too deeply nested reads as no type (unreadable).
+    fn read_nested(bytes: &[u8], nesting: Nesting) -> RawType {
         let mut raw = RawType::default();
+        let Some(nested) = nesting.deeper() else {
+            return raw;
+        };
         let mut reader = Reader::new(bytes);
         while let Some((number, value)) = reader.field() {
             match number {
                 1 => raw.flags = value.as_i32().unwrap_or(0),
-                2 => raw.arguments.extend(value.as_bytes().map(read_argument)),
+                2 => raw
+                    .arguments
+                    .extend(value.as_bytes().map(|bytes| read_argument(bytes, nested))),
                 3 => raw.nullable = value.as_u64() == Some(1),
                 6 => raw.class_name = value.as_i32(),
                 7 => raw.type_parameter = value.as_i32(),
@@ -904,7 +923,7 @@ fn annotation_class_id(bytes: &[u8]) -> Option<i32> {
     None
 }
 
-fn read_argument(bytes: &[u8]) -> RawArgument {
+fn read_argument(bytes: &[u8], nesting: Nesting) -> RawArgument {
     let mut argument = RawArgument {
         projection: 2,
         type_ref: None,
@@ -914,7 +933,11 @@ fn read_argument(bytes: &[u8]) -> RawArgument {
     while let Some((number, value)) = reader.field() {
         match number {
             1 => argument.projection = value.as_i32().unwrap_or(2),
-            2 => argument.type_ref = value.as_bytes().map(RawType::read),
+            2 => {
+                argument.type_ref = value
+                    .as_bytes()
+                    .map(|bytes| RawType::read_nested(bytes, nesting))
+            }
             3 => argument.type_id = value.as_i32(),
             _ => {}
         }
@@ -1027,6 +1050,15 @@ impl<'table> TypeContext<'table> {
     }
 
     fn library_type(&self, raw: &RawType) -> LibraryType {
+        self.library_type_nested(raw, Nesting::TOP)
+    }
+
+    /// Type arguments go one level deeper — a bound on more than the stack:
+    /// a type table entry's argument may name the entry itself.
+    fn library_type_nested(&self, raw: &RawType, nesting: Nesting) -> LibraryType {
+        let Some(nested) = nesting.deeper() else {
+            return LibraryType::Unreadable;
+        };
         if let Some(name_index) = raw.type_parameter_name {
             return match self.names.name(name_index) {
                 Some(name) => LibraryType::TypeParameter {
@@ -1067,7 +1099,7 @@ impl<'table> TypeContext<'table> {
                             1 => Variance::Out,
                             _ => Variance::Invariant,
                         },
-                        type_ref: self.library_type(&type_ref),
+                        type_ref: self.library_type_nested(&type_ref, nested),
                     },
                 }
             })
@@ -1183,5 +1215,103 @@ mod tests {
     #[test]
     fn utf8_mode_drops_the_marker() {
         assert_eq!(decode_bytes(&["\u{0}\u{1}ÿ".to_owned()]), vec![1, 0xff]);
+    }
+
+    fn varint(mut value: u64, into: &mut Vec<u8>) {
+        while value >= 0x80 {
+            into.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        into.push(value as u8);
+    }
+
+    /// A length-delimited protobuf field.
+    fn message_field(number: u64, message: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        varint(number << 3 | 2, &mut bytes);
+        varint(message.len() as u64, &mut bytes);
+        bytes.extend_from_slice(message);
+        bytes
+    }
+
+    fn argument_depth(raw: &RawType) -> usize {
+        raw.arguments
+            .iter()
+            .filter_map(|argument| argument.type_ref.as_ref())
+            .map(|type_ref| 1 + argument_depth(type_ref))
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_type_nested_past_the_limit_stops_reading_instead_of_overflowing() {
+        // `List<List<List<…>>>`, ten thousand deep: field 2 of a Type is an
+        // Argument, field 2 of an Argument a Type.
+        let mut bytes = vec![6 << 3, 0];
+        for _ in 0..10_000 {
+            bytes = message_field(2, &message_field(2, &bytes));
+        }
+        let raw = RawType::read(&bytes);
+        assert!(argument_depth(&raw) <= usize::from(Nesting::LIMIT));
+    }
+
+    #[test]
+    fn a_type_table_entry_naming_itself_as_its_argument_ends() {
+        let names = NameTable::Jvm {
+            strings: vec!["kotlin/collections/List".to_owned()],
+            records: Vec::new(),
+            local_names: Vec::new(),
+        };
+        let looping = RawType {
+            class_name: Some(0),
+            arguments: vec![RawArgument {
+                projection: 2,
+                type_ref: None,
+                type_id: Some(0),
+            }],
+            ..RawType::default()
+        };
+        let table = TypeTable {
+            types: vec![looping],
+            first_nullable: None,
+        };
+        let hidden = FxHashSet::default();
+        let context = TypeContext {
+            names: &names,
+            table: &table,
+            scopes: Vec::new(),
+            hidden: &hidden,
+        };
+        assert!(matches!(context.table_type(0), LibraryType::Class { .. }));
+    }
+
+    #[test]
+    fn a_record_range_never_reaches_past_the_strings() {
+        let mut record = vec![1 << 3];
+        varint(i32::MAX as u64, &mut record);
+        let string_table = message_field(1, &record);
+        let strings = vec!["a".to_owned(), "b".to_owned()];
+        let NameTable::Jvm { records, .. } = NameTable::jvm(&string_table, &strings) else {
+            unreachable!("a JVM table");
+        };
+        assert_eq!(records.len(), strings.len());
+    }
+
+    #[test]
+    fn a_descriptor_operation_on_non_ascii_text_strips_characters_not_bytes() {
+        let names = NameTable::Jvm {
+            strings: vec!["Lпакет/Кот;".to_owned(), "ж".to_owned()],
+            records: vec![
+                Record {
+                    range: 2,
+                    operation: 2,
+                    ..Record::default()
+                };
+                2
+            ],
+            local_names: Vec::new(),
+        };
+        assert_eq!(names.string(0).as_deref(), Some("пакет/Кот"));
+        assert_eq!(names.string(1).as_deref(), Some(""));
     }
 }

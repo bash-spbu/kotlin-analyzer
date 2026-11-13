@@ -56,6 +56,16 @@ pub enum LocalKind {
     /// A lambda's implicit single parameter.
     ImplicitIt,
     Function,
+    /// `field` in a property's accessor: the value it stores.
+    BackingField,
+}
+
+impl LocalKind {
+    /// Whether the source spells the local's declaration (`it` and `field`
+    /// are implicit: their name range is where they come into scope).
+    pub fn is_written(self) -> bool {
+        !matches!(self, LocalKind::ImplicitIt | LocalKind::BackingField)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -14,7 +14,7 @@ use syntax::{SyntaxNode, has_token, named_children};
 use super::declarations::Inferrer;
 use super::expressions::Typed;
 use super::fit::Fit;
-use super::{ArgumentMismatch, Certainty, NameSite, Reference};
+use super::{ArgumentMismatch, Certainty, LocalId, NameSite, Reference};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::{Member, class_substitution};
 use crate::signature::{Callable, CallableSignature, ParameterSignature};
@@ -81,6 +81,9 @@ struct Shaped {
 enum Level {
     /// Member functions of a receiver's type.
     Members(Ty),
+    /// Constructors of the `inner` classes of a receiver's type
+    /// (`outer.Inner()`).
+    InnerConstructors(Ty),
     /// Extension functions on a receiver's type declared as members of an
     /// implicit receiver's class (`private fun Map<…>.toList()` in a
     /// class, used inside it).
@@ -182,11 +185,11 @@ impl<'db> Inferrer<'db> {
             self.type_remaining(arguments);
             return Ty::Unknown;
         };
-        let receiver = self.typed(receiver_node, None);
+        let name_node = named_children(suffix).find(|child| child.kind() == "simple_identifier");
+        let member = name_node.map(|name| self.name(name));
+        let receiver = self.member_receiver(receiver_node, member);
         let safe = has_token(suffix, "?.");
-        let Some(name_node) =
-            named_children(suffix).find(|child| child.kind() == "simple_identifier")
-        else {
+        let Some(name_node) = name_node else {
             self.type_remaining(arguments);
             return Ty::Unknown;
         };
@@ -245,6 +248,11 @@ impl<'db> Inferrer<'db> {
                     Some((location, Ty::Function(function))) => {
                         let result = self.invoke(Some(*function), arguments);
                         self.record(name_node, Reference::Declaration(location), result.clone());
+                        result
+                    }
+                    _ if let Some((local, function)) = self.local_extension(&receiver, name) => {
+                        let result = self.invoke(Some(function), arguments);
+                        self.record(name_node, Reference::Local(local), result.clone());
                         result
                     }
                     _ => {
@@ -385,6 +393,7 @@ impl<'db> Inferrer<'db> {
     fn receiver_levels(&self, receiver: &Ty) -> Vec<Level> {
         let mut levels = vec![
             Level::Members(receiver.clone()),
+            Level::InnerConstructors(receiver.clone()),
             Level::MemberExtensions(receiver.clone()),
         ];
         for level in 0..TOP_LEVEL_LEVELS {
@@ -394,6 +403,21 @@ impl<'db> Inferrer<'db> {
             });
         }
         levels
+    }
+
+    /// A local extension function `fun T.name(…)` declared in the body,
+    /// called on a value: its type, the receiver taken.
+    fn local_extension(&self, receiver: &Typed, name: Name) -> Option<(LocalId, FunctionType)> {
+        let Typed::Value(receiver_type) = receiver else {
+            return None;
+        };
+        let local = self.lookup_local(name)?;
+        let Ty::Function(function) = self.local_type(local) else {
+            return None;
+        };
+        let declared_receiver = function.receiver.as_ref()?;
+        let receiver_fits = self.types.fits(receiver_type, declared_receiver) != Fit::No;
+        receiver_fits.then_some((local, *function))
     }
 
     /// `Class.name(…)`: statics and nested classes, then the companion's
@@ -473,6 +497,12 @@ impl<'db> Inferrer<'db> {
                     .filter_map(|location| self.extension_candidate(*location, receiver))
                     .collect()
             }
+            Level::InnerConstructors(receiver) => self
+                .types
+                .inner_classes_named(receiver, name)
+                .into_iter()
+                .flat_map(|class| self.constructor_candidates(class))
+                .collect(),
             Level::Constructors(class) => {
                 let mut candidates = self.constructor_candidates(*class);
                 candidates.extend(self.invoke_candidates(*class));

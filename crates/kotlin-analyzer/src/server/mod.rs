@@ -12,6 +12,8 @@ mod gradle_export;
 mod handlers;
 mod library_sources;
 mod settings;
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,12 +34,24 @@ use vfs::{FileId, Vfs};
 
 use crate::load::{self, LoadedFiles};
 
-/// The progress token of workspace loading.
+/// The progress token of workspace loading (one per load: a reload may
+/// start while one is running).
 const LOADING_TOKEN: &str = "kotlin-analyzer/loading";
 const EXPORT_TOKEN: &str = "kotlin-analyzer/gradle";
 
+/// `workspace/executeCommand`: reload the project model and re-read the
+/// workspace's files.
+pub const RELOAD_COMMAND: &str = "kotlin-analyzer.reloadWorkspace";
+
 pub fn run() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
+    run_on(&connection)?;
+    drop(connection);
+    io_threads.join().map_err(|error| error.to_string())
+}
+
+/// Serves `connection` until the client says `exit` (or goes away).
+pub(crate) fn run_on(connection: &Connection) -> Result<(), String> {
     let (initialize_id, initialize_params) = connection
         .initialize_start()
         .map_err(|error| error.to_string())?;
@@ -74,10 +88,8 @@ pub fn run() -> Result<(), String> {
     state.diagnostics_config = Arc::new(diagnostics_config);
     state.gradle_export = gradle_export;
     state.start_loading();
-    state.main_loop(&connection.receiver)?;
-    drop(state);
-    drop(connection);
-    io_threads.join().map_err(|error| error.to_string())
+    state.start_export();
+    state.main_loop(&connection.receiver)
 }
 
 fn capabilities() -> ServerCapabilities {
@@ -113,6 +125,10 @@ fn capabilities() -> ServerCapabilities {
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
+            commands: vec![RELOAD_COMMAND.to_owned()],
+            ..lsp_types::ExecuteCommandOptions::default()
+        }),
         ..ServerCapabilities::default()
     }
 }
@@ -136,9 +152,13 @@ fn workspace_root(params: &InitializeParams) -> PathBuf {
 /// Work finished off the main thread.
 enum Task {
     Response(Response),
-    Loaded(Result<LoadedFiles, String>),
-    /// The background Gradle export finished: the model's file, or why not.
-    ModelExported(Result<PathBuf, String>),
+    /// A load finished; `generation` tells it from a later one.
+    Loaded {
+        generation: u64,
+        loaded: Result<LoadedFiles, String>,
+    },
+    /// The background Gradle export finished.
+    ModelExported(gradle_export::Export),
     Diagnostics {
         file: FileId,
         version: i32,
@@ -169,6 +189,8 @@ struct GlobalState {
     /// Whether the server may run Gradle to export the model.
     gradle_export: bool,
     exporting: bool,
+    /// The latest load started: only its result is applied.
+    load_generation: u64,
 }
 
 impl GlobalState {
@@ -199,6 +221,7 @@ impl GlobalState {
             diagnostics_config: Arc::default(),
             gradle_export: true,
             exporting: false,
+            load_generation: 0,
         }
     }
 
@@ -233,16 +256,24 @@ impl GlobalState {
         }
     }
 
+    /// Reads the workspace from disk in the background; a load started
+    /// later supersedes this one.
     fn start_loading(&mut self) {
+        self.load_generation += 1;
+        let generation = self.load_generation;
+        let token = loading_token(generation);
         self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
-            token: lsp_types::NumberOrString::String(LOADING_TOKEN.to_owned()),
+            token: lsp_types::NumberOrString::String(token.clone()),
         });
-        self.progress(WorkDoneProgress::Begin(WorkDoneProgressBegin {
-            title: "Loading workspace".to_owned(),
-            cancellable: Some(false),
-            message: Some(self.root.display().to_string()),
-            percentage: None,
-        }));
+        self.progress_on(
+            &token,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Loading workspace".to_owned(),
+                cancellable: Some(false),
+                message: Some(self.root.display().to_string()),
+                percentage: None,
+            }),
+        );
         let root = self.root.clone();
         let project_json = self.model_file();
         let sender = self.task_sender.clone();
@@ -250,10 +281,9 @@ impl GlobalState {
             .name("kotlin-analyzer-loader".to_owned())
             .spawn(move || {
                 let loaded = load::read_workspace(&root, project_json.as_deref());
-                let _ = sender.send(Task::Loaded(loaded));
+                let _ = sender.send(Task::Loaded { generation, loaded });
             })
             .expect("a thread can be spawned");
-        self.start_export_if_stale();
     }
 
     /// The model file to load: the one given, the workspace's own, or the
@@ -266,9 +296,10 @@ impl GlobalState {
         gradle_export::cached_model(&self.root).filter(|cached| cached.is_file())
     }
 
-    /// Runs the Gradle export in the background when the model would come
-    /// from the cache and that is missing or older than a build file.
-    fn start_export_if_stale(&mut self) {
+    /// Exports the Gradle model in the background when it would come from
+    /// the cache and isn't current there (the build files are walked off
+    /// the main thread); an export that changed it reloads.
+    fn start_export(&mut self) {
         let given = self.project_json.is_some()
             || self.root.join(".kotlin-analyzer/project.json").is_file();
         if given
@@ -281,9 +312,6 @@ impl GlobalState {
         let Some(cached) = gradle_export::cached_model(&self.root) else {
             return;
         };
-        if !gradle_export::is_stale(&self.root, &cached) {
-            return;
-        }
         self.exporting = true;
         self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
             token: lsp_types::NumberOrString::String(EXPORT_TOKEN.to_owned()),
@@ -302,8 +330,8 @@ impl GlobalState {
         std::thread::Builder::new()
             .name("kotlin-analyzer-gradle".to_owned())
             .spawn(move || {
-                let exported = gradle_export::export(&root, &cached).map(|()| cached);
-                let _ = sender.send(Task::ModelExported(exported));
+                let export = gradle_export::export_if_stale(&root, &cached);
+                let _ = sender.send(Task::ModelExported(export));
             })
             .expect("a thread can be spawned");
     }
@@ -311,74 +339,19 @@ impl GlobalState {
     fn on_task(&mut self, task: Task) {
         match task {
             Task::Response(response) => self.respond(response),
-            Task::ModelExported(exported) => {
-                self.exporting = false;
-                let message = match &exported {
-                    Ok(_) => "exported".to_owned(),
-                    Err(_) => "failed".to_owned(),
-                };
-                self.progress_on(
-                    EXPORT_TOKEN,
-                    WorkDoneProgress::End(WorkDoneProgressEnd {
-                        message: Some(message),
-                    }),
-                );
-                match exported {
-                    Ok(_) => self.start_loading(),
-                    Err(error) => self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
-                        typ: lsp_types::MessageType::WARNING,
-                        message: format!(
-                            "kotlin-analyzer couldn't export the Gradle model (libraries stay unknown):\n{error}"
-                        ),
-                    }),
+            Task::ModelExported(export) => self.on_export(export),
+            Task::Loaded { generation, loaded } => {
+                if generation != self.load_generation {
+                    // Superseded by a later load, which reports for both.
+                    self.progress_on(
+                        &loading_token(generation),
+                        WorkDoneProgress::End(WorkDoneProgressEnd {
+                            message: Some("superseded".to_owned()),
+                        }),
+                    );
+                    return;
                 }
-            }
-            Task::Loaded(Ok(loaded)) => {
-                let files = loaded.files.len();
-                self.model = loaded.model.clone();
-                let open: Vec<PathBuf> = self
-                    .open_documents
-                    .keys()
-                    .map(|file| self.vfs.path(*file).to_path_buf())
-                    .collect();
-                load::apply_files(
-                    &mut self.host,
-                    &mut self.vfs,
-                    &loaded.model,
-                    loaded.files,
-                    |path| open.iter().any(|open_path| open_path == path),
-                );
-                load::apply_libraries(&mut self.host, loaded.libraries);
-                // Open documents get their source sets now that the model exists.
-                for file in self.open_documents.keys().copied().collect::<Vec<_>>() {
-                    let path = self.vfs.path(file).to_path_buf();
-                    let text = self.vfs.contents(file).cloned();
-                    if let (Some(text), Some(language)) = (text, syntax::Language::of_path(&path)) {
-                        self.host.apply_change(vec![hir::FileChange {
-                            file,
-                            text: Some(text),
-                            language,
-                            source_set: self.model.source_set_of(&path),
-                            directory_package: self.model.directory_package(&path),
-                        }]);
-                    }
-                }
-                self.loaded = true;
-                self.refresh_paths();
-                self.progress(WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(format!("{files} files")),
-                }));
-                self.update_diagnostics(self.open_documents.keys().copied().collect());
-            }
-            Task::Loaded(Err(error)) => {
-                self.loaded = true;
-                self.progress(WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(format!("loading failed: {error}")),
-                }));
-                self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
-                    typ: lsp_types::MessageType::ERROR,
-                    message: format!("kotlin-analyzer: {error}"),
-                });
+                self.on_loaded(loaded);
             }
             Task::Diagnostics {
                 file,
@@ -403,6 +376,78 @@ impl GlobalState {
         }
     }
 
+    fn on_export(&mut self, export: gradle_export::Export) {
+        self.exporting = false;
+        let message = match &export {
+            gradle_export::Export::UpToDate => "up to date",
+            gradle_export::Export::Exported => "exported",
+            gradle_export::Export::Failed(_) => "failed",
+        };
+        self.progress_on(
+            EXPORT_TOKEN,
+            WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: Some(message.to_owned()),
+            }),
+        );
+        match export {
+            gradle_export::Export::UpToDate => {}
+            gradle_export::Export::Exported => self.start_loading(),
+            gradle_export::Export::Failed(error) => {
+                self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
+                    typ: lsp_types::MessageType::WARNING,
+                    message: format!(
+                        "kotlin-analyzer couldn't export the Gradle model (libraries stay unknown):\n{error}"
+                    ),
+                })
+            }
+        }
+    }
+
+    fn on_loaded(&mut self, loaded: Result<LoadedFiles, String>) {
+        let token = loading_token(self.load_generation);
+        let loaded = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.loaded = true;
+                self.progress_on(
+                    &token,
+                    WorkDoneProgress::End(WorkDoneProgressEnd {
+                        message: Some(format!("loading failed: {error}")),
+                    }),
+                );
+                self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
+                    typ: lsp_types::MessageType::ERROR,
+                    message: format!("kotlin-analyzer: {error}"),
+                });
+                return;
+            }
+        };
+        let files = loaded.files.len();
+        self.model = loaded.model.clone();
+        let open: Vec<PathBuf> = self
+            .open_documents
+            .keys()
+            .map(|file| self.vfs.path(*file).to_path_buf())
+            .collect();
+        load::apply_files(
+            &mut self.host,
+            &mut self.vfs,
+            &loaded.model,
+            loaded.files,
+            |path| open.iter().any(|open_path| open_path == path),
+        );
+        load::apply_libraries(&mut self.host, loaded.libraries);
+        self.loaded = true;
+        self.refresh_paths();
+        self.progress_on(
+            &token,
+            WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: Some(format!("{files} files")),
+            }),
+        );
+        self.update_diagnostics(self.open_documents.keys().copied().collect());
+    }
+
     fn on_request(&mut self, request: Request) {
         if self.shutdown_requested {
             self.respond(Response::new_err(
@@ -410,6 +455,10 @@ impl GlobalState {
                 lsp_server::ErrorCode::InvalidRequest as i32,
                 "shutdown was requested".to_owned(),
             ));
+            return;
+        }
+        if request.method == request::ExecuteCommand::METHOD {
+            self.execute_command(request);
             return;
         }
         let snapshot = handlers::Snapshot {
@@ -424,6 +473,25 @@ impl GlobalState {
             let response = handlers::handle(snapshot, request);
             let _ = sender.send(Task::Response(response));
         });
+    }
+
+    /// `workspace/executeCommand`, on the main thread: the commands change
+    /// the server's state.
+    fn execute_command(&mut self, request: Request) {
+        let params: Result<lsp_types::ExecuteCommandParams, _> =
+            serde_json::from_value(request.params.clone());
+        match params {
+            Ok(params) if params.command == RELOAD_COMMAND => {
+                self.respond(Response::new_ok(request.id, serde_json::Value::Null));
+                self.start_loading();
+                self.start_export();
+            }
+            _ => self.respond(Response::new_err(
+                request.id,
+                lsp_server::ErrorCode::InvalidParams as i32,
+                format!("commands: {RELOAD_COMMAND}"),
+            )),
+        }
     }
 
     /// The file a request is about, resolved on the main thread where the
@@ -567,16 +635,16 @@ impl GlobalState {
         let _ = self.sender.send(Message::Request(request));
     }
 
-    fn progress(&self, progress: WorkDoneProgress) {
-        self.progress_on(LOADING_TOKEN, progress);
-    }
-
     fn progress_on(&self, token: &str, progress: WorkDoneProgress) {
         self.notify::<notification::Progress>(lsp_types::ProgressParams {
             token: lsp_types::NumberOrString::String(token.to_owned()),
             value: lsp_types::ProgressParamsValue::WorkDone(progress),
         });
     }
+}
+
+fn loading_token(generation: u64) -> String {
+    format!("{LOADING_TOKEN}/{generation}")
 }
 
 fn cast_notification<N>(notification: Notification) -> Result<N::Params, Notification>

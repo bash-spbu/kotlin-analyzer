@@ -3,6 +3,8 @@
 //! the attributes that carry generic signatures, source file names, nested
 //! classes, parameter names and the Kotlin metadata annotation.
 
+use crate::Nesting;
+
 /// Access flags, as the JVM specification numbers them.
 pub(crate) mod access {
     pub(crate) const PUBLIC: u16 = 0x0001;
@@ -378,7 +380,7 @@ fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotati
             "Lkotlin/Metadata;" => found.kotlin_metadata = Some(read_metadata(bytes, pool)?),
             "Ljava/lang/Deprecated;" => {
                 found.deprecated = true;
-                skip_element_pairs(bytes)?;
+                skip_element_pairs(bytes, Nesting::TOP)?;
             }
             "Lkotlin/Deprecated;" => {
                 found.deprecated = true;
@@ -389,7 +391,7 @@ fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotati
                 // the code this reads for is past.
                 found.hidden |= has_element(bytes, pool, "hiddenSince")?;
             }
-            _ => skip_element_pairs(bytes)?,
+            _ => skip_element_pairs(bytes, Nesting::TOP)?,
         }
     }
     Some(found)
@@ -425,7 +427,7 @@ fn read_metadata(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<KotlinMetad
                     metadata.data2 = strings;
                 }
             }
-            _ => skip_element_value(bytes)?,
+            _ => skip_element_value(bytes, Nesting::TOP)?,
         }
     }
     Some(metadata)
@@ -459,7 +461,7 @@ fn deprecation_is_hidden(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<boo
             bytes.u16()?;
             hidden = utf8(pool, bytes.u16()?)? == "HIDDEN";
         } else {
-            skip_element_value(bytes)?;
+            skip_element_value(bytes, Nesting::TOP)?;
         }
     }
     Some(hidden)
@@ -471,21 +473,23 @@ fn has_element(bytes: &mut Bytes<'_>, pool: &[Constant], name: &str) -> Option<b
     let pairs = bytes.u16()?;
     for _ in 0..pairs {
         found |= utf8(pool, bytes.u16()?)? == name;
-        skip_element_value(bytes)?;
+        skip_element_value(bytes, Nesting::TOP)?;
     }
     Some(found)
 }
 
-fn skip_element_pairs(bytes: &mut Bytes<'_>) -> Option<()> {
+fn skip_element_pairs(bytes: &mut Bytes<'_>, nesting: Nesting) -> Option<()> {
     let pairs = bytes.u16()?;
     for _ in 0..pairs {
         bytes.u16()?;
-        skip_element_value(bytes)?;
+        skip_element_value(bytes, nesting)?;
     }
     Some(())
 }
 
-fn skip_element_value(bytes: &mut Bytes<'_>) -> Option<()> {
+/// Skips one annotation element value; a nested annotation or array goes
+/// one level deeper.
+fn skip_element_value(bytes: &mut Bytes<'_>, nesting: Nesting) -> Option<()> {
     match bytes.u8()? {
         b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' | b'c' => {
             bytes.u16()?;
@@ -496,12 +500,13 @@ fn skip_element_value(bytes: &mut Bytes<'_>) -> Option<()> {
         }
         b'@' => {
             bytes.u16()?;
-            skip_element_pairs(bytes)?;
+            skip_element_pairs(bytes, nesting.deeper()?)?;
         }
         b'[' => {
             let count = bytes.u16()?;
+            let nested = nesting.deeper()?;
             for _ in 0..count {
-                skip_element_value(bytes)?;
+                skip_element_value(bytes, nested)?;
             }
         }
         _ => return None,
@@ -512,6 +517,27 @@ fn skip_element_value(bytes: &mut Bytes<'_>) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_values_nested_past_the_limit_are_refused() {
+        // `[` with one element, a hundred thousand times over.
+        let mut data = Vec::new();
+        for _ in 0..100_000 {
+            data.extend_from_slice(&[b'[', 0, 1]);
+        }
+        data.extend_from_slice(&[b'I', 0, 1]);
+        let mut bytes = Bytes {
+            data: &data,
+            position: 0,
+        };
+        assert!(skip_element_value(&mut bytes, Nesting::TOP).is_none());
+        let shallow = [b'[', 0, 1, b'[', 0, 1, b'I', 0, 1];
+        let mut shallow = Bytes {
+            data: &shallow,
+            position: 0,
+        };
+        assert!(skip_element_value(&mut shallow, Nesting::TOP).is_some());
+    }
 
     #[test]
     fn modified_utf8_decodes_zero_and_two_byte_characters() {

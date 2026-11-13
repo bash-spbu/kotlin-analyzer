@@ -68,7 +68,9 @@ fn describe_members(fixture: &Fixture, property: &str, name: &str) -> Vec<String
     let receiver = declared_type(fixture, property);
     let types = Types::new(db, file);
     let mut members = types.members_named(&receiver, Name::new(name));
-    members.extend(types.java_getters(&receiver, Name::new(name)));
+    if members.is_empty() {
+        members = types.java_getters(&receiver, Name::new(name));
+    }
     members
         .iter()
         .map(|member| {
@@ -144,6 +146,8 @@ public class Store {
     public int[] counts() { return null; }
     public String getTitle() { return null; }
     public boolean isOpen() { return false; }
+    public String getURL() { return null; }
+    public String getaway() { return null; }
 }
 //- /app/Use.kt
 package app
@@ -166,10 +170,17 @@ val store: Store = TODO()
         describe_members(&fixture, "store", "title"),
         vec!["fun Store.getTitle: String!"]
     );
+    // A boolean `is` getter keeps its name; an acronym is lowered whole.
     assert_eq!(
-        describe_members(&fixture, "store", "open"),
+        describe_members(&fixture, "store", "isOpen"),
         vec!["fun Store.isOpen: Boolean"]
     );
+    assert!(describe_members(&fixture, "store", "open").is_empty());
+    assert_eq!(
+        describe_members(&fixture, "store", "url"),
+        vec!["fun Store.getURL: String!"]
+    );
+    assert!(describe_members(&fixture, "store", "away").is_empty());
 }
 
 #[test]
@@ -511,6 +522,120 @@ val repo: Repo = TODO()
     assert_eq!(
         describe_members(&fixture, "repo", "find"),
         vec!["fun Repo.find: String", "fun Repo.find: Int"]
+    );
+}
+
+#[test]
+fn only_a_member_with_the_same_parameter_types_overrides() {
+    let fixture = with_stdlib(
+        r#"
+//- /app/Use.kt
+package app
+open class Base {
+    open fun find(id: Int): String = TODO()
+    open fun <T> wrap(value: T): String = TODO()
+}
+class Repo : Base() {
+    fun find(name: String): Int = TODO()
+    override fun <U> wrap(value: U): String = TODO()
+}
+interface Store<T> { fun save(item: T): Unit }
+class Users : Store<String> { override fun save(item: String) {} }
+interface Bag<E> { fun put(element: E): Boolean }
+interface ListBag<E> : Bag<E> { override fun put(element: E): Boolean }
+val repo: Repo = TODO()
+val users: Users = TODO()
+val unknownElements: ListBag<Missing> = TODO()
+"#,
+    );
+    // An argument that isn't known doesn't make an override an overload.
+    assert_eq!(
+        describe_members(&fixture, "unknownElements", "put"),
+        vec!["fun ListBag.put: Boolean"]
+    );
+    // Same arity, other parameter type: an overload, not an override.
+    assert_eq!(
+        describe_members(&fixture, "repo", "find"),
+        vec!["fun Repo.find: Int", "fun Base.find: String"]
+    );
+    assert_eq!(
+        describe_members(&fixture, "repo", "wrap"),
+        vec!["fun Repo.wrap: String"]
+    );
+    assert_eq!(
+        describe_members(&fixture, "users", "save"),
+        vec!["fun Users.save: -"]
+    );
+}
+
+#[test]
+fn inherited_overloads_and_defaults_follow_the_parameter_types() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+open class Finder {
+    fun find(id: Int): String = TODO()
+}
+class Named : Finder() {
+    fun find(name: String): Int = TODO()
+}
+interface Api {
+    fun get(id: Int, verbose: Boolean = false): Int
+    fun get(name: String, verbose: Int): String
+}
+class Impl : Api {
+    override fun get(id: Int, verbose: Boolean): Int = TODO()
+    override fun get(name: String, verbose: Int): String = TODO()
+}
+fun use(named: Named, impl: Impl) {
+    named.find(1)
+    impl.get(1)
+    impl.get("x")
+}
+"#,
+        expect![[r#"
+            TODO@3 -> kotlin.TODO: Nothing
+            TODO@6 -> kotlin.TODO: Nothing
+            TODO@13 -> kotlin.TODO: Nothing
+            TODO@14 -> kotlin.TODO: Nothing
+            named@17 -> local named@16: Named
+            find@17 -> app.Finder.find: String
+            impl@18 -> local impl@16: Impl
+            get@18 -> app.Impl.get: Int
+            impl@19 -> local impl@16: Impl
+            get@19 -> one of [app.Impl.get, app.Impl.get]: {unknown}"#]],
+    );
+}
+
+#[test]
+fn a_java_subclass_inherits_its_superclass_static_overloads() {
+    check_facts(
+        r#"
+//- /app/Base.java
+package app;
+public class Base {
+    public static Base of(int first, int second) { return null; }
+    public static Base copy(Base base) { return null; }
+}
+//- /app/Child.java
+package app;
+public class Child extends Base {
+    public static Child of(String name) { return null; }
+    public static Child copy(Base base) { return null; }
+}
+//- /app/Use.kt
+package app
+fun use() {
+    Child.of(1, 2)
+    Child.of("x")
+    Child.of()
+    Child.copy(Child.of("x"), 1)
+}
+"#,
+        expect![[r#"
+            arguments@5 2 candidates
+            arguments@6 1 candidates"#]],
     );
 }
 
@@ -956,5 +1081,200 @@ class Consumer {
             deposit@8 -> local deposit@7: Deposit
             copy@8 -> app.Deposit: Deposit
             amount@8 -> app.Deposit.amount: Long"#]],
+    );
+}
+
+#[test]
+fn smart_casts_keep_the_more_specific_type_and_follow_casts_and_contracts() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+interface Named { val name: String }
+interface Aged { val age: Int }
+class Cat(override val name: String, override val age: Int) : Named, Aged
+fun use(any: Any, named: Named, list: List<String>, maybe: String?, other: String?, last: Any) {
+    if (any is String) any.length
+    if (named is Aged) named.age
+    if (list is Collection<*>) list.first()
+    when (named) { is Cat, is Aged -> named.name }
+    any as Cat
+    any.age
+    requireNotNull(maybe)
+    maybe.length
+    require(other != null && last is Cat)
+    other
+    last.name
+}
+"#,
+        expect![[r#"
+            any@6 -> local any@5: Any
+            any@6 -> local any@5: String
+            length@6 -> kotlin.String.length: Int
+            named@7 -> local named@5: Named
+            named@7 -> local named@5: {unknown}
+            list@8 -> local list@5: List<String>
+            list@8 -> local list@5: List<String>
+            first@8 -> kotlin.collections.List.first: String
+            named@9 -> local named@5: Named
+            named@9 -> local named@5: Named
+            name@9 -> app.Named.name: String
+            any@10 -> local any@5: Any
+            any@11 -> local any@5: Cat
+            age@11 -> app.Cat.age: Int
+            requireNotNull@12 -> kotlin.requireNotNull: String
+            maybe@12 -> local maybe@5: String?
+            maybe@13 -> local maybe@5: String
+            length@13 -> kotlin.String.length: Int
+            require@14 -> kotlin.require: Unit
+            other@14 -> local other@5: String?
+            last@14 -> local last@5: Any
+            other@15 -> local other@5: String
+            last@16 -> local last@5: Cat
+            name@16 -> app.Cat.name: String"#]],
+    );
+}
+
+#[test]
+fn facts_follow_this_paths_and_contracts_before_a_when() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+enum class Side { BUY, SELL }
+class Order(var note: String?, var side: Side?) {
+    fun noteLength(): Int {
+        if (this.note == null) return 0
+        return note.length
+    }
+    fun label(): Int {
+        requireNotNull(side)
+        return when (side) { Side.BUY -> 1; Side.SELL -> 2 }
+    }
+}
+fun asserted(side: Side?): Int {
+    side!!
+    return when (side) { Side.BUY -> 1; Side.SELL -> 2 }
+}
+fun unchecked(side: Side?): Int = when (side) { Side.BUY -> 1; Side.SELL -> 2 }
+"#,
+        expect!["when@17 missing null"],
+    );
+}
+
+#[test]
+fn common_types_super_inner_classes_local_extensions_and_object_literals() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+interface Named { val name: String }
+open class Pet { fun feed() {} }
+class Cat : Pet(), Named { override val name = "cat" }
+class Dog : Pet(), Named { override val name = "dog" }
+class Fish : Pet()
+interface Walker { fun walk(): Int = 1 }
+open class Base { open fun walk(): String = "" ; open fun rest(): Long = 0 }
+class Outer { inner class Inner(val depth: Int) }
+class Robot : Base(), Walker {
+    override fun walk(): String {
+        val step = super<Walker>.walk()
+        val rest = super.rest()
+        with(Outer()) { super.rest() }
+        return super<Base>.walk()
+    }
+}
+fun use(flag: Boolean, outer: Outer) {
+    val both = if (flag) Cat() else Dog()
+    val pet = if (flag) Cat() else Fish()
+    val inner = outer.Inner(1)
+    fun String.shout(): String = this
+    val loud = "x".shout()
+    val counter = object : Pet() { fun count(): Int = 1 }
+    counter.count()
+    val plain = object : Pet() {}
+    plain.feed()
+    pet.feed()
+    both.name
+}
+"#,
+        expect![[r#"
+            walk@12 -> app.Walker.walk: Int
+            rest@13 -> app.Base.rest: Long
+            with@14 -> kotlin.with: Long
+            Outer@14 -> app.Outer: Outer
+            rest@14 -> app.Base.rest: Long
+            walk@15 -> app.Base.walk: String
+            flag@19 -> local flag@18: Boolean
+            Cat@19 -> app.Cat: Cat
+            Dog@19 -> app.Dog: Dog
+            flag@20 -> local flag@18: Boolean
+            Cat@20 -> app.Cat: Cat
+            Fish@20 -> app.Fish: Fish
+            outer@21 -> local outer@18: Outer
+            Inner@21 -> app.Outer.Inner: Outer.Inner
+            shout@23 -> local shout@22: String
+            counter@25 -> local counter@24: {unknown}
+            plain@27 -> local plain@26: Pet
+            feed@27 -> app.Pet.feed: Unit
+            pet@28 -> local pet@20: Pet
+            feed@28 -> app.Pet.feed: Unit
+            both@29 -> local both@19: {unknown}"#]],
+    );
+}
+
+#[test]
+fn facts_for_enums_in_sealed_hierarchies_and_unresolved_bounds() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+sealed interface Event
+enum class Simple : Event { START, STOP }
+data class Custom(val name: String) : Event
+fun all(event: Event): Int = when (event) {
+    Simple.START -> 1
+    Simple.STOP -> 2
+    is Custom -> 3
+}
+fun some(event: Event): Int = when (event) {
+    Simple.START -> 1
+    is Custom -> 3
+}
+fun <T : Missing> bounded(value: T) {
+    value.anything()
+}
+"#,
+        expect![[r#"
+            when@10 missing Simple.STOP
+            unresolved@15 anything Uncertain"#]],
+    );
+}
+
+#[test]
+fn accessor_bodies_on_their_own_lines_see_field_and_the_value() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Account(private val prefix: String) {
+    var balance: Long = 0
+        get() = field + 1
+        set(value) {
+            field = value
+        }
+    val label
+        get() = prefix.length
+}
+val total: Int = 0
+    get() = field
+"#,
+        expect![[r#"
+            field@4 -> local field@4: Long
+            field@6 -> local field@5: Long
+            value@6 -> local value@5: Long
+            prefix@9 -> app.Account.prefix: String
+            length@9 -> kotlin.String.length: Int
+            field@12 -> local field@12: Int"#]],
     );
 }

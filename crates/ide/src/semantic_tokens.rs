@@ -95,7 +95,10 @@ pub(crate) fn semantic_tokens(db: &RootDatabase, file: FileId) -> Vec<SemanticTo
         }
     }
     let inference = hir::infer_file(db, source);
-    for (_, local) in inference.locals() {
+    for (_, local) in inference
+        .locals()
+        .filter(|(_, local)| local.kind.is_written())
+    {
         tokens.push(SemanticToken {
             range: local.name_range,
             kind: local_kind(local.kind),
@@ -223,13 +226,13 @@ fn local_kind(kind: LocalKind) -> TokenKind {
             TokenKind::Parameter
         }
         LocalKind::Function => TokenKind::Function,
-        LocalKind::Value | LocalKind::Variable => TokenKind::Variable,
+        LocalKind::Value | LocalKind::Variable | LocalKind::BackingField => TokenKind::Variable,
     }
 }
 
 fn local_modifiers(kind: LocalKind) -> TokenModifiers {
     match kind {
-        LocalKind::Variable => TokenModifiers::MUTABLE,
+        LocalKind::Variable | LocalKind::BackingField => TokenModifiers::MUTABLE,
         _ => TokenModifiers::READONLY,
     }
 }

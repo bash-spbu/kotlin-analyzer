@@ -25,6 +25,27 @@ use std::path::Path;
 
 use intern::{Name, Path as QualifiedPath};
 
+/// How deep a reader has descended into nested structures: types inside
+/// type arguments, annotation values inside arrays. Compiled code nests a
+/// few levels; a file nesting deeper than [`Nesting::LIMIT`] is malformed or
+/// hostile, and reading stops there instead of exhausting the stack.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Nesting(u8);
+
+impl Nesting {
+    pub(crate) const TOP: Nesting = Nesting(0);
+    const LIMIT: u8 = 64;
+
+    /// One level further in, if that is still within the limit.
+    pub(crate) fn deeper(self) -> Option<Nesting> {
+        (self.0 < Self::LIMIT).then_some(Nesting(self.0 + 1))
+    }
+}
+
+/// The largest archive entry read. Class files are kilobytes; an entry that
+/// claims or inflates to more is not one this reader needs.
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
 /// A class by package and nesting: `kotlin.collections` + `Map`, `Entry`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ClassName {
@@ -342,16 +363,27 @@ impl Archive {
     }
 
     pub fn read(&mut self, index: usize) -> Option<Vec<u8>> {
-        let mut entry = self.zip.by_index(index).ok()?;
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut bytes).ok()?;
-        Some(bytes)
+        let entry = self.zip.by_index(index).ok()?;
+        let claimed = entry.size();
+        read_at_most(entry, claimed, MAX_ENTRY_BYTES)
     }
 
     /// The index of the entry at `name`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.zip.index_for_name(name)
     }
+}
+
+/// All of `reader` if it holds at most `limit` bytes. `claimed` is the size
+/// its header states, which only sizes the buffer: a header can lie, and
+/// what inflates past the limit is refused.
+fn read_at_most(reader: impl Read, claimed: u64, limit: u64) -> Option<Vec<u8>> {
+    if claimed > limit {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(claimed as usize);
+    reader.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
 /// What one archive entry declares: a class file (`.class`, or the JDK's

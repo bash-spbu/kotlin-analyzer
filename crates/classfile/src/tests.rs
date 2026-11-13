@@ -330,3 +330,14 @@ public class Store<K extends Comparable<K>, V> implements Iterable<V> {
     );
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn an_entry_larger_than_the_limit_is_refused_whatever_its_header_claims() {
+    let data = [7u8; 100];
+    assert_eq!(
+        crate::read_at_most(&data[..], 100, 100).map(|bytes| bytes.len()),
+        Some(100)
+    );
+    assert!(crate::read_at_most(&data[..], 10, 50).is_none());
+    assert!(crate::read_at_most(&data[..], 1 << 40, 1000).is_none());
+}
