@@ -77,18 +77,17 @@ Status (2026-11-13), stable checks:
 (The last six weren't built: their generated sources aren't on disk, so
 names from them stay unresolved — and the checks silent there.)
 
-Mobile corpora (2026-11-14), open source, with the model guessed from the
-directory layout — no Android SDK here, so no Gradle export and no
-libraries:
+Mobile corpora (2026-11-14), open source, with the model the Gradle export
+gives (Android SDK installed):
 
-| corpus | files seen | errors and warnings | which |
-|---|---|---|---|
-| android/nowinandroid (Android, Compose, Hilt) | 309 of 310 | 0 | |
-| JetBrains/kotlinconf-app (Kotlin Multiplatform, Compose Multiplatform) | 260 of 260 | 0 | (28 `unused-import` hints, all true) |
-| ktorio/ktor (Kotlin Multiplatform library) | 93 of 2457 | 1 | `missing-package` on a build-logic file that really has none |
+| corpus | files | types resolved | errors and warnings | which |
+|---|---|---|---|---|
+| android/nowinandroid (Android, Compose, Hilt) | 281 | 97.3% | 0 | |
+| JetBrains/kotlinconf-app (Kotlin Multiplatform, Compose Multiplatform) | 260 | 92.9% | 0 | (28 `unused-import` hints, all true) |
+| ktorio/ktor (Kotlin Multiplatform library) | 2344 | 90.6% | 5 | in tests: `filterIsInstance` on `KClass.annotations`, `receive` on a routing call, `called` assigned in a plugin's hook, a `Sink.write()` test helper, `maxAge?.toLong()` — not yet understood (15 `unused-import` hints, all true) |
 
-ktor keeps its sources in `<target>/src` (`common/src`, `jvm/src`), which
-only its Gradle build knows — the layout guess sees its build logic alone.
+Without the Gradle model (the directory layout guessed), ktor's sources in
+`<target>/src` (`common/src`, `jvm/src`) aren't seen: 93 of 2457 files.
 
 The pass checks files in batches of 128 and evicts cached results between
 them: peak RSS ≈ 290 MB (finops-mono, billing-mono), ≈ 440 MB

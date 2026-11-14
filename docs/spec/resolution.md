@@ -114,7 +114,21 @@ SavedStateHandle.Companion.invoke(route)`) — and `Name { … }` the SAM
 constructor of a `fun interface` or of a Java interface with one abstract
 method (it takes that method as a function). An import of a Java class's
 static member reaches the ones its superclasses declare (`import
-ActivityCompat.checkSelfPermission` is `ContextCompat`'s). An override takes
+ActivityCompat.checkSelfPermission` is `ContextCompat`'s). A member
+property of function type is called before an extension function of its
+name (`builder.test(scope, client)`, the receiver its first argument), and
+an implicit receiver's property of extension function type can be called
+on an explicit receiver (`origin.content()`). Member extensions apply
+where both receivers are implicit (`with(template) { apply() }`). A
+lambda's receiver hides the locals of the scopes around the lambda
+(`channel` in `produce { channel.send(x) }` is the `ProducerScope`'s), not
+the lambda's own parameters. A type parameter's bounds include its
+`where` clause's. `x is Value` for a generic `Value` infers its type
+arguments from `x`'s type (`ReferenceOr<Schema>` gives `Value<Schema>`).
+
+In Kotlin Multiplatform code, where an `expect` and its `actual` are both
+visible (platform code sees its common code) a name means the `actual`,
+which takes its parameters' default values from the `expect`. An override takes
 its parameters' default values from what it overrides. Member extensions of
 the implicit receivers' classes are candidates for `receiver.f()`.
 

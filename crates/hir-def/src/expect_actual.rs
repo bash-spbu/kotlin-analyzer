@@ -143,6 +143,26 @@ pub fn hide_expects_with_actuals(db: &dyn SourceDatabase, candidates: &mut Vec<I
     });
 }
 
+/// The `actual` of an `expect` declaration that `from` sees — what the
+/// `expect` means in platform code (a type written in common code, used
+/// from the JVM) — else the declaration itself.
+pub fn actual_seen_from(
+    db: &dyn SourceDatabase,
+    from: SourceFile,
+    declaration: ItemLocation,
+) -> ItemLocation {
+    if side_of(db, declaration) != Side::Expect {
+        return declaration;
+    }
+    expect_actual_family(db, declaration)
+        .into_iter()
+        .find(|counterpart| {
+            side_of(db, *counterpart) == Side::Actual
+                && crate::def_map::sees(db, from, *counterpart)
+        })
+        .unwrap_or(declaration)
+}
+
 fn shape_of(tree: &ItemTree, item: ItemId) -> Shape {
     let mut names: Vec<Name> = tree
         .ancestors(item)

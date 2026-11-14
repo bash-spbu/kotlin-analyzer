@@ -77,6 +77,17 @@ are ordinary source directories that happen to be produced by the build.
      test, device test) with Android archives read as their classes JARs, and
      the SDK's `android.jar`.
 
+   Each source set also says its `platform` — `jvm`, or `other` for code
+   built only for JS, Wasm or Native: only JVM code (Android's, and common
+   code built for the JVM too) sees the JDK. Without it the name decides
+   (`jsMain`, `iosArm64Test`, `nativeMain`, `webMain` are `other`). A
+   `classpath` the build only partly resolved (a library that couldn't be
+   fetched, a toolchain that isn't installed) is `partial`: names that
+   would come from it are never called missing. The JDK is read from
+   `ct.sym` for the release asked for, or the newest one before it that
+   `ct.sym` describes in full (JDK 21's own release is in its runtime image,
+   not its `ct.sym`).
+
    A source set with an explicit `kind` and dependencies (all of these) sees
    only what it lists; the implicit "a test sees its module's `main` and
    test fixtures" applies to source sets named `main` and `testFixtures`.

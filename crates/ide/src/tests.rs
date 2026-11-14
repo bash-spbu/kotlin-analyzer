@@ -572,6 +572,8 @@ expect class Clock(zone: String = "UTC")
 expect class Server {
     fun stop(grace: Long, timeout: Long)
 }
+// Declared in common code: its type is the `expect`, the JVM sees the `actual`.
+fun startServer(): Server = TODO()
 typealias Cancelled = Inner
 typealias Inner = Failure
 open class Failure(message: String?)
@@ -620,6 +622,7 @@ suspend fun use(server: Server, builder: Builder, scope: Scope) {
     builder.test(scope, 1)
     val token = nonce()
     val clock = Clock()
+    a.startServer().stop(1, 5, "seconds")
 }
 "#;
     let fixture = Fixture::with_mini_stdlib(fixture);
@@ -678,7 +681,7 @@ fun withRequired(schema: ReferenceOr<Schema>): ReferenceOr<Schema> {
 }
 
 #[test]
-fn a_lambda_receivers_member_hides_an_outer_local_but_not_the_lambdas_own_parameter() {
+fn a_lambda_receivers_member_hides_a_constructor_parameter_not_the_functions_locals() {
     check_diagnostics(
         r#"
 //- /app/b/Use.kt
@@ -702,8 +705,96 @@ class Socket(private val channel: Pipe) {
     // The lambda's own parameter is as near as its receiver: it wins.
     val sender = consume { channel -> channel.send(1, 2) }
 }
+
+// A local of the function itself comes before any implicit receiver.
+fun send(channel: Pipe) = produce { channel.send(1, 2) }
 "#,
         crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+}
+
+#[test]
+fn context_parameters_are_named_in_the_body() {
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+
+class State(val ready: Boolean)
+class Logger
+// A namesake the body must not mean: nullable, so `state.ready` would be unsafe.
+val state: State? = null
+
+context(state: State, _: Logger)
+fun supports(): Boolean = state.ready
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+}
+
+#[test]
+fn a_star_import_of_a_class_and_a_local_class_are_in_scope() {
+    check_diagnostics(
+        r#"
+//- /app/a/BaseAssertions.java
+package a;
+public class BaseAssertions {
+    public static void assertFalse(boolean condition) {}
+}
+//- /app/a/Assertions.java
+package a;
+public class Assertions extends BaseAssertions {
+    public static void assertTrue(boolean condition) {}
+}
+//- /app/c/Case.kt
+package c
+// A namesake outside whose constructor takes nothing.
+class Case
+class Config
+//- /app/b/Use.kt
+package b
+
+import a.Assertions.*
+
+fun check() {
+    assertTrue(true)
+    assertFalse(false)
+}
+
+fun cases(): Int {
+    data class Case(val input: String, val expected: Int)
+    data class Config(var enabled: Boolean = false)
+    val make = ::Config
+    return listOf(Case("a", 1), Case("b", 2)).size
+}
+"#,
+        crate::DiagnosticsConfig {
+            experimental: true,
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[""]],
+    );
+}
+
+#[test]
+fn an_extension_on_a_star_projected_receiver_takes_any_arguments() {
+    check_diagnostics(
+        r#"
+//- /app/kotlin/collections/Filters.kt
+package kotlin.collections
+fun <R> Iterable<*>.filterIsInstance(): List<R> = TODO()
+//- /app/b/Use.kt
+package b
+
+class Note
+fun notes(annotations: List<Any>): Int = annotations.filterIsInstance<Note>().size
+"#,
+        crate::DiagnosticsConfig {
+            experimental: true,
+            ..crate::DiagnosticsConfig::default()
+        },
         expect![[""]],
     );
 }

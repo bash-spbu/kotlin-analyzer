@@ -211,7 +211,7 @@ impl<'db> Types<'db> {
     /// or a type parameter's bounds (`Any` when it declares none).
     pub fn member_holders(&self, ty: &Ty) -> Vec<ClassType> {
         match ty {
-            Ty::Class(class) => vec![class.clone()],
+            Ty::Class(class) => vec![self.seen_as_actual(class)],
             Ty::TypeParameter { parameter, .. } => {
                 let bounds: Vec<ClassType> = self
                     .type_parameter_bounds(*parameter)
@@ -458,6 +458,31 @@ impl<'db> Types<'db> {
             .into_iter()
             .filter(names_property)
             .collect()
+    }
+
+    /// An `expect` class as the asking file sees it: its `actual` when that
+    /// is visible (a type a common declaration gives, used from the JVM),
+    /// through a type alias to what the alias names.
+    fn seen_as_actual(&self, class: &ClassType) -> ClassType {
+        let actual = hir_def::expect_actual::actual_seen_from(self.db, self.from, class.class);
+        if actual == class.class {
+            return class.clone();
+        }
+        let tree = item_tree(self.db, actual.container);
+        let Signature::TypeAlias { target } = &tree.item(actual.item).signature else {
+            return ClassType {
+                class: actual,
+                ..class.clone()
+            };
+        };
+        let scope = crate::lower::TypeScope::of_declaration(self.db, self.from, actual);
+        match crate::lower::lower_type(self.db, scope, target) {
+            Ty::Class(expanded) => ClassType {
+                nullability: class.nullability,
+                ..expanded
+            },
+            _ => class.clone(),
+        }
     }
 
     /// What a class's name means where a value is expected: an object's

@@ -227,6 +227,7 @@ fn local_kind(kind: LocalKind) -> TokenKind {
             TokenKind::Parameter
         }
         LocalKind::Function => TokenKind::Function,
+        LocalKind::Class => TokenKind::Class,
         LocalKind::Value | LocalKind::Variable | LocalKind::BackingField => TokenKind::Variable,
     }
 }

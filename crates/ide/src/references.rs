@@ -2,7 +2,7 @@
 //! means the same declaration (or local) — found by searching the files
 //! that spell the name and asking, at each occurrence, what it means.
 
-use hir::{FileId, ItemContainer, ItemLocation, Language, RootDatabase, SourceDatabase};
+use hir::{FileId, ItemContainer, ItemLocation, Language, LocalKind, RootDatabase, SourceDatabase};
 use rayon::prelude::*;
 use syntax::TextRange;
 
@@ -52,8 +52,9 @@ enum Target {
         file: FileId,
         declared: TextRange,
         /// `it` and `field` aren't declared in the source: no declaration
-        /// to list, nothing to rename.
-        implicit: bool,
+        /// to list, nothing to rename; a local class's uses as a type
+        /// aren't recorded: nothing to rename either.
+        kind: LocalKind,
     },
     Declarations(Vec<ItemLocation>),
 }
@@ -65,7 +66,7 @@ impl Target {
             NameTarget::Local { local, .. } => Target::Local {
                 file,
                 declared: local.name_range,
-                implicit: !local.kind.is_written(),
+                kind: local.kind,
             },
             NameTarget::Declarations(declarations) if declarations.is_empty() => return None,
             NameTarget::Declarations(declarations) => Target::Declarations(declarations),
@@ -207,7 +208,9 @@ pub(crate) fn rename(
 
 fn check_renameable(db: &RootDatabase, target: &Target) -> Result<(), RenameError> {
     match target {
-        Target::Local { implicit: true, .. } => Err(RenameError::NothingToRename),
+        Target::Local { kind, .. } if !kind.is_written() || !kind.uses_are_all_recorded() => {
+            Err(RenameError::NothingToRename)
+        }
         Target::Local { .. } => Ok(()),
         Target::Declarations(declarations) => {
             let all_kotlin_sources =
@@ -234,7 +237,7 @@ fn is_valid_name(name: &str) -> bool {
 /// Where the target is declared.
 fn declaration_ranges(db: &RootDatabase, target: &Target) -> Vec<FileRange> {
     match target {
-        Target::Local { implicit: true, .. } => Vec::new(),
+        Target::Local { kind, .. } if !kind.is_written() => Vec::new(),
         Target::Local { file, declared, .. } => vec![FileRange {
             file: *file,
             range: *declared,

@@ -91,6 +91,7 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
         | LocalKind::ImplicitIt
         | LocalKind::BackingField => format!("{}: {ty}", local.name),
         LocalKind::Function => format!("fun {}: {ty}", local.name),
+        LocalKind::Class => format!("class {}", local.name),
     }
 }
 

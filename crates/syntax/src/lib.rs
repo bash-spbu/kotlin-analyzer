@@ -149,7 +149,7 @@ impl Parse {
                     range: TextRange::of(node),
                     message: format!("missing `{}`", node.kind()),
                 });
-            } else if node.is_error() && !is_grammar_gap(node) {
+            } else if node.is_error() && GrammarGap::of(node, &self.text).is_none() {
                 errors.push(SyntaxError {
                     range: TextRange::of(node),
                     message: "syntax error".to_owned(),
@@ -202,18 +202,56 @@ pub struct SyntaxError {
     pub message: String,
 }
 
-/// Whether an error node is the grammar's, not the code's: Kotlin the
-/// grammar doesn't know. So far, an anonymous function's parameters
-/// without types (`fun(_, value) = …`, which Kotlin allows where the
-/// function's type is known).
-fn is_grammar_gap(error: SyntaxNode<'_>) -> bool {
-    let in_anonymous_function_parameters = error
-        .parent()
-        .filter(|parameters| parameters.kind() == "function_value_parameters")
-        .and_then(|parameters| parameters.parent())
-        .is_some_and(|function| function.kind() == "anonymous_function");
-    in_anonymous_function_parameters
-        && named_children(error).all(|child| child.kind() == "simple_identifier")
+/// Kotlin the grammar doesn't know, where it leaves an error node though
+/// the code is valid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GrammarGap {
+    /// An anonymous function's parameters without types (`fun(_, value) =
+    /// …`, which Kotlin allows where the function's type is known).
+    UntypedAnonymousFunctionParameters,
+    /// A guard on a `when`'s `else` branch (`else if ready -> …`, Kotlin
+    /// 2.2); the grammar knows guards after other conditions only.
+    GuardedElse,
+    /// A lambda whose first statement starts with a parenthesized
+    /// expression (`{ (handler)(call, it) }`), which the grammar takes for
+    /// destructured parameters though no `->` follows.
+    LambdaStartingWithParentheses,
+}
+
+impl GrammarGap {
+    /// The gap `error` is, if it is one.
+    pub fn of(error: SyntaxNode<'_>, text: &str) -> Option<GrammarGap> {
+        let parent = error.parent()?;
+        let in_anonymous_function_parameters = parent.kind() == "function_value_parameters"
+            && parent
+                .parent()
+                .is_some_and(|function| function.kind() == "anonymous_function");
+        if in_anonymous_function_parameters
+            && named_children(error).all(|child| child.kind() == "simple_identifier")
+        {
+            return Some(GrammarGap::UntypedAnonymousFunctionParameters);
+        }
+        let written: String = text[error.byte_range()]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if parent.kind() == "when_expression" && written == "else if" {
+            return Some(GrammarGap::GuardedElse);
+        }
+        // `(handler)(call, it)` read as destructuring: one name in the first
+        // parentheses — the callee — then the call's arguments. Two names
+        // first (`{ (a, b) }`) is a real error.
+        let mut groups = named_children(error);
+        let callee_alone = groups.next().is_some_and(|first| {
+            first.kind() == "multi_variable_declaration" && named_children(first).count() == 1
+        });
+        let destructures_only =
+            callee_alone && groups.all(|child| child.kind() == "multi_variable_declaration");
+        if parent.kind() == "lambda_literal" && destructures_only && !has_token(parent, "->") {
+            return Some(GrammarGap::LambdaStartingWithParentheses);
+        }
+        None
+    }
 }
 
 /// Every node under `root` (itself included), in document order, walked
@@ -336,6 +374,21 @@ mod tests {
             Language::Kotlin,
         );
         assert!(!broken.errors().is_empty());
+    }
+
+    #[test]
+    fn a_guarded_else_and_a_lambda_starting_with_parentheses_are_valid_kotlin() {
+        let errors = |text: &str| parse(Arc::from(text), Language::Kotlin).errors();
+        let valid = "fun f(x: Any, y: Int?) = when (x) {\n    is String if x.isEmpty() -> 1\n    else if y != null -> 2\n    else -> 3\n}\n\
+                     fun g(c: String?, h: (String) -> Int) = c?.let { (h)(it) }\n\
+                     fun k(c: String?, h: (String, String) -> Int) = c?.let { (h)(c, it) }\n";
+        assert!(errors(valid).is_empty(), "{:?}", errors(valid));
+        // An `if`-`else` chain is still parsed as one.
+        let chain = "fun h(a: Boolean) = if (a) 1\nelse if (!a) 2\nelse 3\n";
+        assert!(errors(chain).is_empty(), "{:?}", errors(chain));
+        // Two names in parentheses with no `->` are no expression.
+        assert!(!errors("fun g() = run { (a, b) }\n").is_empty());
+        assert!(!errors("fun f(x: Any) = when (x) { else if -> 1 }\n").is_empty());
     }
 
     #[test]

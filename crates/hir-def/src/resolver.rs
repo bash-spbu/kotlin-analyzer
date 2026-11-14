@@ -191,6 +191,7 @@ pub fn top_level_levels(
     for import in tree.imports.iter() {
         if import.target == ImportTarget::Everything {
             from_star_imports.extend(visible_top_level(db, file, &import.path, name));
+            from_star_imports.extend(class_star_import(db, file, &import.path, name));
         }
     }
     levels.push(from_star_imports);
@@ -223,6 +224,40 @@ pub fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
         .item(location.item)
         .kind
         .is_classifier()
+}
+
+/// What `import a.Assertions.*` brings in named `name`, when the path is a
+/// class: its static members (those its superclasses declare too) and its
+/// nested classes.
+fn class_star_import(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    path: &Path,
+    name: Name,
+) -> Vec<ItemLocation> {
+    let Resolution::Declaration(class) = resolve_import_path(db, file, path) else {
+        return Vec::new();
+    };
+    if !is_classifier(db, class) {
+        return Vec::new();
+    }
+    let tree = item_tree(db, class.container);
+    let own: Vec<ItemLocation> = tree
+        .named(Some(class.item), name)
+        .iter()
+        .filter(|child| {
+            let item = tree.item(**child);
+            item.modifiers.contains(Modifiers::STATIC) || item.kind.is_classifier()
+        })
+        .map(|child| ItemLocation {
+            container: class.container,
+            item: *child,
+        })
+        .collect();
+    if !own.is_empty() {
+        return own;
+    }
+    HierarchyWalk::new(db).inherited_statics(file, class, name)
 }
 
 /// Follows `rest` from `class` through members of any kind (for imports:

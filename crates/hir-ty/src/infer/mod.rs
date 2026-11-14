@@ -59,6 +59,10 @@ pub enum LocalKind {
     Function,
     /// `field` in a property's accessor: the value it stores.
     BackingField,
+    /// A class declared in a body (`data class Case(…)` in a test): its
+    /// name as a value (`Case(…)`, `::Case`) means it, not a namesake
+    /// outside. Its members aren't modelled.
+    Class,
 }
 
 impl LocalKind {
@@ -66,6 +70,12 @@ impl LocalKind {
     /// are implicit: their name range is where they come into scope).
     pub fn is_written(self) -> bool {
         !matches!(self, LocalKind::ImplicitIt | LocalKind::BackingField)
+    }
+
+    /// Whether every use of the local is recorded: a local class's uses as
+    /// a type aren't, so renaming it would miss them.
+    pub fn uses_are_all_recorded(self) -> bool {
+        self != LocalKind::Class
     }
 }
 

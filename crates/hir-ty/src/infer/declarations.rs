@@ -338,30 +338,31 @@ impl<'db> Inferrer<'db> {
         self.declare(spelled, TextRange::of(name), ty, kind)
     }
 
-    /// The local `name` means here — unless an implicit receiver that came
-    /// into scope inside the local's scope has a member of the name, which
-    /// Kotlin looks at first (`channel` in `produce { channel.send(x) }` is
-    /// the `ProducerScope`'s, not a constructor parameter's).
+    /// The local `name` means here. Kotlin looks at the locals of the
+    /// declaration it's in before any implicit receiver; a primary
+    /// constructor's parameters, seen by an initializer, are outside that
+    /// declaration, so a receiver that came into scope inside it hides them
+    /// (`channel` in `val receiver = produce { channel.send(x) }` is the
+    /// `ProducerScope`'s, not the constructor parameter's).
     pub(super) fn lookup_local(&self, name: Name) -> Option<LocalId> {
-        let (local, depth) = self.innermost_local(name)?;
-        let inner_receivers: Vec<Ty> = self
+        let (local, depth, kind) = self.innermost_local(name)?;
+        if kind != ScopeKind::ConstructorParameters {
+            return Some(local);
+        }
+        let hidden = self
             .receivers
             .iter()
-            // A lambda's receiver comes right after the lambda's scope (its
-            // parameters are as near as it is), a class's or an extension's
-            // right before theirs: only a receiver of a scope nested in the
-            // local's hides it.
+            // A lambda's receiver comes right after the lambda's scope, a
+            // class's right before its constructor parameters': only a
+            // receiver of a scope nested in theirs hides them.
             .filter(|receiver| receiver.scope_depth > depth + 1)
-            .map(|receiver| receiver.ty.clone())
-            .collect();
-        let hidden = inner_receivers
-            .iter()
-            .any(|receiver| !self.types.members_named(receiver, name).is_empty());
+            .any(|receiver| !self.types.members_named(&receiver.ty, name).is_empty());
         if hidden { None } else { Some(local) }
     }
 
-    /// The innermost local named `name`, and the depth of its scope.
-    fn innermost_local(&self, name: Name) -> Option<(LocalId, usize)> {
+    /// The innermost local named `name`, the depth of its scope and the
+    /// scope's kind.
+    fn innermost_local(&self, name: Name) -> Option<(LocalId, usize, ScopeKind)> {
         let mut inside_function = false;
         for (depth, scope) in self.scopes.iter().enumerate().rev() {
             let hidden = inside_function && scope.kind == ScopeKind::ConstructorParameters;
@@ -372,7 +373,7 @@ impl<'db> Inferrer<'db> {
                     .rev()
                     .find(|(declared, _)| *declared == name)
             {
-                return Some((*id, depth));
+                return Some((*id, depth, scope.kind));
             }
             inside_function |= scope.kind == ScopeKind::Function;
         }
@@ -778,6 +779,37 @@ impl<'db> Inferrer<'db> {
         }
     }
 
+    /// A declaration's context parameters (`context(state: Provider.State)`,
+    /// Kotlin 2.2), declared as locals of its body. `_` ones are only
+    /// passed on, never named.
+    fn context_parameters(&mut self, declaration: SyntaxNode<'_>) {
+        let Some(modifiers) = named_children(declaration).find(|child| child.kind() == "modifiers")
+        else {
+            return;
+        };
+        let parameters = named_children(modifiers)
+            .filter(|child| child.kind() == "context_parameters")
+            .flat_map(named_children)
+            .filter(|child| child.kind() == "context_parameter")
+            .flat_map(named_children)
+            .filter(|child| child.kind() == "parameter");
+        for parameter in parameters {
+            let Some(name) =
+                named_children(parameter).find(|part| part.kind() == "simple_identifier")
+            else {
+                continue;
+            };
+            if self.parse.text_of(name) == "_" {
+                continue;
+            }
+            let ty = self
+                .type_child(parameter)
+                .map(|written| self.written_type(written))
+                .unwrap_or(Ty::Unknown);
+            self.declare_node(name, ty, LocalKind::Parameter);
+        }
+    }
+
     /// A function, local or not; returns its result type (written, or its
     /// expression body's).
     pub(super) fn function(&mut self, node: SyntaxNode<'_>) -> Ty {
@@ -795,6 +827,7 @@ impl<'db> Inferrer<'db> {
             self.push_receiver(receiver, label);
         }
         self.push_scope_of(ScopeKind::Function);
+        self.context_parameters(node);
         for child in named_children(node) {
             if child.kind() == "function_value_parameters" {
                 self.parameters(child);
@@ -977,6 +1010,11 @@ impl<'db> Inferrer<'db> {
             }
             "class_declaration" | "object_declaration" => {
                 self.class(node);
+                if let Some(name) =
+                    named_children(node).find(|child| child.kind() == "type_identifier")
+                {
+                    self.declare_node(name, Ty::Unknown, LocalKind::Class);
+                }
                 self.types.builtin("Unit")
             }
             "label" | "line_comment" | "multiline_comment" => self.types.builtin("Unit"),
