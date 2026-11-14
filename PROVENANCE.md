@@ -33,7 +33,7 @@ Rules:
 |---|---|---|
 | tree-sitter, tree-sitter-java, brokk-tree-sitter-kotlin | MIT | crates.io dependencies |
 | fwcd/tree-sitter-kotlin | MIT | the Zed extension's grammar, fetched and built by Zed at a pinned revision (not vendored); the extension's queries (`editors/zed/languages/kotlin/*.scm`) are written for this project |
-| zed_extension_api | Apache-2.0 | the Zed extension's dependency |
+| zed_extension_api, sha2, flate2 | Apache-2.0 / MIT | the Zed extension's dependencies (the API; checking and unpacking the downloaded release) |
 | vscode-languageclient | MIT | the VS Code extension's dependency, bundled into `dist/extension.js` by esbuild; the extension's own code, TextMate grammar (`editors/vscode/syntaxes/kotlin.tmLanguage.json`) and language configuration are written for this project |
 | esbuild, TypeScript, @vscode/vsce, @vscode/test-electron, vscode-tmgrammar-test | MIT | the VS Code extension's build and test tools (`devDependencies`), not shipped |
 | salsa, lsp-server, lsp-types, zip, rayon, serde, … | MIT / Apache-2.0 | crates.io dependencies (see `Cargo.lock`) |

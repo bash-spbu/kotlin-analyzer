@@ -159,6 +159,7 @@ fn check_layers(root: &Path) -> Vec<String> {
 const EDITOR_VERSIONS: &[(&str, &str)] = &[
     ("editors/vscode/package.json", "\"version\":"),
     ("editors/neovim/lua/kotlin_analyzer/version.lua", "return"),
+    ("editors/zed/src/release.rs", "SERVER_VERSION: &str ="),
 ];
 
 /// Every editor integration whose version isn't the server's: each

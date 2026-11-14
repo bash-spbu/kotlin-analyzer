@@ -18,11 +18,9 @@ language too, or Zed will pick one of the two.
 
 ## Setup
 
-1. Install the server: `cargo install --path crates/kotlin-analyzer` (from
-   the repository root), so `kotlin-analyzer` is on the PATH.
-2. In Zed: *zed: install dev extension* → this directory (after changes:
+1. In Zed: *zed: install dev extension* → this directory (after changes:
    *Rebuild* on the extension's card).
-3. In `settings.json`, put the server first:
+2. In `settings.json`, put the server first:
 
    ```json
    "languages": {
@@ -31,12 +29,23 @@ language too, or Zed will pick one of the two.
    }
    ```
 
+The server binary is the first of:
+
+1. `lsp.kotlin-analyzer.binary.path`;
+2. `kotlin-analyzer` on the worktree's `PATH` (e.g. from
+   `cargo install --path crates/kotlin-analyzer`);
+3. the release the extension is built for (`SERVER_VERSION` in
+   `src/release.rs`), downloaded from GitHub on first use into the
+   extension's work directory, with its SHA-256 checked. Earlier versions'
+   downloads are removed. Releases exist for macOS and Linux on arm64 and
+   x86_64.
+
 ## Settings
 
 Under `lsp.kotlin-analyzer`:
 
-- `binary.path` (and `arguments`, `env`): a binary other than the one on
-  the PATH;
+- `binary.path` (and `arguments`, `env`): a binary instead of the one on
+  the PATH or the download;
 - `initialization_options`: `{ "diagnostics": { "disabled": ["unused-import"], "experimental": false }, "gradleExport": true, "projectJson": "/path/to/project.json" }`.
 
 On opening a Gradle build, the server exports the build's model (modules,
@@ -48,3 +57,10 @@ Semantic tokens (`"semantic_tokens": "combined"` per language) add what the
 grammar can't tell: properties vs. locals vs. parameters, with the modifiers
 `declaration`, `readonly`, `static`, `deprecated` and `mutable` (a `var`) for
 `semantic_token_rules`.
+
+## Tests
+
+`cargo test` (on the host) checks the release's asset names and that a
+download is unpacked only when its checksum agrees. A build with
+`KOTLIN_ANALYZER_DOWNLOADS=<base>` downloads `<base>/v<version>/<asset>`
+instead of GitHub's, for trying the download against a local release.

@@ -37,7 +37,7 @@ See `docs/spec/` for what each does, and when it stays silent.
 | VS Code | [`editors/vscode`](editors/vscode/README.md): a `.vsix` from the releases, with its own Kotlin grammar | downloaded on first use (or the `PATH`, or a setting) |
 | Neovim 0.11+ | [`editors/neovim`](editors/neovim/README.md): a plugin, `require("kotlin_analyzer").setup()` | downloaded on first use (or the `PATH`, or `cmd`) |
 | Helix | [`editors/helix`](editors/helix/README.md): `install.sh` adds the server to `languages.toml` | `install.sh` installs it into `~/.local/bin` |
-| Zed | [`editors/zed`](editors/zed/README.md): a dev extension with the Kotlin language too | the `PATH` (`cargo install`) or a setting |
+| Zed | [`editors/zed`](editors/zed/README.md): a dev extension with the Kotlin language too | downloaded on first use (or the `PATH`, or a setting) |
 
 Releases (tags `v<version>`, built by `.github/workflows/release.yml`) carry
 the server for macOS and Linux on arm64 and x86_64 as
