@@ -2,6 +2,8 @@
 //!
 //! - the layering rule: each crate depends only on the internal crates its
 //!   layer allows (see [`ALLOWED_DEPENDENCIES`]);
+//! - the editor integrations download the server's own version (see
+//!   [`check_versions`]); `cargo xtask versions` runs only this;
 //! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.
 
 use std::path::{Path, PathBuf};
@@ -67,8 +69,9 @@ fn main() -> ExitCode {
     match task.as_deref() {
         Some("check") => run_check(),
         Some("layers") => report(check_layers(&workspace_root())),
+        Some("versions") => report(check_versions(&workspace_root())),
         _ => {
-            eprintln!("usage: cargo xtask <check | layers>");
+            eprintln!("usage: cargo xtask <check | layers | versions>");
             ExitCode::FAILURE
         }
     }
@@ -77,6 +80,9 @@ fn main() -> ExitCode {
 fn run_check() -> ExitCode {
     let root = workspace_root();
     if let ExitCode::FAILURE = report(check_layers(&root)) {
+        return ExitCode::FAILURE;
+    }
+    if let ExitCode::FAILURE = report(check_versions(&root)) {
         return ExitCode::FAILURE;
     }
     let steps: [&[&str]; 3] = [
@@ -108,7 +114,6 @@ fn run_check() -> ExitCode {
 
 fn report(violations: Vec<String>) -> ExitCode {
     if violations.is_empty() {
-        eprintln!("xtask: crate layers are respected");
         return ExitCode::SUCCESS;
     }
     for violation in &violations {
@@ -147,6 +152,58 @@ fn check_layers(root: &Path) -> Vec<String> {
         }
     }
     violations
+}
+
+/// Where an editor integration states which server release it downloads:
+/// the file, and the text the version follows (in quotes).
+const EDITOR_VERSIONS: &[(&str, &str)] = &[
+    ("editors/vscode/package.json", "\"version\":"),
+    ("editors/neovim/lua/kotlin_analyzer/version.lua", "return"),
+];
+
+/// Every editor integration whose version isn't the server's: each
+/// downloads the release tagged with its own version, so they must agree.
+fn check_versions(root: &Path) -> Vec<String> {
+    let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    let Some(server_version) = workspace_version(&workspace_manifest) else {
+        return vec!["Cargo.toml has no [workspace.package] version".to_owned()];
+    };
+    let mut violations = Vec::new();
+    for (file, marker) in EDITOR_VERSIONS {
+        let text = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+        match quoted_after(&text, marker) {
+            Some(version) if version == server_version => {}
+            Some(version) => violations.push(format!(
+                "{file} is at version {version}, the server at {server_version}"
+            )),
+            None => violations.push(format!("{file} states no version after `{marker}`")),
+        }
+    }
+    violations
+}
+
+/// The `version` of a manifest's `[workspace.package]`.
+fn workspace_version(manifest: &str) -> Option<&str> {
+    let mut in_package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[workspace.package]";
+            continue;
+        }
+        if in_package && line.starts_with("version") {
+            return quoted_after(line, "version");
+        }
+    }
+    None
+}
+
+/// The first quoted string after the first `marker` in `text`.
+fn quoted_after<'text>(text: &'text str, marker: &str) -> Option<&'text str> {
+    let after_marker = &text[text.find(marker)? + marker.len()..];
+    let opening = after_marker.find('"')?;
+    let quoted = &after_marker[opening + 1..];
+    let closing = quoted.find('"')?;
+    Some(&quoted[..closing])
 }
 
 /// The names under `[dependencies]` and `[dev-dependencies]` of a manifest.
@@ -210,6 +267,33 @@ workspace = true
             declared_dependencies(manifest),
             vec!["hir-ty", "serde", "expect-test"]
         );
+    }
+
+    #[test]
+    fn workspace_version_reads_only_the_workspace_package() {
+        let manifest = "\
+[package]
+version = \"9.9.9\"
+
+[workspace.package]
+edition = \"2024\"
+version = \"0.3.1\"
+";
+        assert_eq!(workspace_version(manifest), Some("0.3.1"));
+        assert_eq!(workspace_version("[package]\nversion = \"1.0.0\"\n"), None);
+    }
+
+    #[test]
+    fn quoted_after_takes_the_first_string_after_the_marker() {
+        let package_json = "{ \"name\": \"x\", \"version\": \"1.2.3\", \"engines\": {} }";
+        assert_eq!(quoted_after(package_json, "\"version\":"), Some("1.2.3"));
+        assert_eq!(quoted_after("return \"0.1.0\"\n", "return"), Some("0.1.0"));
+        assert_eq!(quoted_after("return nil", "return"), None);
+    }
+
+    #[test]
+    fn the_editors_download_the_servers_version() {
+        assert_eq!(check_versions(&workspace_root()), Vec::<String>::new());
     }
 
     #[test]

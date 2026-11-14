@@ -30,14 +30,24 @@ libraries — is read for navigation, hover and types.
 
 See `docs/spec/` for what each does, and when it stays silent.
 
-## Using it in Zed
+## Editors
 
-1. `cargo install --path crates/kotlin-analyzer` puts `kotlin-analyzer` on
-   the PATH.
-2. *zed: install dev extension* → `editors/zed` (see its README for
-   settings). It provides the Kotlin language as well — highlighting,
-   outline, brackets, indentation — so no other Kotlin extension is needed;
-   Java's grammar comes from Zed's Java extension.
+| editor | where | the server binary |
+|---|---|---|
+| VS Code | [`editors/vscode`](editors/vscode/README.md): a `.vsix` from the releases, with its own Kotlin grammar | downloaded on first use (or the `PATH`, or a setting) |
+| Neovim 0.11+ | [`editors/neovim`](editors/neovim/README.md): a plugin, `require("kotlin_analyzer").setup()` | downloaded on first use (or the `PATH`, or `cmd`) |
+| Helix | [`editors/helix`](editors/helix/README.md): `install.sh` adds the server to `languages.toml` | `install.sh` installs it into `~/.local/bin` |
+| Zed | [`editors/zed`](editors/zed/README.md): a dev extension with the Kotlin language too | the `PATH` (`cargo install`) or a setting |
+
+Releases (tags `v<version>`, built by `.github/workflows/release.yml`) carry
+the server for macOS and Linux on arm64 and x86_64 as
+`kotlin-analyzer-<target>.gz` with a `.sha256` each, and the VS Code
+extension. `editors/install-server.sh` installs a release by hand. Each
+editor integration downloads the release of its own version;
+`cargo xtask versions` checks that the versions agree.
+
+From source: `cargo install --path crates/kotlin-analyzer` puts
+`kotlin-analyzer` on the `PATH`, which every editor prefers to a download.
 
 ## Project model
 
@@ -71,7 +81,14 @@ modules and source sets are guessed from the directory layout.
 
 ```bash
 cargo build --release
-cargo xtask check   # layering rule, fmt, clippy, tests
+cargo xtask check   # layering rule, editor versions, fmt, clippy, tests
+```
+
+The editor integrations' tests run against `target/release/kotlin-analyzer`:
+
+```bash
+(cd editors/vscode && npm ci && npm run check && npm run test:integration)
+editors/neovim/test/run.sh
 ```
 
 ## License

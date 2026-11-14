@@ -6,3 +6,8 @@
 /editors/zed/extension.wasm
 /editors/zed/grammars
 /editors/zed/Cargo.lock
+/editors/vscode/node_modules
+/editors/vscode/dist
+/editors/vscode/out
+/editors/vscode/*.vsix
+/editors/vscode/LICENSE

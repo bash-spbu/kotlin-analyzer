@@ -1,0 +1,60 @@
+# kotlin-analyzer for Helix
+
+Helix already ships the Kotlin language: grammar, highlighting, text objects
+and indentation. Setting it up here only adds the language server, for Kotlin
+and (read-only) Java.
+
+## Install
+
+```bash
+editors/helix/install.sh
+```
+
+The script does two things:
+
+1. If `kotlin-analyzer` isn't on the `PATH`, it installs the latest release
+   into `~/.local/bin`. See `editors/install-server.sh`: macOS and Linux,
+   arm64 and x86_64, with the SHA-256 checked.
+2. It appends [`languages.toml`](languages.toml) to
+   `~/.config/helix/languages.toml`. If that file already configures Kotlin,
+   Java or kotlin-analyzer, it changes nothing and asks you to merge by hand.
+
+Options:
+
+- `--no-java`: leave Java to another server (jdtls).
+- `--directory <dir>`: put the binary somewhere else.
+
+Check the result with `hx --health kotlin`.
+
+Open a file inside a Gradle build. Helix starts the server in the outermost
+directory with a `settings.gradle(.kts)` or `build.gradle(.kts)`, up to the
+version-control root. The server then exports the build's model in the
+background.
+
+## Settings
+
+`config` under `[language-server.kotlin-analyzer]` is sent as the server's
+`initializationOptions`:
+
+```toml
+[language-server.kotlin-analyzer]
+command = "kotlin-analyzer"
+config = { diagnostics = { disabled = ["unused-import"], experimental = false }, gradleExport = true, projectJson = "/path/to/project.json" }
+```
+
+- `diagnostics.disabled`: checks that don't run. The checks are `syntax`,
+  `unresolved-reference`, `missing-import`, `argument-mismatch`,
+  `unsafe-call`, `non-exhaustive-when`, `unused-import` and
+  `missing-package`.
+- `diagnostics.experimental`: also run checks that are still experimental.
+- `gradleExport`: export the Gradle model on start.
+- `projectJson`: a model exported beforehand.
+
+Inlay type hints need `display-inlay-hints = true` under `[editor.lsp]` in
+`config.toml`.
+
+Reload the workspace after a big change on disk:
+
+- `:lsp-workspace-command kotlin-analyzer.reloadWorkspace` reloads the
+  model and every file;
+- `:lsp-restart` restarts the server.

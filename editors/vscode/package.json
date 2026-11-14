@@ -1,0 +1,149 @@
+{
+  "name": "kotlin-analyzer",
+  "displayName": "kotlin-analyzer",
+  "description": "Kotlin for VS Code: highlighting and the kotlin-analyzer language server (navigation, completion, diagnostics, rename), also for Java.",
+  "version": "0.1.0",
+  "publisher": "bash-spbu",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bash-spbu/kotlin-analyzer"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "keywords": ["kotlin", "java", "gradle", "language server"],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:kotlin",
+    "onLanguage:java",
+    "workspaceContains:settings.gradle.kts",
+    "workspaceContains:settings.gradle",
+    "workspaceContains:build.gradle.kts"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": ["Kotlin", "kotlin"],
+        "extensions": [".kt", ".kts"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kotlin",
+        "scopeName": "source.kotlin",
+        "path": "./syntaxes/kotlin.tmLanguage.json"
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "mutable",
+        "description": "A `var`: a variable or property that can be reassigned."
+      }
+    ],
+    "commands": [
+      {
+        "command": "kotlin-analyzer.reloadWorkspace",
+        "title": "Reload Workspace",
+        "category": "kotlin-analyzer"
+      },
+      {
+        "command": "kotlin-analyzer.restartServer",
+        "title": "Restart Server",
+        "category": "kotlin-analyzer"
+      },
+      {
+        "command": "kotlin-analyzer.showLogs",
+        "title": "Show Logs",
+        "category": "kotlin-analyzer"
+      }
+    ],
+    "configuration": {
+      "title": "kotlin-analyzer",
+      "properties": {
+        "kotlin-analyzer.server.path": {
+          "type": ["string", "null"],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "The server binary to run. When unset: `kotlin-analyzer` on the `PATH`, else the release matching this extension, downloaded from GitHub on first use."
+        },
+        "kotlin-analyzer.server.extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "markdownDescription": "Environment variables added to the server's, e.g. `JAVA_HOME` for the JDK it reads."
+        },
+        "kotlin-analyzer.java.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also serve Java files (navigation, hover, symbols). Turn it off when another Java language server runs."
+        },
+        "kotlin-analyzer.diagnostics.disabled": {
+          "type": "array",
+          "default": [],
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "syntax",
+              "unresolved-reference",
+              "missing-import",
+              "argument-mismatch",
+              "unsafe-call",
+              "non-exhaustive-when",
+              "unused-import",
+              "missing-package"
+            ]
+          },
+          "markdownDescription": "Checks that don't run."
+        },
+        "kotlin-analyzer.diagnostics.experimental": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also run the checks that haven't passed the corpus gate yet (`unresolved-reference`)."
+        },
+        "kotlin-analyzer.gradleExport": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Export the Gradle build's model (modules, source sets, libraries, JDK) in the background on opening the workspace."
+        },
+        "kotlin-analyzer.projectJson": {
+          "type": ["string", "null"],
+          "default": null,
+          "markdownDescription": "A project model exported beforehand (`.kotlin-analyzer/project.json`), used instead of exporting one."
+        },
+        "kotlin-analyzer.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "markdownDescription": "Log the LSP traffic to the *kotlin-analyzer* output."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify --sourcemap",
+    "compile-tests": "tsc -p .",
+    "check": "tsc -p . --noEmit && npm run test:unit && npm run test:grammar",
+    "test:unit": "tsc -p . && node --test 'out/test/unit/**/*.test.js'",
+    "test:grammar": "vscode-tmgrammar-test --grammar syntaxes/kotlin.tmLanguage.json 'test/grammar/*.kt'",
+    "test:integration": "npm run build && tsc -p . && node out/test/integration/run.js",
+    "package": "cp ../../LICENSE LICENSE && vsce package --no-dependencies",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "~1.91.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.0",
+    "esbuild": "^0.28.0",
+    "typescript": "~5.9.3",
+    "vscode-tmgrammar-test": "^0.1.3"
+  }
+}

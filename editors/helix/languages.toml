@@ -1,0 +1,19 @@
+# kotlin-analyzer for Helix: merge into ~/.config/helix/languages.toml
+# (install.sh does it when that file doesn't configure Kotlin or Java yet).
+
+[language-server.kotlin-analyzer]
+command = "kotlin-analyzer"
+# Sent as the server's initializationOptions; see editors/helix/README.md.
+config = { diagnostics = { disabled = [], experimental = false }, gradleExport = true }
+
+# Helix starts the server in the outermost directory holding one of `roots`
+# (up to the workspace's version-control root): the Gradle build's root.
+[[language]]
+name = "kotlin"
+roots = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"]
+language-servers = ["kotlin-analyzer"]
+
+[[language]]
+name = "java"
+roots = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"]
+language-servers = ["kotlin-analyzer"]
