@@ -6,6 +6,9 @@ its own extensions for VS Code, Neovim, Helix and Zed. It reads Kotlin JVM,
 Kotlin Multiplatform and Android projects from their Gradle build, and Java
 for navigation and types.
 
+**Status: stable.** It is ready for everyday use on the kinds of projects
+listed under [Tested on](#tested-on).
+
 - **Low latency:** hover and go-to-definition usually answer in a fraction
   of a millisecond, and diagnostics come back a few milliseconds after an edit
   (see [Benchmarks](#benchmarks)).
@@ -34,6 +37,39 @@ Features:
 - diagnostics with quick fixes, which report only what they are sure of;
 - Gradle tasks in every editor (build, clean, test a module).
 
+### Tested on
+
+These are expected to work out of the box:
+
+- **Kotlin/JVM backends:** eight large private Spring Boot monorepos built
+  with Gradle, 260 to 8,400 files each, kept at zero false errors.
+- **Android:** [nowinandroid](https://github.com/android/nowinandroid)
+  (Compose, Hilt, flavours) with AGP 9.3.
+- **Kotlin Multiplatform:**
+  [kotlinconf-app](https://github.com/JetBrains/kotlinconf-app) (Compose
+  Multiplatform) and [ktor](https://github.com/ktorio/ktor) (JVM, JS, Wasm
+  and Native targets, `expect`/`actual`).
+- **Toolchain:** Gradle 9.x with the Kotlin DSL, Kotlin 2.3–2.5, JDK 21 and 25.
+- **Editors:** VS Code 1.146, Neovim 0.12, Helix 25.07 and Zed 1.28, on
+  macOS (Apple silicon).
+
+### Not tested
+
+These may need work; your agent can usually add it (see above):
+
+- **Kotlin/JS, Wasm and Native code:** their libraries (klibs) aren't read.
+  Such code gets the standard library only, and diagnostics stay silent
+  there.
+- **Old toolchains:** JDK 8–17, Kotlin 1.x and the K1 compiler, Gradle 7
+  and older.
+- **Other builds:** Maven, Bazel, Amper and plain `kotlinc`, which get only
+  the module layout guessed from the directories. Groovy-DSL Gradle builds,
+  `buildSrc` and composite builds are exported but have not been exercised.
+- **Other code:** generated sources before the first build (KSP, kapt,
+  OpenAPI, protobuf), and Kotlin scripts other than Gradle's.
+- **Platforms:** Linux builds are released but haven't been tried in an
+  editor. Windows isn't supported.
+
 ## How to install
 
 Releases cover macOS and Linux on arm64 and x86_64. The VS Code, Neovim and
@@ -50,8 +86,8 @@ or set `sdk.dir` in `local.properties`.
 **VS Code**
 
 ```bash
-curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v0.1.0/kotlin-analyzer-0.1.0.vsix
-code --install-extension kotlin-analyzer-0.1.0.vsix
+curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v1.0.0/kotlin-analyzer-1.0.0.vsix
+code --install-extension kotlin-analyzer-1.0.0.vsix
 ```
 
 **Neovim** (0.11+, with [lazy.nvim](https://github.com/folke/lazy.nvim))
@@ -108,13 +144,27 @@ with the model its Gradle build exports (Gradle's own time is not counted):
 How it was measured:
 - Machine: MacBook Pro (Mac16,8), Apple M4 Pro with 12 cores (8
   performance, 4 efficiency), 24 GB RAM, macOS 27.2.
-- Build: a release build of `kotlin-analyzer` 0.1.0 (Rust 1.99), with a
+- Build: a release build of `kotlin-analyzer` 1.0.0 (Rust 1.99), with a
   warm filesystem cache.
 - Latencies: over stdio, the way an editor talks to the server. 40 random
   files per project were each opened, then queried for hover and definition
   at 5 random names and for completion after 2 dots, then edited by adding a
   top-level declaration.
 - Workspace check: `kotlin-analyzer diagnostics`.
+
+## Reporting issues
+
+The ideal issue names an **open-source Kotlin project and a file and line**
+where the problem shows up, or where the wanted feature would be used. Add:
+
+- what the server did and what you expected;
+- the editor;
+- the output of `kotlin-analyzer --version`;
+- for a project-model problem, the Gradle and Kotlin versions.
+
+A reproducible public project is what lets a fix land quickly, by a person or
+an agent. For a private project, a minimal public repository that shows the
+same thing works as well.
 
 ## License
 
