@@ -73,14 +73,25 @@ impl Target {
         Some((target, name.range))
     }
 
-    /// The target with every member its members override or are
-    /// overridden by.
+    /// The target with the `expect` or `actual` declarations its
+    /// declarations pair with: one declaration on every platform.
+    fn with_counterparts(self, db: &RootDatabase) -> Target {
+        self.expanded(|declaration| hir::expect_actual_family(db, declaration))
+    }
+
+    /// The target with its counterparts and every member its members
+    /// override or are overridden by: what renaming one renames.
     fn with_overrides(self, db: &RootDatabase) -> Target {
+        self.with_counterparts(db)
+            .expanded(|declaration| hir::override_family(db, declaration))
+    }
+
+    fn expanded(self, family_of: impl Fn(ItemLocation) -> Vec<ItemLocation>) -> Target {
         match self {
             Target::Declarations(declarations) => {
                 let mut family: Vec<ItemLocation> = Vec::new();
                 for declaration in declarations {
-                    for member in hir::override_family(db, declaration) {
+                    for member in family_of(declaration) {
                         if !family.contains(&member) {
                             family.push(member);
                         }
@@ -115,7 +126,7 @@ pub(crate) fn references(
     };
     target_references(
         db,
-        &target,
+        &target.with_counterparts(db),
         &written_name(db, file, range),
         include_declaration,
     )

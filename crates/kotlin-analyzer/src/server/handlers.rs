@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest,
-    Request as _, WorkspaceSymbolRequest,
+    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, GotoImplementation, HoverRequest,
+    InlayHintRequest, Request as _, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -37,6 +37,9 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
     let result = match request.method.as_str() {
         GotoDefinition::METHOD => {
             params::<GotoDefinition>(request).map(|params| definition(&snapshot, params))
+        }
+        GotoImplementation::METHOD => {
+            params::<GotoImplementation>(request).map(|params| implementation(&snapshot, params))
         }
         HoverRequest::METHOD => {
             params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
@@ -80,14 +83,38 @@ fn definition(
     snapshot: &Snapshot,
     params: lsp_types::GotoDefinitionParams,
 ) -> Cancellable<serde_json::Value> {
+    navigation(
+        snapshot,
+        params.text_document_position_params.position,
+        |file, offset| snapshot.analysis.goto_definition(file, offset),
+    )
+}
+
+fn implementation(
+    snapshot: &Snapshot,
+    params: lsp_types::request::GotoImplementationParams,
+) -> Cancellable<serde_json::Value> {
+    navigation(
+        snapshot,
+        params.text_document_position_params.position,
+        |file, offset| snapshot.analysis.goto_implementation(file, offset),
+    )
+}
+
+/// The locations `targets_at` gives for the request's file at `position`.
+fn navigation(
+    snapshot: &Snapshot,
+    position: lsp_types::Position,
+    targets_at: impl Fn(FileId, usize) -> Cancellable<Vec<ide::NavigationTarget>>,
+) -> Cancellable<serde_json::Value> {
     let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
         return Ok(serde_json::Value::Null);
     };
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position_params.position);
-    let targets = snapshot.analysis.goto_definition(file, offset)?;
+    let offset = convert::offset(&text, position);
+    let targets = targets_at(file, offset)?;
     let mut locations = Vec::new();
     for target in &targets {
         if let Some(location) = location_of(snapshot, target)? {

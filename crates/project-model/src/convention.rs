@@ -61,21 +61,25 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
         });
     }
     // Without the build's dependency graph, every source set sees every
-    // main source set, and tests also see every test-fixtures one.
-    let kinds: Vec<(SourceSetId, SourceSetKind)> = source_sets
+    // main source set, and tests also see every test-fixtures one — except
+    // that Kotlin Multiplatform's common code sees only common code, not
+    // the platform source sets (`jvmMain`, `iosMain`) built on it.
+    let kinds: Vec<(SourceSetId, SourceSetKind, bool)> = source_sets
         .iter()
-        .map(|source_set| (source_set.id, source_set.kind))
+        .map(|source_set| (source_set.id, source_set.kind, is_common(&source_set.name)))
         .collect();
     for source_set in &mut source_sets {
         let sees_fixtures = source_set.kind == SourceSetKind::Test;
+        let sees_only_common = is_common(&source_set.name);
         source_set.dependencies = kinds
             .iter()
-            .filter(|(id, _)| *id != source_set.id)
-            .filter(|(_, kind)| {
+            .filter(|(id, _, _)| *id != source_set.id)
+            .filter(|(_, _, common)| *common || !sees_only_common)
+            .filter(|(_, kind, _)| {
                 *kind == SourceSetKind::Main
                     || (sees_fixtures && *kind == SourceSetKind::TestFixtures)
             })
-            .map(|(id, _)| *id)
+            .map(|(id, _, _)| *id)
             .collect();
     }
     ProjectModel::new(
@@ -85,6 +89,11 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
         source_sets,
         None,
     )
+}
+
+/// Kotlin Multiplatform's common source sets: `commonMain`, `commonTest`.
+fn is_common(name: &str) -> bool {
+    name.starts_with("common")
 }
 
 /// `src/<name>/{kotlin,java}` directories of a module, by source set name.
@@ -165,6 +174,47 @@ mod tests {
             model.source_set_of(&root.join("api/build/generated/B.kt")),
             None
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn multiplatform_and_android_source_sets_are_main_or_test_by_name() {
+        let root = std::env::temp_dir().join(format!("ka-convention-kmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        touch(&root.join("settings.gradle.kts"));
+        touch(&root.join("shared/build.gradle.kts"));
+        let sets = [
+            ("commonMain", SourceSetKind::Main),
+            ("iosMain", SourceSetKind::Main),
+            ("commonTest", SourceSetKind::Test),
+            ("androidUnitTest", SourceSetKind::Test),
+            ("demo", SourceSetKind::Main),
+            ("testDemo", SourceSetKind::Test),
+            ("androidTest", SourceSetKind::Test),
+            ("testFixtures", SourceSetKind::TestFixtures),
+        ];
+        for (name, _) in sets {
+            touch(&root.join(format!("shared/src/{name}/kotlin/F.kt")));
+        }
+
+        let model = discover(&root);
+        let set_of = |name: &str| {
+            model
+                .source_set_of(&root.join(format!("shared/src/{name}/kotlin/F.kt")))
+                .unwrap()
+        };
+        for (name, kind) in sets {
+            assert_eq!(model.source_set(set_of(name)).kind, kind, "{name}");
+        }
+        let ios_sees = model.visible_source_sets(set_of("iosMain"));
+        assert!(ios_sees.contains(&set_of("commonMain")));
+        assert!(!ios_sees.contains(&set_of("commonTest")));
+        let common_test_sees = model.visible_source_sets(set_of("commonTest"));
+        assert!(common_test_sees.contains(&set_of("commonMain")));
+        // Common code doesn't see the platforms built on it.
+        let common_sees = model.visible_source_sets(set_of("commonMain"));
+        assert!(!common_sees.contains(&set_of("iosMain")));
+        assert!(!common_test_sees.contains(&set_of("demo")));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

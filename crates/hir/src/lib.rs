@@ -9,6 +9,9 @@ pub use hir_def::def_map::{
     importable_names, package_exists, package_names, package_prefix_exists, packages_declaring,
     sees, visible_top_level,
 };
+pub use hir_def::expect_actual::{
+    Side as MultiplatformSide, expect_actual_family, side_of as multiplatform_side,
+};
 pub use hir_def::item_tree::{
     ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
     Modifiers, Parameter, Signature, TypeArgument, TypeRef, Visibility,
@@ -17,8 +20,8 @@ pub use hir_def::library::{
     LibrarySourceLocation, index_library, library_declaration_source, release_letter,
 };
 pub use hir_def::resolver::{
-    DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, is_classifier,
-    resolve_import_path, resolve_type_path, resolve_type_path_in_declaration,
+    DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, default_imports_visible,
+    is_classifier, resolve_import_path, resolve_type_path, resolve_type_path_in_declaration,
 };
 pub use hir_def::{
     ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,

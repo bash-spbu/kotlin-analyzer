@@ -10,6 +10,7 @@ mod diagnostics;
 mod document_symbols;
 mod folding;
 mod goto_definition;
+mod goto_implementation;
 mod hover;
 mod inlay_hints;
 mod navigation_target;
@@ -204,6 +205,15 @@ impl Analysis {
         offset: usize,
     ) -> Cancellable<Vec<NavigationTarget>> {
         self.with_db(|db| goto_definition::goto_definition(db, file, offset))
+    }
+
+    /// The `actual`s of the `expect` declaration named at `offset`.
+    pub fn goto_implementation(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Vec<NavigationTarget>> {
+        self.with_db(|db| goto_implementation::goto_implementation(db, file, offset))
     }
 
     /// Computes `files`' item trees so later queries find them cached.

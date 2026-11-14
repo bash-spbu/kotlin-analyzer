@@ -12,9 +12,11 @@ use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 use super::{Check, Diagnostic, DiagnosticsConfig, Fix, TextEdit};
 
 /// Functions called through operators and conventions (`a + b`, `by
-/// lazy`, `for (x in xs)`, `val (a, b) = …`): an import of one is used
-/// without its name appearing.
+/// lazy`, `for (x in xs)`, `val (a, b) = …`, and `property = value` with
+/// Kotlin's assignment plugin, which Gradle's `kotlin-dsl` applies): an
+/// import of one is used without its name appearing.
 const CONVENTION_NAMES: &[&str] = &[
+    "assign",
     "plus",
     "minus",
     "times",
@@ -83,12 +85,16 @@ pub(super) fn diagnostics(
 
 /// The names in the file nothing resolves, with certainty: not one an
 /// explicit import names (that import is what's broken), and none at all
-/// when a star import doesn't resolve (anything could come from it).
+/// when a star import doesn't resolve or the default imports' packages
+/// aren't visible (anything could come from them).
 fn missing_names(
     db: &RootDatabase,
     file: SourceFile,
     parse: &Parse,
 ) -> Vec<(TextRange, Name, Wanted)> {
+    if !hir::default_imports_visible(db, file) {
+        return Vec::new();
+    }
     let tree = hir::file_item_tree(db, file);
     let star_import_unresolved = tree.imports.iter().any(|import| {
         import.target == hir::ImportTarget::Everything

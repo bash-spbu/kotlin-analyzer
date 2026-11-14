@@ -74,7 +74,17 @@ are ordinary source directories that happen to be produced by the build.
    are source directories of source set `<set>`; no module dependencies are
    known, so every module sees every other module's main code; libraries are
    unknown (navigation into libraries is limited, diagnostics that need
-   library completeness stay silent).
+   library completeness stay silent). A source set is a test one when its
+   name says so — `test…` (`testDebug`), `androidTest…`, `…Test`
+   (`integrationTest`, `commonTest`, `androidUnitTest`) — and main code
+   otherwise (`main`, Kotlin Multiplatform's `commonMain`/`jvmMain`/`iosMain`,
+   Android's build types and flavours). Kotlin Multiplatform's common source
+   sets (`common…`) see only common code, never the platform source sets
+   built on them.
+
+   *Not yet:* the Gradle export reads the `java` plugin's source sets only,
+   so Android (AGP) and Kotlin Multiplatform modules export none of their
+   own; such builds are better served by the layout guess for now.
 
 `workspace/executeCommand` `kotlin-analyzer.reloadWorkspace` re-exports the
 model if the build files changed and reads the workspace again: new files

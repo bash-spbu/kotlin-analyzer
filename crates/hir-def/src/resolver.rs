@@ -28,6 +28,16 @@ pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
 /// `String` is `kotlin.String`, not `java.lang.String`.
 pub const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
+/// Whether `from` sees the packages default imports come from: the Kotlin
+/// standard library's `kotlin` and the platform's `java.lang`. Without them
+/// (a model guessed from the directory layout knows no libraries) any
+/// simple name nothing resolves may still be a default import's.
+pub fn default_imports_visible(db: &dyn SourceDatabase, from: SourceFile) -> bool {
+    ["kotlin", "java.lang"]
+        .iter()
+        .all(|package| package_exists(db, from, &Path::parse(package)))
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Resolution {
     /// Exactly one declaration.

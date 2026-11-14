@@ -1,5 +1,6 @@
 use base_db::fixture::Fixture;
 use expect_test::{Expect, expect};
+use hir::FileId;
 
 use crate::{Analysis, DocumentSymbol};
 
@@ -319,7 +320,10 @@ fun use() {
 /// Each diagnostic of `/app/b/Use.kt` as `[check] line: message`, with the
 /// first fix's edit when it has one.
 fn check_diagnostics(fixture: &str, config: crate::DiagnosticsConfig, expected: Expect) {
-    let fixture = Fixture::with_mini_stdlib(fixture);
+    check_fixture_diagnostics(Fixture::with_mini_stdlib(fixture), config, expected);
+}
+
+fn check_fixture_diagnostics(fixture: Fixture, config: crate::DiagnosticsConfig, expected: Expect) {
     let file = fixture.file("/app/b/Use.kt");
     let text = fixture.vfs.contents(file).unwrap().clone();
     let diagnostics = analysis(&fixture).diagnostics(file, &config).unwrap();
@@ -376,6 +380,89 @@ fun use(money: Money, gone: Gone): Price {
         expect![[r#"
             [unused-import] 7: Unused import `List` | Remove the unused import: ""
             [missing-import] 10: `Price` isn't imported: `import c.Price` | Import `c.Price`: "import c.Price\n""#]],
+    );
+}
+
+#[test]
+fn without_the_standard_library_a_default_imports_name_is_not_called_missing() {
+    // `Result` is kotlin.Result here; a model guessed from the directories
+    // knows no libraries, so the workspace's own `Result` isn't the fix.
+    let fixture = r#"
+//- /app/a/result/Result.kt
+package a.result
+sealed interface Result<out T>
+//- /app/b/Use.kt
+package b
+
+fun <T> attempt(block: () -> T): Result<T> = Result.success(block())
+"#;
+    check_fixture_diagnostics(
+        Fixture::parse(fixture),
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+    // With the standard library visible, a missing class is still found.
+    check_diagnostics(
+        r#"
+//- /app/a/result/Outcome.kt
+package a.result
+sealed interface Outcome<out T>
+//- /app/b/Use.kt
+package b
+
+fun <T> attempt(block: () -> T): Outcome<T> = TODO()
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[
+            r#"[missing-import] 3: `Outcome` isn't imported: `import a.result.Outcome` | Import `a.result.Outcome`: "\nimport a.result.Outcome\n""#
+        ]],
+    );
+}
+
+#[test]
+fn an_assign_import_is_used_by_assignments_and_file_suppressions_are_honoured() {
+    check_diagnostics(
+        r#"
+//- /app/gradle/Dsl.kt
+package gradle
+class Property<T>
+operator fun <T> Property<T>.assign(value: T) {}
+fun configure() {}
+//- /app/b/Use.kt
+@file:Suppress("PackageDirectoryMismatch")
+
+import gradle.assign
+import gradle.configure
+
+class Extension
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[r#"[unused-import] 4: Unused import `configure` | Remove the unused import: """#]],
+    );
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+@file:Suppress("UnusedImport", "PackageDirectoryMismatch")
+
+import kotlin.collections.List
+
+class Extension
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+    // Another annotation's strings don't suppress anything.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+@file:JvmName("UnusedImport")
+
+import kotlin.collections.List
+
+class Extension
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[r#"[unused-import] 3: Unused import `List` | Remove the unused import: """#]],
     );
 }
 
@@ -658,6 +745,96 @@ fun use() {
         > pay([amount: Long])
           pay(amount: Long, note: String, vararg tags: String)"#]],
     );
+}
+
+#[test]
+fn an_expect_and_its_actuals_are_one_declaration_for_references_rename_and_implementation() {
+    // The overload taking a region, an ordinary namesake and another
+    // module's `actual` must stay out.
+    let fixture = r#"
+//- /shared/common/a/Store.kt module=:shared set=commonMain
+package a
+expect fun storeUrl(): String?
+expect fun storeUrl(region: Int): String?
+//- /shared/ios/a/Store.ios.kt module=:shared set=iosMain deps=:shared/commonMain
+package a
+actual fun storeUrl(): String? = null
+actual fun storeUrl(region: Int): String? = null
+//- /shared/jvm/a/Store.jvm.kt module=:shared set=jvmMain deps=:shared/commonMain
+package a
+actual fun storeUrl(): String? = null
+actual fun storeUrl(region: Int): String? = null
+//- /shared/jvm/c/Store.kt module=:shared set=jvmMain deps=:shared/commonMain
+package c
+fun storeUrl(): String? = null
+//- /other/a/Store.kt module=:other
+package a
+actual fun storeUrl(): String? = null
+//- /shared/common/b/Use.kt module=:shared set=commonMain
+package b
+import a.storeUrl
+fun use() = storeUrl()
+"#;
+    let marked =
+        Fixture::parse(&fixture.replace("fun use() = storeUrl()", "fun use() = store$0Url()"));
+    let (file, offset) = marked.cursor();
+    let lines = |ranges: Vec<(FileId, u32)>| {
+        let mut rendered: Vec<String> = ranges
+            .iter()
+            .map(|(file, start)| {
+                let text = marked.vfs.contents(*file).unwrap();
+                let line = text[..*start as usize].matches('\n').count() + 1;
+                format!("{}:{line}", marked.vfs.path(*file).display())
+            })
+            .collect();
+        rendered.sort();
+        rendered.join("\n")
+    };
+
+    let implementations = analysis(&marked).goto_implementation(file, offset).unwrap();
+    expect![[r#"
+        /shared/ios/a/Store.ios.kt:2
+        /shared/jvm/a/Store.jvm.kt:2"#]]
+    .assert_eq(&lines(
+        implementations
+            .iter()
+            .filter_map(|target| match target.file {
+                crate::NavigationFile::Workspace(file) => Some((file, target.focus_range.start)),
+                crate::NavigationFile::Library { .. } => None,
+            })
+            .collect(),
+    ));
+
+    let references = analysis(&marked).references(file, offset, true).unwrap();
+    expect![[r#"
+        /shared/common/a/Store.kt:2
+        /shared/common/b/Use.kt:2
+        /shared/common/b/Use.kt:3
+        /shared/ios/a/Store.ios.kt:2
+        /shared/jvm/a/Store.jvm.kt:2"#]]
+    .assert_eq(&lines(
+        references
+            .iter()
+            .map(|found| (found.file, found.range.start))
+            .collect(),
+    ));
+
+    let change = analysis(&marked)
+        .rename(file, offset, "storeLink")
+        .unwrap()
+        .unwrap();
+    let renamed: Vec<(FileId, u32)> = change
+        .edits
+        .iter()
+        .flat_map(|(file, edits)| edits.iter().map(|edit| (*file, edit.range.start)))
+        .collect();
+    expect![[r#"
+        /shared/common/a/Store.kt:2
+        /shared/common/b/Use.kt:2
+        /shared/common/b/Use.kt:3
+        /shared/ios/a/Store.ios.kt:2
+        /shared/jvm/a/Store.jvm.kt:2"#]]
+    .assert_eq(&lines(renamed));
 }
 
 #[test]

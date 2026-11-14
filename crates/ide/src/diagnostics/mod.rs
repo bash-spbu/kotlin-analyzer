@@ -5,6 +5,7 @@
 mod facts;
 pub(crate) mod imports;
 mod package;
+mod suppression;
 
 use hir::{FileId, RootDatabase, SourceDatabase};
 use syntax::{Language, TextRange};
@@ -77,6 +78,21 @@ impl Check {
             | Check::NonExhaustiveWhen => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
             Check::UnusedImport => Severity::Unnecessary,
+        }
+    }
+
+    /// The names that turn the check off in `@file:Suppress(…)`: the ones
+    /// the Kotlin tools give the same finding.
+    pub fn suppressed_by(self) -> &'static [&'static str] {
+        match self {
+            Check::MissingPackage => &["PackageDirectoryMismatch"],
+            Check::UnusedImport => &["UnusedImport"],
+            Check::Syntax
+            | Check::UnresolvedReference
+            | Check::MissingImport
+            | Check::ArgumentMismatch
+            | Check::UnsafeCall
+            | Check::NonExhaustiveWhen => &[],
         }
     }
 
@@ -156,6 +172,14 @@ pub(crate) fn diagnostics(
             found.extend(package::missing_package(db, source, &parse));
         }
     }
+    let suppressed = suppression::file_suppressions(&parse);
+    found.retain(|diagnostic| {
+        !diagnostic
+            .check
+            .suppressed_by()
+            .iter()
+            .any(|name| suppressed.contains(*name))
+    });
     found.sort_by_key(|diagnostic| (diagnostic.range.start, diagnostic.check));
     found
 }

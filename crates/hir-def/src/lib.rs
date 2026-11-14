@@ -9,6 +9,7 @@
 //!   following Kotlin's scope levels and the source set's visibility.
 
 pub mod def_map;
+pub mod expect_actual;
 pub mod item_tree;
 pub mod library;
 pub mod resolver;

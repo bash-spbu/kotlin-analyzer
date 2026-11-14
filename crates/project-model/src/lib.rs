@@ -50,11 +50,24 @@ pub enum SourceSetKind {
 }
 
 impl SourceSetKind {
+    /// The kind a source set's name implies. Tests are named as tests:
+    /// `test…` (`testDebug`), `androidTest…`, `…Test` (`integrationTest`,
+    /// Kotlin Multiplatform's `commonTest`, Android's `androidUnitTest`).
+    /// Everything else builds the product: `main`, Kotlin Multiplatform's
+    /// `commonMain`, `jvmMain`, `iosMain`…, Android's build types and
+    /// flavours (`debug`, `demo`).
     pub fn of_name(name: &str) -> SourceSetKind {
-        match name {
-            "main" => SourceSetKind::Main,
-            "testFixtures" => SourceSetKind::TestFixtures,
-            _ => SourceSetKind::Test,
+        if name == "testFixtures" {
+            return SourceSetKind::TestFixtures;
+        }
+        let names_tests = name.starts_with("test")
+            || name.starts_with("androidTest")
+            || name.ends_with("Test")
+            || name.ends_with("Tests");
+        if names_tests {
+            SourceSetKind::Test
+        } else {
+            SourceSetKind::Main
         }
     }
 }
