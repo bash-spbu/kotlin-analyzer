@@ -1,0 +1,150 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>kotlin-analyzer: a lightweight Kotlin language server in Rust, for many large projects and many editors, adapted by your AI agent</title>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#161d33"/>
+    </linearGradient>
+    <linearGradient id="kotlin" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7f52ff"/>
+      <stop offset="0.55" stop-color="#c711e1"/>
+      <stop offset="1" stop-color="#e44857"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f74c00"/>
+      <stop offset="1" stop-color="#f9a03f"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f2742"/>
+      <stop offset="1" stop-color="#151b30"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="agent-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#34d399"/>
+    </marker>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="500" rx="24" fill="url(#background)"/>
+
+  <!-- Title -->
+  <text x="60" y="78" font-size="42" font-weight="700" fill="#f8fafc">kotlin-analyzer</text>
+  <text x="60" y="112" font-size="19" fill="#94a3b8">A lightweight Kotlin language server in <tspan fill="#f9a03f" font-weight="600">Rust</tspan>, built the way rust-analyzer is</text>
+
+  <!-- Projects -->
+  <text x="60" y="166" font-size="14" font-weight="600" letter-spacing="1.5" fill="#64748b">MANY LARGE PROJECTS</text>
+  <g font-size="15">
+    <g transform="translate(60 182)">
+      <rect width="292" height="50" rx="10" fill="#1a2138" stroke="#2c3655"/>
+      <rect width="6" height="50" rx="3" fill="url(#kotlin)"/>
+      <text x="22" y="22" fill="#e2e8f0" font-weight="600">ktor</text>
+      <text x="22" y="40" font-size="13" fill="#94a3b8">Multiplatform · 2,344 files · 137 modules</text>
+    </g>
+    <g transform="translate(60 242)">
+      <rect width="292" height="50" rx="10" fill="#1a2138" stroke="#2c3655"/>
+      <rect width="6" height="50" rx="3" fill="url(#kotlin)"/>
+      <text x="22" y="22" fill="#e2e8f0" font-weight="600">Spring backends</text>
+      <text x="22" y="40" font-size="13" fill="#94a3b8">Kotlin/JVM · up to 8,400 files each</text>
+    </g>
+    <g transform="translate(60 302)">
+      <rect width="292" height="50" rx="10" fill="#1a2138" stroke="#2c3655"/>
+      <rect width="6" height="50" rx="3" fill="url(#kotlin)"/>
+      <text x="22" y="22" fill="#e2e8f0" font-weight="600">nowinandroid</text>
+      <text x="22" y="40" font-size="13" fill="#94a3b8">Android · Compose · flavours</text>
+    </g>
+    <g transform="translate(60 362)">
+      <rect width="292" height="50" rx="10" fill="#1a2138" stroke="#2c3655"/>
+      <rect width="6" height="50" rx="3" fill="url(#kotlin)"/>
+      <text x="22" y="22" fill="#e2e8f0" font-weight="600">kotlinconf-app</text>
+      <text x="22" y="40" font-size="13" fill="#94a3b8">Compose Multiplatform · expect/actual</text>
+    </g>
+  </g>
+
+  <!-- Projects → core -->
+  <g stroke="#64748b" stroke-width="2" fill="none">
+    <path d="M354 207 C 400 207, 400 262, 440 262" marker-end="url(#arrow)"/>
+    <path d="M354 267 C 395 267, 400 278, 440 278" marker-end="url(#arrow)"/>
+    <path d="M354 327 C 395 327, 400 294, 440 294" marker-end="url(#arrow)"/>
+    <path d="M354 387 C 400 387, 400 310, 440 310" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Core -->
+  <rect x="448" y="168" width="304" height="244" rx="20" fill="url(#kotlin)" opacity="0.35" filter="url(#glow)"/>
+  <rect x="448" y="168" width="304" height="244" rx="20" fill="url(#core)" stroke="url(#kotlin)" stroke-width="2.5"/>
+  <g transform="translate(600 222)" fill="url(#kotlin)">
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(0)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(45)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(90)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(135)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(180)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(225)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(270)"/>
+      <rect x="-5" y="-30" width="10" height="13" rx="2" transform="rotate(315)"/>
+    <circle r="20"/>
+    <circle r="8" fill="#1d243f"/>
+  </g>
+  <text x="600" y="282" text-anchor="middle" font-size="24" font-weight="700" fill="#f8fafc">language server</text>
+  <text x="600" y="306" text-anchor="middle" font-size="14" fill="#94a3b8">incremental · no JVM of its own</text>
+  <g font-size="14" font-weight="600" text-anchor="middle">
+    <rect x="470" y="326" width="122" height="30" rx="15" fill="#10241f" stroke="#1f6f55"/>
+    <text x="531" y="346" fill="#6ee7b7">&lt;1 ms hover</text>
+    <rect x="608" y="326" width="122" height="30" rx="15" fill="#10241f" stroke="#1f6f55"/>
+    <text x="669" y="346" fill="#6ee7b7">2 s to load</text>
+    <rect x="470" y="364" width="260" height="30" rx="15" fill="#10241f" stroke="#1f6f55"/>
+    <text x="600" y="384" fill="#6ee7b7">~250 MB for 2,300 files</text>
+  </g>
+
+  <!-- Core → editors -->
+  <g stroke="#64748b" stroke-width="2" fill="none">
+    <path d="M754 262 C 800 262, 800 207, 846 207" marker-end="url(#arrow)"/>
+    <path d="M754 278 C 800 278, 800 267, 846 267" marker-end="url(#arrow)"/>
+    <path d="M754 294 C 800 294, 800 327, 846 327" marker-end="url(#arrow)"/>
+    <path d="M754 310 C 800 310, 800 387, 846 387" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Editors -->
+  <text x="1140" y="166" text-anchor="end" font-size="14" font-weight="600" letter-spacing="1.5" fill="#64748b">MANY EDITORS</text>
+  <g font-size="17" font-weight="600" fill="#e2e8f0">
+    <g transform="translate(852 182)">
+      <rect width="288" height="50" rx="25" fill="#1a2138" stroke="#2c3655"/>
+      <circle cx="28" cy="25" r="8" fill="#38bdf8"/>
+      <text x="48" y="31">Zed</text>
+      <text x="268" y="31" text-anchor="end" font-size="13" font-weight="400" fill="#94a3b8">extension</text>
+    </g>
+    <g transform="translate(852 242)">
+      <rect width="288" height="50" rx="25" fill="#1a2138" stroke="#2c3655"/>
+      <circle cx="28" cy="25" r="8" fill="#3b82f6"/>
+      <text x="48" y="31">VS Code</text>
+      <text x="268" y="31" text-anchor="end" font-size="13" font-weight="400" fill="#94a3b8">extension</text>
+    </g>
+    <g transform="translate(852 302)">
+      <rect width="288" height="50" rx="25" fill="#1a2138" stroke="#2c3655"/>
+      <circle cx="28" cy="25" r="8" fill="#4ade80"/>
+      <text x="48" y="31">Neovim</text>
+      <text x="268" y="31" text-anchor="end" font-size="13" font-weight="400" fill="#94a3b8">plugin</text>
+    </g>
+    <g transform="translate(852 362)">
+      <rect width="288" height="50" rx="25" fill="#1a2138" stroke="#2c3655"/>
+      <circle cx="28" cy="25" r="8" fill="#a78bfa"/>
+      <text x="48" y="31">Helix</text>
+      <text x="268" y="31" text-anchor="end" font-size="13" font-weight="400" fill="#94a3b8">config</text>
+    </g>
+  </g>
+
+  <!-- AI agent -->
+  <g transform="translate(330 438)">
+    <rect width="540" height="44" rx="22" fill="#0f2a22" stroke="#34d399" stroke-dasharray="6 5"/>
+    <g transform="translate(26 22)">
+      <rect x="-12" y="-10" width="24" height="20" rx="6" fill="#34d399"/>
+      <circle cx="-5" cy="0" r="2.6" fill="#0f2a22"/>
+      <circle cx="5" cy="0" r="2.6" fill="#0f2a22"/>
+      <rect x="-1.5" y="-16" width="3" height="6" rx="1.5" fill="#34d399"/>
+    </g>
+    <text x="50" y="28" font-size="16" fill="#d1fae5"><tspan font-weight="700">Your AI agent</tspan> adapts it to your project in a few hundred lines</text>
+  </g>
+  <path d="M600 437 L600 418" stroke="#34d399" stroke-width="2" fill="none" marker-end="url(#agent-arrow)"/>
+</svg>

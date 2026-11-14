@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.svg" width="100%" alt="kotlin-analyzer: a lightweight Kotlin language server in Rust, built like rust-analyzer. It serves many large projects (ktor, Spring backends, nowinandroid, kotlinconf-app) with sub-millisecond hover, a 2-second load and about 250 MB of memory, through extensions for Zed, VS Code, Neovim and Helix, and your AI agent adapts it to your project in a few hundred lines.">
+</p>
+
 # kotlin-analyzer
 
 A self-contained, lightweight Kotlin language server written in Rust, built
