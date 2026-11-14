@@ -69,7 +69,7 @@ pub(crate) fn match_quality(name: &str, query: &str) -> Option<MatchQuality> {
     is_subsequence.then_some(MatchQuality::Subsequence)
 }
 
-/// `DRDRS` matches `DailyRateDeviationReportingService`: the query's
+/// `WRFRS` matches `WeeklyRateForecastReportingService`: the query's
 /// letters are the name's capitals in order.
 fn matches_camel_humps(name: &str, query: &str) -> bool {
     let humps: String = name
@@ -85,16 +85,19 @@ mod tests {
 
     #[test]
     fn match_quality_orders_exact_prefix_humps_substring_subsequence() {
-        let name = "DailyRateDeviationReportingService";
+        let name = "WeeklyRateForecastReportingService";
         assert_eq!(match_quality(name, name), Some(MatchQuality::Exact));
-        assert_eq!(match_quality(name, "dailyrate"), Some(MatchQuality::Prefix));
-        assert_eq!(match_quality(name, "DRDR"), Some(MatchQuality::CamelHumps));
         assert_eq!(
-            match_quality(name, "Deviation"),
+            match_quality(name, "weeklyrate"),
+            Some(MatchQuality::Prefix)
+        );
+        assert_eq!(match_quality(name, "WRFR"), Some(MatchQuality::CamelHumps));
+        assert_eq!(
+            match_quality(name, "Forecast"),
             Some(MatchQuality::Substring)
         );
         assert_eq!(
-            match_quality(name, "drsvc"),
+            match_quality(name, "wrsvc"),
             Some(MatchQuality::Subsequence)
         );
         assert_eq!(match_quality(name, "xyz"), None);

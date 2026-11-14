@@ -55,9 +55,8 @@ Kotlin tools give the same finding: `PackageDirectoryMismatch`
 On projects that compile, every error or warning a check reports is a false
 positive by definition. `kotlin-analyzer diagnostics <root>` runs all checks
 over every workspace file and exits non-zero on any finding; the gate is zero
-findings on `finops-mono`, `crypto-gateway-be`, `billing-mono`,
-`payhost-mono`, `user-mono`, `jvm-common-tools`, `onewintoken-mono` and
-`lottery-backend-mono`. Known exceptions are
+findings on eight private Spring/Kotlin backend monorepos (260 to 8,400
+files each). Known exceptions are
 findings against generated code that is stale on disk (its source spec newer
 than the generated file) — these are true.
 
@@ -65,17 +64,17 @@ Status (2026-11-13), stable checks:
 
 | corpus | files | errors and warnings | which |
 |---|---|---|---|
-| finops-mono | 3677 | 1 | `argument-mismatch` against a stale generated client |
-| crypto-gateway-be | 8364 | 2 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none |
-| billing-mono | 4416 | 0 | |
-| payhost-mono | 3819 | 0 | |
-| user-mono | 1332 | 1 | `missing-package` on a file that really has none |
-| jvm-common-tools | 1149 | 0 | |
-| onewintoken-mono | 631 | 0 | |
-| lottery-backend-mono | 260 | 0 | |
+| backend A | 3677 | 1 | `argument-mismatch` against a stale generated client |
+| backend B | 8364 | 2 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none |
+| backend C | 4416 | 0 | |
+| backend D | 3819 | 0 | |
+| backend E | 1332 | 1 | `missing-package` on a file that really has none |
+| backend F | 1149 | 0 | |
+| backend G | 631 | 0 | |
+| backend H | 260 | 0 | |
 
-(The last six weren't built: their generated sources aren't on disk, so
-names from them stay unresolved — and the checks silent there.)
+(C to H weren't built: their generated sources aren't on disk, so names
+from them stay unresolved — and the checks silent there.)
 
 Mobile corpora (2026-11-14), open source, with the model the Gradle export
 gives (Android SDK installed):
@@ -90,5 +89,4 @@ Without the Gradle model (the directory layout guessed), ktor's sources in
 `<target>/src` (`common/src`, `jvm/src`) aren't seen: 93 of 2457 files.
 
 The pass checks files in batches of 128 and evicts cached results between
-them: peak RSS ≈ 290 MB (finops-mono, billing-mono), ≈ 440 MB
-(crypto-gateway-be).
+them: peak RSS ≈ 290 MB (backends A and C), ≈ 440 MB (backend B).
