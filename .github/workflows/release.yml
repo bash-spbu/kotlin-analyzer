@@ -42,13 +42,13 @@ jobs:
   server:
     needs: versions
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
