@@ -1,107 +1,120 @@
 # kotlin-analyzer
 
-A Kotlin language server for JVM projects (Gradle, Spring and the like),
-written in Rust and designed after
-[rust-analyzer](https://github.com/rust-lang/rust-analyzer): an incremental
-database of queries over the workspace, a semantic model in front of it, and
-editor features as pure functions of a snapshot.
+A self-contained, lightweight Kotlin language server written in Rust, built
+the way [rust-analyzer](https://github.com/rust-lang/rust-analyzer) is, with
+its own extensions for VS Code, Neovim, Helix and Zed. It reads Kotlin JVM,
+Kotlin Multiplatform and Android projects from their Gradle build, and Java
+for navigation and types.
 
-Kotlin gets the full feature set. Java — in the workspace, the JDK and
-libraries — is read for navigation, hover and types.
+- **Low latency:** hover and go-to-definition usually answer in a fraction
+  of a millisecond, and diagnostics come back a few milliseconds after an edit
+  (see [Benchmarks](#benchmarks)).
+- **Low resource use, even on large projects:** no JVM of its own (Gradle runs once, to
+  export the build's model) and no background compiler. ktor's 2,300 files load in about 2 seconds and stay at about
+  250 MB.
+- **Made to be customised by AI agents.** No language server can cover every
+  combination of SDK, Kotlin and Gradle versions, build scripts and project
+  conventions, and no editor extension suits everyone. Instead of trying to,
+  this project is laid out so your own AI agent can adapt the server or an
+  extension to your project quickly and with few tokens. A missing feature
+  usually takes a couple of hundred lines in the right place. The agent's
+  starting points are:
+  - [`AGENTS.md`](AGENTS.md): the working rules;
+  - [`docs/spec/`](docs/spec/): what every feature does, and when it stays
+    silent;
+  - `editors/*/README.md`: one per editor;
+  - `cargo xtask check` with fixture tests, which tell the agent when a
+    change is right.
 
-**Status:** milestones M1–M6 of the plan are in.
+Features:
+- go-to definition (into library sources), implementation, hover;
+- completion with auto-import, signature help;
+- references and rename;
+- semantic highlighting, inlay type hints, symbols, folding;
+- diagnostics with quick fixes, which report only what they are sure of;
+- Gradle tasks in every editor (build, clean, test a module).
 
-- **Model:** the project model from Gradle, exported by the server itself.
-- **Declarations and resolution:** declarations of every Kotlin and Java
-  file and of every library on the classpath, read straight from class files
-  and Kotlin metadata; the JDK comes from `ct.sym`. Names resolve per module,
-  through sources and libraries.
-- **Bodies:** type inference in bodies — calls and overloads, generics,
-  lambdas, smart casts.
-- **LSP features:**
-  - definition (into sources JARs and the JDK's `src.zip`), hover, inlay type
-    hints;
-  - completion with auto-import, signature help;
-  - references and rename;
-  - semantic tokens, folding, document and workspace symbols;
-  - diagnostics with quick fixes: syntax, missing imports, argument count,
-    unsafe calls on nullable receivers, non-exhaustive `when`, unused imports,
-    missing package.
+## How to install
 
-See `docs/spec/` for what each does, and when it stays silent.
-
-## Editors
-
-| editor | where | the server binary |
-|---|---|---|
-| VS Code | [`editors/vscode`](editors/vscode/README.md): a `.vsix` from the releases, with its own Kotlin grammar | downloaded on first use (or the `PATH`, or a setting) |
-| Neovim 0.11+ | [`editors/neovim`](editors/neovim/README.md): a plugin, `require("kotlin_analyzer").setup()` | downloaded on first use (or the `PATH`, or `cmd`) |
-| Helix | [`editors/helix`](editors/helix/README.md): `install.sh` adds the server to `languages.toml` | `install.sh` installs it into `~/.local/bin` |
-| Zed | [`editors/zed`](editors/zed/README.md): a dev extension with the Kotlin language too | downloaded on first use (or the `PATH`, or a setting) |
-
-Releases (tags `v<version>`, built by `.github/workflows/release.yml`) carry
-the server for macOS and Linux on arm64 and x86_64 as
-`kotlin-analyzer-<target>.gz` with a `.sha256` each, and the VS Code
-extension. `editors/install-server.sh` installs a release by hand. Each
-editor integration downloads the release of its own version;
-`cargo xtask versions` checks that the versions agree.
-
-Every editor also gets Gradle tasks for the open file's build:
-
-- `gradle build -x test`;
-- `gradle clean`;
-- `gradle test --rerun-tasks` for the file's project or one of its parents.
-
-The tasks run `editors/gradle/gradle_task.py`, and need `python3`.
-
-From source: `cargo install --path crates/kotlin-analyzer` puts
-`kotlin-analyzer` on the `PATH`, which every editor prefers to a download.
-
-## Project model
-
-On opening a Gradle build, the server runs the bundled init script in the
-background and keeps the result in its cache. To export by hand instead
-(for example, to commit it or point several tools at it):
+Releases cover macOS and Linux on arm64 and x86_64. The VS Code, Neovim and
+Zed extensions download the server on first use. They use `kotlin-analyzer`
+from the `PATH` instead, if it is there:
 
 ```bash
-./gradlew --no-configuration-cache -Dorg.gradle.isolated-projects=false \
-    --init-script /path/to/kotlin-analyzer/editors/gradle/kotlin-analyzer.init.gradle kotlinAnalyzerModel
+cargo install --git https://github.com/bash-spbu/kotlin-analyzer kotlin-analyzer
 ```
 
-which writes `.kotlin-analyzer/project.json`. JVM, Kotlin Multiplatform and
-Android modules are read; Android builds need the SDK (`ANDROID_HOME` or
-`local.properties`), as for any Gradle run. Until a model is there,
-modules and source sets are guessed from the directory layout.
+Android projects need the SDK, the same as Gradle does: set `ANDROID_HOME`,
+or set `sdk.dir` in `local.properties`.
 
-## Layout
-
-| crate | what it holds |
-|---|---|
-| `crates/vfs` | file ids, file contents and open-editor overlays, line index |
-| `crates/syntax` | Kotlin / Java syntax trees and their typed view |
-| `crates/project-model` | Gradle modules, source sets, classpaths, the JDK |
-| `crates/base-db` | the incremental database's inputs |
-| `crates/hir-def` | item trees, per-module definition maps, body scopes |
-| `crates/hir-ty` | types, members, inference |
-| `crates/hir` | the semantic API features use |
-| `crates/ide` | editor features and diagnostics |
-| `crates/classfile` | compiled classes: JARs, class files, JVM signatures, Kotlin metadata |
-| `crates/kotlin-analyzer` | the server binary and its measuring tools |
-
-## Building
+**VS Code**
 
 ```bash
-cargo build --release
-cargo xtask check   # layering rule, editor versions, fmt, clippy, tests
+curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v0.1.0/kotlin-analyzer-0.1.0.vsix
+code --install-extension kotlin-analyzer-0.1.0.vsix
 ```
 
-The editor integrations' tests run against `target/release/kotlin-analyzer`:
+**Neovim** (0.11+, with [lazy.nvim](https://github.com/folke/lazy.nvim))
+
+```lua
+{
+  "bash-spbu/kotlin-analyzer",
+  ft = { "kotlin", "java" },
+  config = function(plugin)
+    vim.opt.runtimepath:append(plugin.dir .. "/editors/neovim")
+    require("kotlin_analyzer").setup()
+  end,
+}
+```
+
+**Helix**: installs the server into `~/.local/bin` and adds it to
+`languages.toml`.
 
 ```bash
-(cd editors/vscode && npm ci && npm run check && npm run test:integration)
-editors/neovim/test/run.sh
-python3 -I editors/gradle/test_gradle_task.py   # also part of cargo xtask check
+git clone https://github.com/bash-spbu/kotlin-analyzer && kotlin-analyzer/editors/helix/install.sh
 ```
+
+**Zed**
+
+```bash
+git clone https://github.com/bash-spbu/kotlin-analyzer
+```
+
+Then run *zed: install dev extension* and pick `kotlin-analyzer/editors/zed`.
+
+Each editor's settings are in its README under
+[`editors/`](editors/).
+
+## Benchmarks
+
+The server was measured on three large open-source Kotlin projects, each
+with the model its Gradle build exports (Gradle's own time is not counted):
+
+| | [ktor](https://github.com/ktorio/ktor) `07bb933` | [nowinandroid](https://github.com/android/nowinandroid) `2982e63` | [kotlinconf-app](https://github.com/JetBrains/kotlinconf-app) `146e891` |
+|---|---|---|---|
+| Kind | Multiplatform library | Android app | Multiplatform app |
+| Kotlin files / modules | 2,344 / 137 | 281 / 45 | 260 / 10 |
+| Libraries indexed | 386 JARs, 100k names | 399 JARs, 72k names | 317 JARs, 28k names |
+| Workspace load (open to ready) | 2.3 s | 1.8 s | 0.5 s |
+| Memory after a session | 259 MB | 160 MB | 107 MB |
+| Type references resolved | 90.6% | 97.3% | 92.9% |
+| Checking every file (CLI) | 7.8 s, peak 430 MB | 2.4 s, peak 221 MB | 1.9 s, peak 152 MB |
+| Open a file → diagnostics, p50 / p95 | 4 / 128 ms | 7 / 111 ms | 4 / 81 ms |
+| Edit → fresh diagnostics, p50 / p95 | 1.3 / 17 ms | 1.4 / 4 ms | 1.3 / 7 ms |
+| Hover, p95 | 0.8 ms | 1.5 ms | 0.3 ms |
+| Go to definition, p95 | 0.1 ms | 1.2 ms | 0.1 ms |
+| Completion, p50 / p95 | 6 / 39 ms | 9 / 49 ms | 7 / 23 ms |
+
+How it was measured:
+- Machine: MacBook Pro (Mac16,8), Apple M4 Pro with 12 cores (8
+  performance, 4 efficiency), 24 GB RAM, macOS 27.2.
+- Build: a release build of `kotlin-analyzer` 0.1.0 (Rust 1.99), with a
+  warm filesystem cache.
+- Latencies: over stdio, the way an editor talks to the server. 40 random
+  files per project were each opened, then queried for hover and definition
+  at 5 random names and for completion after 2 dots, then edited by adding a
+  top-level declaration.
+- Workspace check: `kotlin-analyzer diagnostics`.
 
 ## License
 
