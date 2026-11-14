@@ -12,3 +12,4 @@
 /editors/vscode/*.vsix
 /editors/vscode/LICENSE
 __pycache__/
+/AGENTS.local.md
