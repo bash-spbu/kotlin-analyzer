@@ -105,6 +105,34 @@ local function downloads()
     assert(vim.endswith(uri, "/Box.kt"), uri)
   end)
 
+  check(":KotlinGradle runs Gradle for the file's project or a parent", function()
+    vim.cmd.edit(vim.fs.joinpath(sources, "Box.kt"))
+    local completions = vim.fn.getcompletion("KotlinGradle test ", "cmdline")
+    assert(vim.deep_equal(completions, { ":app", ":" }), vim.inspect(completions))
+    local call_file = vim.env.GRADLE_CALL
+    local cases = {
+      { "KotlinGradle build", { "build", "-x", "test" } },
+      { "KotlinGradle clean", { "clean" } },
+      { "KotlinGradle test", { "-p", "app", "test", "--rerun-tasks" } },
+      { "KotlinGradle test :", { "test", "--rerun-tasks" } },
+    }
+    for _, case in ipairs(cases) do
+      vim.fn.delete(call_file)
+      local source_window = vim.api.nvim_get_current_win()
+      vim.cmd(case[1])
+      local lines = wait_for("gradle from " .. case[1], function()
+        local written = vim.uv.fs_stat(call_file) and vim.fn.readfile(call_file) or {}
+        return #written > 0 and written or nil
+      end)
+      vim.cmd("stopinsert")
+      vim.cmd.close()
+      vim.api.nvim_set_current_win(source_window)
+      assert(vim.uv.fs_realpath(lines[1]) == vim.uv.fs_realpath(workspace), lines[1])
+      local arguments = vim.list_slice(lines, 2)
+      assert(vim.deep_equal(arguments, case[2]), case[1] .. ": " .. vim.inspect(arguments))
+    end
+  end)
+
   check(":KotlinAnalyzerReload runs the server's reload", function()
     local errors_before = #vim.tbl_filter(function(message)
       return message.level == vim.log.levels.ERROR

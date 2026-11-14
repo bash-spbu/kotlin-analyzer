@@ -31,6 +31,25 @@ directory with a `settings.gradle(.kts)` or `build.gradle(.kts)`, up to the
 version-control root. The server then exports the build's model in the
 background.
 
+## Gradle
+
+Helix has no tasks, so `install.sh` binds keys to `:sh` in
+`~/.config/helix/config.toml` (from [`config.toml`](config.toml)), unless
+`Space G` is taken already. The output shows in a popup once Gradle is done.
+
+- `Space G b` runs `gradle build -x test`.
+- `Space G c` runs `gradle clean`.
+- `Space G t` runs `gradle test --rerun-tasks` in the current file's project
+  and its subprojects. From a parent's `build.gradle.kts`, it tests the
+  parent's group.
+
+`install.sh` copies the script to
+`~/.local/share/kotlin-analyzer/gradle_task.py`. The project holding the file is its nearest ancestor directory with a
+`build.gradle(.kts)`, and the build's root is the nearest one with a
+`settings.gradle(.kts)`. Gradle is the root's `gradlew`, else `gradle` on
+the `PATH`. `python3` must be on the `PATH`; the tasks are run by
+`editors/gradle/gradle_task.py`.
+
 ## Settings
 
 `config` under `[language-server.kotlin-analyzer]` is sent as the server's

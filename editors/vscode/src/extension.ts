@@ -9,6 +9,7 @@ import {
   type ServerOptions,
 } from "vscode-languageclient/node";
 
+import { registerGradleTasks } from "./gradle";
 import { findServer, type ServerBinary } from "./server";
 import { RESTART_SETTINGS, initializationOptions } from "./settings";
 
@@ -32,6 +33,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Api> {
     output,
     vscode.commands.registerCommand(`${SECTION}.restartServer`, () => restart(context)),
     vscode.commands.registerCommand(`${SECTION}.showLogs`, () => output?.show()),
+    registerGradleTasks(context),
     vscode.workspace.onDidChangeConfiguration((change) => {
       const needsRestart = RESTART_SETTINGS.some((setting) => change.affectsConfiguration(setting));
       if (needsRestart) {

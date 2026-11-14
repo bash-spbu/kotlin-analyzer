@@ -38,6 +38,9 @@ printf 'rootProject.name = "demo"\ninclude("app")\n' > "$workspace/settings.grad
 printf 'package app\n\nclass Box(val size: Int)\n' > "$workspace/app/src/main/kotlin/app/Box.kt"
 printf 'package app\n\nfun use(): Int = Box(3).size\n' > "$workspace/app/src/main/kotlin/app/Use.kt"
 printf 'package app\n\nfun broken( {\n' > "$workspace/app/src/main/kotlin/app/Broken.kt"
+# Records where and how it was called instead of running Gradle.
+printf '#!/bin/sh\n{ pwd; for argument in "$@"; do echo "$argument"; done; } > "$GRADLE_CALL"\n' > "$workspace/gradlew"
+chmod +x "$workspace/gradlew"
 
 neovim=$(command -v nvim)
 run() {
@@ -48,6 +51,7 @@ run() {
         XDG_DATA_HOME="$scratch/data-$kind" XDG_STATE_HOME="$scratch/state" \
         XDG_CONFIG_HOME="$scratch/config" \
         KOTLIN_ANALYZER_DOWNLOADS="file://$scratch/$kind" \
+        GRADLE_CALL="$scratch/gradle-call" \
         "$neovim" --clean --headless --cmd "set runtimepath^=$plugin" \
         -l "$plugin/test/checks.lua" "$@"
 }

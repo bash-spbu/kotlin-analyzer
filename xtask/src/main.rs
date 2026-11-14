@@ -4,7 +4,8 @@
 //!   layer allows (see [`ALLOWED_DEPENDENCIES`]);
 //! - the editor integrations download the server's own version (see
 //!   [`check_versions`]); `cargo xtask versions` runs only this;
-//! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.
+//! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`;
+//! - the editors' Gradle tasks: `editors/gradle/test_gradle_task.py`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -107,6 +108,14 @@ fn run_check() -> ExitCode {
             eprintln!("xtask: `cargo {}` failed", arguments.join(" "));
             return ExitCode::FAILURE;
         }
+    }
+    let gradle_tasks = Command::new("python3")
+        .args(["-I", "editors/gradle/test_gradle_task.py"])
+        .current_dir(&root)
+        .status();
+    if !gradle_tasks.is_ok_and(|status| status.success()) {
+        eprintln!("xtask: editors/gradle/test_gradle_task.py failed");
+        return ExitCode::FAILURE;
     }
     eprintln!("xtask: all checks passed");
     ExitCode::SUCCESS

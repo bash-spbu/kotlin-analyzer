@@ -16,6 +16,7 @@
   "keywords": ["kotlin", "java", "gradle", "language server"],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onTaskType:kotlin-gradle",
     "onLanguage:kotlin",
     "onLanguage:java",
     "workspaceContains:settings.gradle.kts",
@@ -36,6 +37,23 @@
         "language": "kotlin",
         "scopeName": "source.kotlin",
         "path": "./syntaxes/kotlin.tmLanguage.json"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "kotlin-gradle",
+        "required": ["task", "path"],
+        "properties": {
+          "task": {
+            "type": "string",
+            "enum": ["build", "clean", "test"],
+            "markdownDescription": "`build`: `gradle build -x test`; `clean`: `gradle clean`; `test`: `gradle test --rerun-tasks` in the project at `path` and its subprojects."
+          },
+          "path": {
+            "type": "string",
+            "markdownDescription": "A file or directory in the build, e.g. `${file}` or `${workspaceFolder}/services`. For `test`, the project holding it is tested."
+          }
+        }
       }
     ],
     "semanticTokenModifiers": [
@@ -125,7 +143,7 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify --sourcemap",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify --sourcemap && cp ../gradle/gradle_task.py dist/gradle_task.py",
     "compile-tests": "tsc -p .",
     "check": "tsc -p . --noEmit && npm run test:unit && npm run test:grammar",
     "test:unit": "tsc -p . && node --test 'out/test/unit/**/*.test.js'",

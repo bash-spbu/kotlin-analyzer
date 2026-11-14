@@ -46,6 +46,14 @@ extension. `editors/install-server.sh` installs a release by hand. Each
 editor integration downloads the release of its own version;
 `cargo xtask versions` checks that the versions agree.
 
+Every editor also gets Gradle tasks for the open file's build:
+
+- `gradle build -x test`;
+- `gradle clean`;
+- `gradle test --rerun-tasks` for the file's project or one of its parents.
+
+The tasks run `editors/gradle/gradle_task.py`, and need `python3`.
+
 From source: `cargo install --path crates/kotlin-analyzer` puts
 `kotlin-analyzer` on the `PATH`, which every editor prefers to a download.
 
@@ -89,6 +97,7 @@ The editor integrations' tests run against `target/release/kotlin-analyzer`:
 ```bash
 (cd editors/vscode && npm ci && npm run check && npm run test:integration)
 editors/neovim/test/run.sh
+python3 -I editors/gradle/test_gradle_task.py   # also part of cargo xtask check
 ```
 
 ## License

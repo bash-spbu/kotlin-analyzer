@@ -11,3 +11,4 @@
 /editors/vscode/out
 /editors/vscode/*.vsix
 /editors/vscode/LICENSE
+__pycache__/

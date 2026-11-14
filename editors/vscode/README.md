@@ -46,6 +46,29 @@ Open the Gradle build's root folder. The server exports the build's model
 in the background, then reloads; until then it works from the directory
 layout.
 
+## Gradle tasks
+
+*Tasks: Run Task → kotlin-analyzer* offers, for the active file's build:
+
+| task | runs, in the build's root |
+|---|---|
+| `gradle build -x test` (build group) | build everything, without tests |
+| `gradle clean` (clean group) | delete the build's outputs |
+| `gradle test --rerun-tasks: :services:payments` (test group) | `gradlew -p services/payments test --rerun-tasks`: the project and its subprojects |
+
+There is one test task for the file's project and one for each parent up to
+the root (`:services`, `:`), for testing a group of projects. The project holding the file is its nearest ancestor directory with a
+`build.gradle(.kts)`, and the build's root is the nearest one with a
+`settings.gradle(.kts)`. Gradle is the root's `gradlew`, else `gradle` on
+the `PATH`. `python3` must be on the `PATH`; the tasks are run by
+`editors/gradle/gradle_task.py`.
+
+In `tasks.json`:
+
+```json
+{ "type": "kotlin-gradle", "task": "test", "path": "${workspaceFolder}/services" }
+```
+
 ## Settings
 
 | setting | |

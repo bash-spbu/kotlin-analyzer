@@ -48,6 +48,9 @@ async function main(): Promise<void> {
   // included, so the PATH without the server goes to VS Code itself — which
   // mustn't add the login shell's (--force-disable-user-env).
   process.env.PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+  // The Gradle tasks run in VS Code's terminals, whose environment is VS
+  // Code's: the recording gradlew writes its call here.
+  process.env.GRADLE_CALL = path.join(scratch, "gradle-call");
   try {
     await runTests({
       vscodeExecutablePath: process.env.VSCODE_EXECUTABLE,
@@ -64,6 +67,7 @@ async function main(): Promise<void> {
         KOTLIN_ANALYZER_DOWNLOADS: downloads,
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
         KOTLIN_ANALYZER_TEST_WORKSPACE: workspace,
+        GRADLE_CALL: path.join(scratch, "gradle-call"),
       },
     });
   } finally {
@@ -83,6 +87,17 @@ async function writeWorkspace(root: string): Promise<void> {
   await fs.writeFile(path.join(sources, "Box.kt"), "package app\n\nclass Box(val size: Int)\n");
   await fs.writeFile(path.join(sources, "Use.kt"), "package app\n\nfun use(): Int = Box(3).size\n");
   await fs.writeFile(path.join(sources, "Broken.kt"), "package app\n\nfun broken( {\n");
+  await fs.writeFile(path.join(root, "settings.gradle.kts"), 'rootProject.name = "demo"\ninclude("lib")\n');
+  await fs.writeFile(path.join(root, "build.gradle.kts"), "");
+  await fs.mkdir(path.join(root, "lib/src/main/kotlin/lib"), { recursive: true });
+  await fs.writeFile(path.join(root, "lib/build.gradle.kts"), "");
+  await fs.writeFile(path.join(root, "lib/src/main/kotlin/lib/Lib.kt"), "package lib\n\nclass Lib\n");
+  // Records where and how it was called instead of running Gradle.
+  await fs.writeFile(
+    path.join(root, "gradlew"),
+    '#!/bin/sh\n{ pwd; for argument in "$@"; do echo "$argument"; done; } > "$GRADLE_CALL"\n',
+    { mode: 0o755 },
+  );
 }
 
 main().catch((error) => {

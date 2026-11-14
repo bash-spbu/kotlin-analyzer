@@ -80,6 +80,7 @@ local function create_commands(options)
   vim.api.nvim_create_user_command("KotlinAnalyzerReload", reload_workspace, {
     desc = "Export the Gradle model again if the build changed, and reload every file",
   })
+  require("kotlin_analyzer.gradle").create_command()
   vim.api.nvim_create_user_command("KotlinAnalyzerInstall", function()
     vim.fn.delete(release.binary(version))
     install_release(options)

@@ -1,0 +1,10 @@
+# Gradle for the current file's build, under Space G (install.sh puts the
+# script's path in; output appears in a popup when Gradle is done):
+#   Space G b  gradle build -x test
+#   Space G c  gradle clean
+#   Space G t  gradle test --rerun-tasks in the file's project and its
+#              subprojects (from a parent's build.gradle.kts: the parent)
+[keys.normal.space.G]
+b = ":sh python3 -I GRADLE_TASK build %{buffer_name}"
+c = ":sh python3 -I GRADLE_TASK clean %{buffer_name}"
+t = ":sh python3 -I GRADLE_TASK test %{buffer_name}"

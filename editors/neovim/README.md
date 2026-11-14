@@ -87,6 +87,20 @@ Inlay hints are off by default in Neovim; turn them on with
 
 ## Commands
 
+- `:KotlinGradle build` runs `gradle build -x test`, `:KotlinGradle clean`
+  runs `gradle clean`.
+- `:KotlinGradle test [project]` runs `gradle test --rerun-tasks` in the
+  current file's project and its subprojects. The optional `[project]` is the
+  file's project or a parent, by Gradle path; `<Tab>` completes them
+  (`:services:payments`, `:services`, `:`). This is how to test a group of
+  projects.
+
+  Gradle runs in a terminal split, in the build's root. The project holding the file is its nearest ancestor directory with a
+  `build.gradle(.kts)`, and the build's root is the nearest one with a
+  `settings.gradle(.kts)`. Gradle is the root's `gradlew`, else `gradle` on
+  the `PATH`. `python3` must be on the `PATH`; the tasks are run by
+  `editors/gradle/gradle_task.py`.
+
 - `:KotlinAnalyzerReload` exports the model again if the build changed, then
   reloads every file.
 - `:KotlinAnalyzerInstall` downloads the plugin's release again.

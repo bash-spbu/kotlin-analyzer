@@ -2,6 +2,7 @@
 // workspace run.ts wrote and fails the run by throwing.
 
 import { strict as assert } from "node:assert";
+import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -18,6 +19,7 @@ export async function run(): Promise<void> {
     ["a Kotlin file gets the grammar and the server's diagnostics", () => reportsSyntaxErrors(sources)],
     ["hover and definition reach the server", () => hoversAndNavigates(sources)],
     ["the server's reload command is in the palette", () => reloads()],
+    ["Gradle tasks build, clean and test the file's project or a parent", () => runsGradleTasks(workspace)],
   ];
   const failures: string[] = [];
   for (const [name, check] of checks) {
@@ -86,6 +88,40 @@ async function reloads(): Promise<void> {
   const commands = await vscode.commands.getCommands(true);
   assert.ok(commands.includes("kotlin-analyzer.reloadWorkspace"), "registered from the server's capabilities");
   await vscode.commands.executeCommand("kotlin-analyzer.reloadWorkspace");
+}
+
+async function runsGradleTasks(workspace: string): Promise<void> {
+  await vscode.window.showTextDocument(vscode.Uri.file(path.join(workspace, "lib/src/main/kotlin/lib/Lib.kt")));
+  const tasks = await vscode.tasks.fetchTasks({ type: "kotlin-gradle" });
+  assert.deepEqual(
+    tasks.map((task) => task.name),
+    ["gradle build -x test", "gradle clean", "gradle test --rerun-tasks: :lib", "gradle test --rerun-tasks: :"],
+  );
+  const expected: Record<string, string[]> = {
+    "gradle build -x test": ["build", "-x", "test"],
+    "gradle clean": ["clean"],
+    "gradle test --rerun-tasks: :lib": ["-p", "lib", "test", "--rerun-tasks"],
+    "gradle test --rerun-tasks: :": ["test", "--rerun-tasks"],
+  };
+  const callFile = process.env.GRADLE_CALL;
+  assert.ok(callFile, "run.ts sets GRADLE_CALL");
+  for (const task of tasks) {
+    await fs.rm(callFile, { force: true });
+    const ended = new Promise<number | undefined>((resolve) => {
+      const listener = vscode.tasks.onDidEndTaskProcess((event) => {
+        if (event.execution.task.name === task.name) {
+          listener.dispose();
+          resolve(event.exitCode);
+        }
+      });
+    });
+    await vscode.tasks.executeTask(task);
+    assert.equal(await ended, 0, task.name);
+    const call: string[] = (await fs.readFile(callFile, "utf8")).trim().split("\n");
+    const [directory, ...gradleArguments] = call;
+    assert.equal(await fs.realpath(directory ?? ""), await fs.realpath(workspace), task.name);
+    assert.deepEqual(gradleArguments, expected[task.name], task.name);
+  }
 }
 
 /** Polls `probe` until it gives a value. */

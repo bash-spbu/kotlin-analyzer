@@ -1,5 +1,6 @@
 **
 !dist/extension.js
+!dist/gradle_task.py
 !syntaxes/**
 !language-configuration.json
 !package.json

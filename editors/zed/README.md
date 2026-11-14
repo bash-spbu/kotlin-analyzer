@@ -40,6 +40,27 @@ The server binary is the first of:
    downloads are removed. Releases exist for macOS and Linux on arm64 and
    x86_64.
 
+## Gradle tasks
+
+With a Kotlin file open, *task: spawn* offers:
+
+| task | runs, in the build's root |
+|---|---|
+| `gradle build -x test` | build everything, without tests |
+| `gradle clean` | delete the build's outputs |
+| `gradle test --rerun-tasks: this file's project` | `gradlew -p <project> test --rerun-tasks`: the file's project and its subprojects |
+| `gradle test --rerun-tasks: choose the project or a parent` | lists the file's project and its parents up to the root (`:services:payments`, `:services`, `:`), and tests the one you pick |
+
+To test a group of projects, run the test task from the parent's
+`build.gradle.kts`, or pick the parent from the list. The project holding the file is its nearest ancestor directory with a
+`build.gradle(.kts)`, and the build's root is the nearest one with a
+`settings.gradle(.kts)`. Gradle is the root's `gradlew`, else `gradle` on
+the `PATH`. `python3` must be on the `PATH`; the tasks are run by
+`editors/gradle/gradle_task.py`.
+Zed tasks can't reach a file inside an extension, so
+`languages/kotlin/tasks.json` embeds the script. `editors/gradle/zed_tasks.py`
+writes that file, and `editors/gradle/test_gradle_task.py` checks it.
+
 ## Settings
 
 Under `lsp.kotlin-analyzer`:
