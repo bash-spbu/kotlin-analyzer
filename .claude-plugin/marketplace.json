@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kotlin-analyzer",
+  "description": "kotlin-analyzer, a lightweight Kotlin language server in Rust, for Claude Code",
+  "owner": {
+    "name": "bash-spbu"
+  },
+  "plugins": [
+    {
+      "name": "kotlin-analyzer",
+      "source": "./editors/claude-code",
+      "description": "Kotlin code intelligence from kotlin-analyzer: definitions, references, hover and diagnostics for Kotlin JVM, Multiplatform and Android projects",
+      "category": "development"
+    }
+  ]
+}

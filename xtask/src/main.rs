@@ -163,16 +163,21 @@ fn check_layers(root: &Path) -> Vec<String> {
     violations
 }
 
-/// Where an editor integration states which server release it downloads:
-/// the file, and the text the version follows (in quotes).
+/// Where an editor integration states its version: the file, and the text
+/// the version follows (in quotes).
 const EDITOR_VERSIONS: &[(&str, &str)] = &[
     ("editors/vscode/package.json", "\"version\":"),
     ("editors/neovim/lua/kotlin_analyzer/version.lua", "return"),
     ("editors/zed/src/release.rs", "SERVER_VERSION: &str ="),
+    (
+        "editors/claude-code/.claude-plugin/plugin.json",
+        "\"version\":",
+    ),
 ];
 
-/// Every editor integration whose version isn't the server's: each
-/// downloads the release tagged with its own version, so they must agree.
+/// Every editor integration whose version isn't the server's. The
+/// extensions download the release tagged with their own version, and the
+/// Claude Code plugin is released with the server, so they must agree.
 fn check_versions(root: &Path) -> Vec<String> {
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let Some(server_version) = workspace_version(&workspace_manifest) else {

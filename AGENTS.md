@@ -19,6 +19,8 @@ rules of whoever owns this checkout.
      caps the output.
    - `kotlin-analyzer analysis-stats <root>` reports load time, memory, and
      how many type names resolve.
+   - `python3 -I bench/lsp_latency.py <root> --project-json <model>`
+     measures editor latencies over stdio.
    - `kotlin-analyzer parse <file>` prints the syntax tree.
    - `kotlin-analyzer definition <root> <project.json> <file> <line>
      <column>` answers go-to-definition.
@@ -66,7 +68,7 @@ rules of whoever owns this checkout.
 | a diagnostic | `crates/ide/src/diagnostics/`; `facts.rs` turns inference facts into diagnostics, `imports.rs`, `package.rs`. Spec: `docs/spec/diagnostics.md` |
 | an editor feature (hover, completion, rename, …) | `crates/ide/src/<feature>.rs`, exposed by `crates/ide/src/lib.rs`, wired in `crates/kotlin-analyzer/src/server/handlers.rs` / `editing.rs`; capabilities in `server/mod.rs`; settings in `server/settings.rs` |
 | loading, reloading, the Gradle export the server runs | `crates/kotlin-analyzer/src/load.rs`, `server/gradle_export.rs` |
-| an editor extension | `editors/vscode` (`npm run check`, `npm run test:integration`), `editors/neovim` (`test/run.sh`), `editors/helix`, `editors/zed` (`cargo test`). Gradle tasks: `editors/gradle/gradle_task.py`; Zed embeds it: run `python3 -I editors/gradle/zed_tasks.py` after changing it |
+| an editor extension | `editors/vscode` (`npm run check`, `npm run test:integration`), `editors/neovim` (`test/run.sh`), `editors/helix`, `editors/zed` (`cargo test`), `editors/claude-code` (`claude plugin validate --strict editors/claude-code`; the marketplace is `.claude-plugin/marketplace.json`). Gradle tasks: `editors/gradle/gradle_task.py`; Zed embeds it: run `python3 -I editors/gradle/zed_tasks.py` after changing it |
 
 `docs/spec/` says what each feature does and when it stays silent. Update it
 with the behaviour you change.

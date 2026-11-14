@@ -4,11 +4,15 @@
 
 # kotlin-analyzer
 
-A self-contained, lightweight Kotlin language server written in Rust, built
-the way [rust-analyzer](https://github.com/rust-lang/rust-analyzer) is, with
-its own extensions for VS Code, Neovim, Helix and Zed. It reads Kotlin JVM,
-Kotlin Multiplatform and Android projects from their Gradle build, and Java
-for navigation and types.
+A self-contained, lightweight Kotlin language server (Kotlin LSP) written in
+Rust, built the way
+[rust-analyzer](https://github.com/rust-lang/rust-analyzer) is, with its own
+extensions for VS Code, Neovim, Helix, Zed and Claude Code. It reads Kotlin
+JVM, Kotlin Multiplatform and Android projects from their Gradle build, and
+Java for navigation and types. It is an alternative to JetBrains'
+[kotlin-lsp](https://github.com/Kotlin/kotlin-lsp) and to
+[kotlin-language-server](https://github.com/fwcd/kotlin-language-server):
+see [Compared with other Kotlin language servers](#compared-with-other-kotlin-language-servers).
 
 **Status: stable.** It is ready for everyday use on the kinds of projects
 listed under [Tested on](#tested-on).
@@ -40,6 +44,25 @@ Features:
 - semantic highlighting, inlay type hints, symbols, folding;
 - diagnostics with quick fixes, which report only what they are sure of;
 - Gradle tasks in every editor (build, clean, test a module).
+
+### Compared with other Kotlin language servers
+
+| | kotlin-analyzer | [JetBrains kotlin-lsp](https://github.com/Kotlin/kotlin-lsp) | [fwcd kotlin-language-server](https://github.com/fwcd/kotlin-language-server) |
+|---|---|---|---|
+| Status | stable | alpha | deprecated by its README in favour of kotlin-lsp |
+| Runs as | one native binary, no JVM | a JVM application built on IntelliJ IDEA | a JVM application built on the Kotlin compiler |
+| Source | open, Apache-2.0 | partly closed source, Apache-2.0 | open, MIT |
+| Kotlin Multiplatform | yes (`expect`/`actual`, per source set) | planned | no |
+| Android | yes (variants, SDK, `R`) | experimental | no |
+| Build systems | Gradle; others by directory layout | Gradle, Maven | Gradle, Maven |
+| Editors with its own extension | VS Code, Neovim, Helix, Zed, Claude Code | VS Code; scripts for others | VS Code |
+| Diagnostics | only what it is sure of: imports, calls, nullability, `when`, packages | the full compiler's, with IntelliJ's quick fixes | the compiler's |
+| Refactorings | rename | rename, formatting, organize imports | rename |
+
+Choose kotlin-analyzer for large or multiplatform projects, low memory, or
+an editor other than VS Code, and when you want to change the server
+yourself or with an agent. Choose JetBrains' server for a JVM project where
+you want every compiler error, formatting and more quick fixes.
 
 ### Tested on
 
@@ -78,7 +101,14 @@ These may need work; your agent can usually add it (see above):
 
 Releases cover macOS and Linux on arm64 and x86_64. The VS Code, Neovim and
 Zed extensions download the server on first use. They use `kotlin-analyzer`
-from the `PATH` instead, if it is there:
+from the `PATH` instead, if it is there. To put it there, download the
+release into `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bash-spbu/kotlin-analyzer/main/editors/install-server.sh | sh
+```
+
+or build it:
 
 ```bash
 cargo install --git https://github.com/bash-spbu/kotlin-analyzer kotlin-analyzer
@@ -122,6 +152,17 @@ git clone https://github.com/bash-spbu/kotlin-analyzer
 
 Then run *zed: install dev extension* and pick `kotlin-analyzer/editors/zed`.
 
+**Claude Code**: with the server on the `PATH`, add this repository as a
+plugin marketplace and install the plugin:
+
+```bash
+claude plugin marketplace add bash-spbu/kotlin-analyzer
+```
+
+```bash
+claude plugin install kotlin-analyzer@kotlin-analyzer
+```
+
 Each editor's settings are in its README under
 [`editors/`](editors/).
 
@@ -155,6 +196,8 @@ How it was measured:
   at 5 random names and for completion after 2 dots, then edited by adding a
   top-level declaration.
 - Workspace check: `kotlin-analyzer diagnostics`.
+- Script: [`bench/lsp_latency.py`](bench/lsp_latency.py), run as
+  `python3 -I bench/lsp_latency.py <root> --project-json <model>`.
 
 ## Reporting issues
 
