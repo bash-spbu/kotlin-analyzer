@@ -10,7 +10,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 use super::declarations::Inferrer;
 use super::member_scope::data_flow_scope;
 use super::{LocalId, Reference, UnsafeCall};
-use crate::ty::{Nullability, Ty};
+use crate::ty::{ClassType, Nullability, Ty};
 
 /// Members every value has, which Kotlin also offers on a nullable
 /// receiver (`Any?.toString()`, `Any?.hashCode()`).
@@ -244,10 +244,49 @@ impl Inferrer<'_> {
         let target_is_narrower = holders
             .iter()
             .all(|holder| self.types.as_supertype(&target, holder.class).is_some());
-        if target_is_narrower {
-            target.non_null()
-        } else {
-            Ty::Unknown
+        if !target_is_narrower {
+            return Ty::Unknown;
+        }
+        match target {
+            Ty::Class(class) => Ty::Class(self.with_inferred_arguments(&holders, class)).non_null(),
+            other => other.non_null(),
+        }
+    }
+
+    /// `x is Value` for `x: ReferenceOr<Schema>`: a generic class tested
+    /// without arguments gets the ones `x`'s type gives it (`Value<A> :
+    /// ReferenceOr<A>`, so `Value<Schema>`); what it can't tell is unknown.
+    fn with_inferred_arguments(&self, holders: &[ClassType], target: ClassType) -> ClassType {
+        let declared = self.types.self_type(target.class);
+        let written_arguments = target.arguments.len() == declared.arguments.len()
+            && target
+                .arguments
+                .iter()
+                .any(|argument| *argument != Ty::Unknown && !declared.arguments.contains(argument));
+        if declared.arguments.is_empty() || written_arguments {
+            return target;
+        }
+        let mut inferred: Vec<Ty> = vec![Ty::Unknown; declared.arguments.len()];
+        for holder in holders {
+            let Some(as_holder) = self
+                .types
+                .as_supertype(&Ty::Class(declared.clone()), holder.class)
+            else {
+                continue;
+            };
+            for (through_target, known) in as_holder.arguments.iter().zip(holder.arguments.iter()) {
+                if let Some(index) = declared
+                    .arguments
+                    .iter()
+                    .position(|own| own == through_target)
+                {
+                    inferred[index] = known.clone();
+                }
+            }
+        }
+        ClassType {
+            arguments: inferred.into_boxed_slice(),
+            ..target
         }
     }
 

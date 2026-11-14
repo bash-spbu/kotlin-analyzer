@@ -713,3 +713,59 @@ package x
         "a module that doesn't depend on it"
     );
 }
+
+#[test]
+fn a_release_missing_from_ct_sym_falls_back_to_the_newest_one_before_it() {
+    use crate::library::newest_release_at_most;
+    // JDK 21's ct.sym: releases 8 to 20 (`K`) in full, 21 (`L`) in two
+    // entries — the current API is in the runtime image.
+    let mut jdk_21 = vec!["META-INF", "META-INF"];
+    // Each class covers every release, in one entry or several.
+    jdk_21.extend(["8", "9A", "BCDEFGHIJK"].repeat(10));
+    jdk_21.extend(["89ABCDEFGHIJK"].repeat(10));
+    jdk_21.extend(["KL", "L"]);
+    let newest = |requested| newest_release_at_most(jdk_21.iter().copied(), requested);
+    assert_eq!(newest('L'), Some('K'));
+    assert_eq!(newest('B'), Some('B'));
+    assert_eq!(newest('9'), Some('9'));
+    // META-INF's letters aren't releases: nothing for Java 7.
+    assert_eq!(newest('7'), None);
+    // A ct.sym that has its own release in full keeps it.
+    let jdk_25 = ["BCDEFGHIJKLMNOP", "P"];
+    assert_eq!(newest_release_at_most(jdk_25.into_iter(), 'P'), Some('P'));
+}
+
+#[test]
+fn only_jvm_source_sets_see_the_jdk() {
+    let mut parsed = Fixture::parse(
+        r#"
+//- /shared/jvm/x/Jvm.kt module=:shared set=jvmMain
+package x
+//- /shared/js/x/Js.kt module=:shared set=jsMain
+package x
+"#,
+    );
+    let jdk = base_db::LibrarySource {
+        archive: std::path::PathBuf::from("/jdk/lib/ct.sym"),
+        kind: base_db::ArchiveKind::JdkSymbols { release: 'L' },
+        sources: None,
+    };
+    let indexed = base_db::IndexedLibrary {
+        packages: vec![base_db::IndexedPackage {
+            package: Path::parse("java.lang"),
+            names: vec![intern::Name::new("Object")],
+            entries: Vec::new(),
+            module: None,
+        }],
+        stamp: base_db::ArchiveStamp::default(),
+    };
+    parsed
+        .database
+        .set_libraries(vec![(jdk, indexed)], vec![Vec::new(), Vec::new()], Some(0));
+    let db = &parsed.database;
+    let jvm = db.source_file(parsed.file("/shared/jvm/x/Jvm.kt")).unwrap();
+    let js = db.source_file(parsed.file("/shared/js/x/Js.kt")).unwrap();
+    let java_lang = Path::parse("java.lang");
+    assert!(crate::def_map::package_exists(db, jvm, &java_lang));
+    assert!(!crate::def_map::package_exists(db, js, &java_lang));
+}

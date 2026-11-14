@@ -16,7 +16,7 @@ pub use library::{
     LibrarySource,
 };
 pub use parse_cache::ParseCache;
-pub use project_model::{ProjectModel, SourceSetId};
+pub use project_model::{Classpath, Platform, ProjectModel, SourceSetId};
 pub use salsa;
 pub use syntax::{Language, Parse};
 pub use vfs::FileId;

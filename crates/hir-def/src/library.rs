@@ -60,12 +60,26 @@ fn place_of(kind: &ArchiveKind, name: &str) -> Option<EntryPlace> {
 pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
     let mut archive =
         classfile::Archive::open(&source.archive).map_err(|error| error.to_string())?;
+    let kind = match source.kind {
+        ArchiveKind::JdkSymbols { release } => {
+            let listed = (0..archive.len()).filter_map(|index| {
+                let name = archive.name(index)?;
+                name.split('/').next().map(str::to_owned)
+            });
+            let releases: Vec<String> = listed.collect();
+            ArchiveKind::JdkSymbols {
+                release: newest_release_at_most(releases.iter().map(String::as_str), release)
+                    .unwrap_or(release),
+            }
+        }
+        ArchiveKind::Jar => ArchiveKind::Jar,
+    };
     let mut packages: FxHashMap<Path, IndexedPackage> = FxHashMap::default();
     for index in 0..archive.len() {
         let Some(name) = archive.name(index).map(str::to_owned) else {
             continue;
         };
-        let Some(place) = place_of(&source.kind, &name) else {
+        let Some(place) = place_of(&kind, &name) else {
             continue;
         };
         let Some(bytes) = archive.read(index) else {
@@ -494,6 +508,36 @@ fn type_argument(argument: &classfile::TypeArgument) -> TypeArgument {
             type_ref: type_ref(inner),
         },
     }
+}
+
+/// The release `ct.sym` has for `requested`: itself, else the newest one
+/// before it — among the releases ct.sym describes in full. A JDK's own
+/// release is barely in its `ct.sym` (JDK 21's has two entries for 21: the
+/// current API is in its runtime image), and the one before is nearly the
+/// same API. `entry_directories` holds each entry's top-level directory:
+/// the letters of the releases sharing it (`9A`, `BCDEFGHIJK`).
+pub fn newest_release_at_most<'name>(
+    entry_directories: impl Iterator<Item = &'name str>,
+    requested: char,
+) -> Option<char> {
+    let mut entries_per_release: FxHashMap<char, usize> = FxHashMap::default();
+    let release_directories = entry_directories.filter(|directory| {
+        !directory.is_empty()
+            && directory
+                .chars()
+                .all(|char| char.is_ascii_digit() || char.is_ascii_uppercase())
+    });
+    for directory in release_directories {
+        for release in directory.chars() {
+            *entries_per_release.entry(release).or_default() += 1;
+        }
+    }
+    let most = entries_per_release.values().copied().max()?;
+    entries_per_release
+        .into_iter()
+        .filter(|(release, entries)| *release <= requested && entries * 2 >= most)
+        .map(|(release, _)| release)
+        .max()
 }
 
 /// The release letter `ct.sym` uses for a Java version: `8`, `9`, then

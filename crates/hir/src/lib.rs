@@ -6,8 +6,8 @@ pub use base_db::{
     RootDatabase, SourceDatabase, SourceFile, SourceSetId, parse, salsa,
 };
 pub use hir_def::def_map::{
-    importable_names, package_exists, package_names, package_prefix_exists, packages_declaring,
-    sees, visible_top_level,
+    classpath_complete, importable_names, package_exists, package_names, package_prefix_exists,
+    packages_declaring, sees, visible_top_level,
 };
 pub use hir_def::expect_actual::{
     Side as MultiplatformSide, expect_actual_family, side_of as multiplatform_side,

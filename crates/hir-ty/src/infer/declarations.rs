@@ -56,6 +56,9 @@ pub(super) struct ImplicitReceiver {
     /// What `this@label` calls it: the class's or the function's name.
     pub(super) label: Option<Name>,
     pub(super) super_of: SuperOf,
+    /// How many local scopes were open when it came into scope: locals of
+    /// those are outside it, and its members hide them.
+    pub(super) scope_depth: usize,
 }
 
 /// What `super` means where a receiver is in scope.
@@ -335,9 +338,32 @@ impl<'db> Inferrer<'db> {
         self.declare(spelled, TextRange::of(name), ty, kind)
     }
 
+    /// The local `name` means here — unless an implicit receiver that came
+    /// into scope inside the local's scope has a member of the name, which
+    /// Kotlin looks at first (`channel` in `produce { channel.send(x) }` is
+    /// the `ProducerScope`'s, not a constructor parameter's).
     pub(super) fn lookup_local(&self, name: Name) -> Option<LocalId> {
+        let (local, depth) = self.innermost_local(name)?;
+        let inner_receivers: Vec<Ty> = self
+            .receivers
+            .iter()
+            // A lambda's receiver comes right after the lambda's scope (its
+            // parameters are as near as it is), a class's or an extension's
+            // right before theirs: only a receiver of a scope nested in the
+            // local's hides it.
+            .filter(|receiver| receiver.scope_depth > depth + 1)
+            .map(|receiver| receiver.ty.clone())
+            .collect();
+        let hidden = inner_receivers
+            .iter()
+            .any(|receiver| !self.types.members_named(receiver, name).is_empty());
+        if hidden { None } else { Some(local) }
+    }
+
+    /// The innermost local named `name`, and the depth of its scope.
+    fn innermost_local(&self, name: Name) -> Option<(LocalId, usize)> {
         let mut inside_function = false;
-        for scope in self.scopes.iter().rev() {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
             let hidden = inside_function && scope.kind == ScopeKind::ConstructorParameters;
             if !hidden
                 && let Some((_, id)) = scope
@@ -346,7 +372,7 @@ impl<'db> Inferrer<'db> {
                     .rev()
                     .find(|(declared, _)| *declared == name)
             {
-                return Some(*id);
+                return Some((*id, depth));
             }
             inside_function |= scope.kind == ScopeKind::Function;
         }
@@ -399,6 +425,7 @@ impl<'db> Inferrer<'db> {
             ty,
             label,
             super_of: SuperOf::Nothing,
+            scope_depth: self.scopes.len(),
         });
     }
 
@@ -409,6 +436,7 @@ impl<'db> Inferrer<'db> {
             ty,
             label,
             super_of,
+            scope_depth: self.scopes.len(),
         });
     }
 

@@ -110,6 +110,39 @@ pub fn expect_actual_family(
     family
 }
 
+/// Drops the `expect` declarations among `candidates` that one of them on
+/// the `actual` side pairs with: where both are visible (platform code sees
+/// its common code), a name means the `actual`.
+pub fn hide_expects_with_actuals(db: &dyn SourceDatabase, candidates: &mut Vec<ItemLocation>) {
+    if candidates.len() < 2 {
+        return;
+    }
+    let sides: Vec<Side> = candidates
+        .iter()
+        .map(|candidate| side_of(db, *candidate))
+        .collect();
+    let has_both = sides.contains(&Side::Expect) && sides.contains(&Side::Actual);
+    if !has_both {
+        return;
+    }
+    let shape = |location: ItemLocation| {
+        let tree = item_tree(db, location.container);
+        shape_of(&tree, location.item)
+    };
+    let actual_shapes: Vec<Shape> = candidates
+        .iter()
+        .zip(&sides)
+        .filter(|(_, side)| **side == Side::Actual)
+        .map(|(candidate, _)| shape(*candidate))
+        .collect();
+    let mut index = 0;
+    candidates.retain(|candidate| {
+        let hidden = sides[index] == Side::Expect && actual_shapes.contains(&shape(*candidate));
+        index += 1;
+        !hidden
+    });
+}
+
 fn shape_of(tree: &ItemTree, item: ItemId) -> Shape {
     let mut names: Vec<Name> = tree
         .ancestors(item)

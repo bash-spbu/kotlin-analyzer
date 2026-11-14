@@ -12,6 +12,8 @@
 //!
 //! Each `//- /path` line starts a file. `module=:name` (default `:app`) and
 //! `set=name` (default `main`) say which source set it belongs to;
+//! `classpath=partial` marks the source set's classpath as only partly
+//! resolved by the build;
 //! `deps=:a,:b/test` lists the source sets it sees (`/main` by default). A
 //! single `$0` marks the cursor; it is removed from the text.
 
@@ -19,8 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use project_model::{
-    ModelOrigin, Module, ModuleId, ProjectModel, SourceSet as ModelSourceSet, SourceSetId,
-    SourceSetKind,
+    Classpath, ModelOrigin, Module, ModuleId, Platform, ProjectModel, SourceSet as ModelSourceSet,
+    SourceSetId, SourceSetKind,
 };
 use syntax::Language;
 use vfs::{FileId, Vfs};
@@ -42,6 +44,7 @@ struct FixtureFile {
     module: String,
     set: String,
     dependencies: Vec<(String, String)>,
+    classpath: Classpath,
     text: String,
 }
 
@@ -127,6 +130,7 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
             module: ":app".to_owned(),
             set: "main".to_owned(),
             dependencies: Vec::new(),
+            classpath: Classpath::Complete,
             text: String::new(),
         };
         for word in words {
@@ -134,6 +138,8 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
                 file.module = module.to_owned();
             } else if let Some(set) = word.strip_prefix("set=") {
                 file.set = set.to_owned();
+            } else if word == "classpath=partial" {
+                file.classpath = Classpath::Partial;
             } else if let Some(dependencies) = word.strip_prefix("deps=") {
                 file.dependencies = dependencies
                     .split(',')
@@ -184,14 +190,20 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
                     module: ModuleId(module_index as u32),
                     name: file.set.clone(),
                     kind: SourceSetKind::of_name(&file.set),
+                    platform: Platform::of_name(&file.set),
                     directories: Vec::new(),
                     dependencies: Vec::new(),
                     libraries: Vec::new(),
+                    classpath: file.classpath,
                 });
                 modules[module_index].source_sets.push(id);
                 id
             }
         };
+        // Any of a source set's files may say its classpath is partial.
+        if file.classpath == Classpath::Partial {
+            source_sets[id.0 as usize].classpath = Classpath::Partial;
+        }
         source_sets[id.0 as usize]
             .directories
             .push(file.path.parent().map(PathBuf::from).unwrap_or_default());

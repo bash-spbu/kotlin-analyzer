@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use base_db::{Library, LibraryPackage, SourceDatabase, SourceFile, SourceSet};
+use base_db::{Library, LibraryPackage, SourceDatabase, SourceFile, SourceSet, SourceSetId};
 use intern::{Name, Path};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -121,6 +121,7 @@ pub fn visible_top_level(
         }
     }
     if !found.is_empty() {
+        crate::expect_actual::hide_expects_with_actuals(db, &mut found);
         return found;
     }
     for library_package in classpath_packages(db, from, package) {
@@ -310,8 +311,11 @@ pub fn classpath_positions(
         .get(source_set.id(db).0 as usize)
         .into_iter()
         .flat_map(|classpath| classpath.iter().copied());
+    let jdk = classpaths
+        .jdk(db)
+        .filter(|_| sees_jdk(db, source_set.id(db)));
     let mut positions = FxHashMap::default();
-    for (position, library) in classpaths.jdk(db).into_iter().chain(classpath).enumerate() {
+    for (position, library) in jdk.into_iter().chain(classpath).enumerate() {
         positions.entry(library).or_insert(position as u32);
     }
     Arc::new(positions)
@@ -359,12 +363,30 @@ pub fn source_set_input(db: &dyn SourceDatabase, file: SourceFile) -> Option<Sou
     db.workspace().source_sets(db).get(id.0 as usize).copied()
 }
 
-/// The libraries `from` compiles against: the JDK, then its source set's
-/// classpath in order.
+/// Whether the build resolved `from`'s whole classpath: a partial one says
+/// nothing about the names that would have come from what's missing.
+pub fn classpath_complete(db: &dyn SourceDatabase, from: SourceFile) -> bool {
+    from.source_set(db).is_none_or(|own| {
+        db.workspace().model(db).source_set(own).classpath == base_db::Classpath::Complete
+    })
+}
+
+/// Whether a source set compiles against the JDK: JVM and Android code
+/// does, Kotlin/JS, Wasm and Native code doesn't.
+fn sees_jdk(db: &dyn SourceDatabase, source_set: SourceSetId) -> bool {
+    db.workspace().model(db).source_set(source_set).platform == base_db::Platform::Jvm
+}
+
+/// The libraries `from` compiles against: the JDK (for JVM code), then its
+/// source set's classpath in order.
 pub fn libraries_of(db: &dyn SourceDatabase, from: SourceFile) -> Vec<Library> {
     let classpaths = db.classpaths();
-    let mut libraries: Vec<Library> = classpaths.jdk(db).into_iter().collect();
-    if let Some(own) = from.source_set(db)
+    let own_set = from.source_set(db);
+    let jdk = classpaths
+        .jdk(db)
+        .filter(|_| own_set.is_none_or(|own| sees_jdk(db, own)));
+    let mut libraries: Vec<Library> = jdk.into_iter().collect();
+    if let Some(own) = own_set
         && let Some(classpath) = classpaths.by_source_set(db).get(own.0 as usize)
     {
         libraries.extend(classpath.iter().copied());

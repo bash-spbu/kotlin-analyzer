@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::{
-    Jdk, Library, LoadError, ModelOrigin, Module, ModuleId, ProjectModel, SourceSet, SourceSetId,
-    SourceSetKind,
+    Classpath, Jdk, Library, LoadError, ModelOrigin, Module, ModuleId, Platform, ProjectModel,
+    SourceSet, SourceSetId, SourceSetKind,
 };
 
 #[derive(Deserialize)]
@@ -36,6 +36,8 @@ struct ModuleEntry {
 struct SourceSetEntry {
     name: String,
     kind: Option<String>,
+    platform: Option<String>,
+    classpath: Option<String>,
     source_directories: Vec<PathBuf>,
     #[serde(default)]
     module_dependencies: Vec<ModuleDependencyEntry>,
@@ -92,11 +94,21 @@ pub(crate) fn parse(root: &Path, text: &str) -> Result<ProjectModel, LoadError> 
                 Some("test") => SourceSetKind::Test,
                 _ => SourceSetKind::of_name(&source_set.name),
             };
+            let platform = match source_set.platform.as_deref() {
+                Some("jvm") => Platform::Jvm,
+                Some("other") => Platform::NotJvm,
+                _ => Platform::of_name(&source_set.name),
+            };
             source_sets.push(SourceSet {
                 id,
                 module: module_id,
                 name: source_set.name.clone(),
                 kind,
+                platform,
+                classpath: match source_set.classpath.as_deref() {
+                    Some("partial") => Classpath::Partial,
+                    _ => Classpath::Complete,
+                },
                 directories: source_set
                     .source_directories
                     .iter()
@@ -206,7 +218,7 @@ mod tests {
                 { "name": "commonMain", "kind": "main", "sourceDirectories": ["shared/src/commonMain/kotlin"] },
                 { "name": "jvmMain", "kind": "main", "sourceDirectories": ["shared/src/jvmMain/kotlin"],
                   "moduleDependencies": [{ "module": ":shared", "sourceSet": "commonMain" }] },
-                { "name": "jsMain", "kind": "main", "sourceDirectories": ["shared/src/jsMain/kotlin"],
+                { "name": "jsMain", "kind": "main", "platform": "other", "classpath": "partial", "sourceDirectories": ["shared/src/jsMain/kotlin"],
                   "moduleDependencies": [{ "module": ":shared", "sourceSet": "commonMain" }] },
                 { "name": "jvmTest", "kind": "test", "sourceDirectories": ["shared/src/jvmTest/kotlin"],
                   "moduleDependencies": [{ "module": ":shared", "sourceSet": "jvmMain" },
@@ -221,6 +233,11 @@ mod tests {
         };
         assert_eq!(model.source_set(jvm_test).dependencies, vec![jvm, common]);
         assert!(!model.visible_source_sets(jvm_test).contains(&js));
+        assert_eq!(model.source_set(js).platform, Platform::NotJvm);
+        assert_eq!(model.source_set(js).classpath, Classpath::Partial);
+        assert_eq!(model.source_set(jvm).classpath, Classpath::Complete);
+        // Without a platform written, the name decides.
+        assert_eq!(model.source_set(jvm).platform, Platform::Jvm);
     }
 
     #[test]

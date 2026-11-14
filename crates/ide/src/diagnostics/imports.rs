@@ -54,6 +54,23 @@ const CONVENTION_NAMES: &[&str] = &[
 /// build has run.
 const ANDROID_GENERATED_CLASSES: &[&str] = &["R", "BuildConfig", "Manifest"];
 
+/// Whether `name` is one of the function types the compiler makes up
+/// rather than reads from a library: `Function0`…, `SuspendFunction1`…,
+/// `KFunction2`…, `KSuspendFunction3`… (in `kotlin` and `kotlin.reflect`).
+fn is_synthetic_function_type(name: &str) -> bool {
+    let arity = [
+        "KSuspendFunction",
+        "SuspendFunction",
+        "KFunction",
+        "Function",
+    ]
+    .iter()
+    .find_map(|prefix| name.strip_prefix(prefix));
+    arity.is_some_and(|digits| {
+        !digits.is_empty() && digits.chars().all(|char| char.is_ascii_digit())
+    })
+}
+
 /// What kind of declaration a missing name needs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Wanted {
@@ -97,7 +114,7 @@ fn missing_names(
     file: SourceFile,
     parse: &Parse,
 ) -> Vec<(TextRange, Name, Wanted)> {
-    if !hir::default_imports_visible(db, file) {
+    if !hir::default_imports_visible(db, file) || !hir::classpath_complete(db, file) {
         return Vec::new();
     }
     let tree = hir::file_item_tree(db, file);
@@ -146,7 +163,9 @@ fn missing_names(
             missing.push((TextRange::of(only), name, Wanted::Classifier));
         }
     }
-    missing.retain(|(_, name, _)| !imported.contains(name));
+    missing.retain(|(_, name, _)| {
+        !imported.contains(name) && !is_synthetic_function_type(name.as_str())
+    });
     if hir::sees_android_sdk(db, file) {
         missing.retain(|(_, name, _)| !ANDROID_GENERATED_CLASSES.contains(&name.as_str()));
     }
@@ -418,7 +437,7 @@ mod tests {
 
     use syntax::Language;
 
-    use super::ImportPlacement;
+    use super::{ImportPlacement, is_synthetic_function_type};
 
     /// The file with `a.in.Money` imported the way a fix would.
     fn with_import(text: &str) -> String {
@@ -427,6 +446,28 @@ mod tests {
         let mut result = text.to_owned();
         result.insert_str(edit.range.start as usize, &edit.new_text);
         result
+    }
+
+    #[test]
+    fn function_types_the_compiler_makes_up_are_told_from_names_like_them() {
+        for synthetic in [
+            "Function0",
+            "Function22",
+            "SuspendFunction1",
+            "KFunction2",
+            "KSuspendFunction3",
+        ] {
+            assert!(is_synthetic_function_type(synthetic), "{synthetic}");
+        }
+        for ordinary in [
+            "Function",
+            "FunctionX",
+            "MyFunction1",
+            "Function1Factory",
+            "KFunction",
+        ] {
+            assert!(!is_synthetic_function_type(ordinary), "{ordinary}");
+        }
     }
 
     #[test]

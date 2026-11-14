@@ -85,7 +85,16 @@ class MultiplatformExportTest(unittest.TestCase):
     def test_project_dependencies_reach_the_other_modules_source_sets(self) -> None:
         self.assertIn(":core/commonMain", self.dependencies(":app", "commonMain"))
         self.assertIn(":core/jvmMain", self.dependencies(":app", "jvmMain"))
+        # A test sees the other project's main code of its own platform.
+        self.assertIn(":core/jvmMain", self.dependencies(":app", "jvmTest"))
+        self.assertNotIn(":core/jvmMain", self.dependencies(":app", "commonTest"))
         self.assertTrue({":core/commonMain", ":core/jvmMain"} <= self.dependencies(":server", "main"))
+
+    def test_only_code_built_for_the_jvm_is_on_the_jvm(self) -> None:
+        self.assertEqual(self.source_set(":core", "jvmMain")["platform"], "jvm")
+        self.assertEqual(self.source_set(":core", "commonMain")["platform"], "jvm")
+        self.assertEqual(self.source_set(":core", "jsMain")["platform"], "other")
+        self.assertEqual(self.source_set(":core", "webMain")["platform"], "other")
 
     def test_jvm_built_code_gets_jvm_libraries_and_the_rest_the_standard_library(self) -> None:
         self.assertIn("kotlin-stdlib", self.libraries(":core", "commonMain"))
@@ -94,8 +103,11 @@ class MultiplatformExportTest(unittest.TestCase):
         self.assertIn("kotlin-stdlib", self.libraries(":server", "main"))
 
     def test_a_classpath_that_cannot_resolve_does_not_stop_the_export(self) -> None:
-        # :legacy asks for a JDK 9 toolchain, which isn't installed.
+        # :legacy asks for a JDK 9 toolchain, which isn't installed: its
+        # classpath is partial, which the model says.
         self.assertEqual(self.source_set(":legacy", "main")["libraries"], [])
+        self.assertEqual(self.source_set(":legacy", "main")["classpath"], "partial")
+        self.assertEqual(self.source_set(":server", "main")["classpath"], "complete")
         self.assertIn("kotlin-stdlib", self.libraries(":server", "main"))
 
 

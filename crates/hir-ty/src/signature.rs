@@ -3,6 +3,7 @@
 
 use std::rc::Rc;
 
+use hir_def::expect_actual::{self, Side};
 use hir_def::item_tree::{ItemKind, Parameter, Signature};
 use hir_def::{ItemContainer, ItemLocation, item_tree};
 use intern::Name;
@@ -110,10 +111,70 @@ impl Types<'_> {
             }
             Callable::Generated { class, function } => self.generated_signature(class, function),
         }
+        .map(|signature| self.with_expect_defaults(callable, signature))
         .map(Rc::new);
         self.signatures
             .borrow_mut()
             .insert(callable, signature.clone());
+        signature
+    }
+
+    /// An `actual` function or constructor takes its parameters' default
+    /// values from its `expect`: Kotlin writes them only there.
+    fn with_expect_defaults(
+        &self,
+        callable: Callable,
+        mut signature: CallableSignature,
+    ) -> CallableSignature {
+        let declared = match callable {
+            Callable::Function(location) => location,
+            Callable::Constructor { class, declaration } => declaration.unwrap_or(class),
+            Callable::Generated { .. } => return signature,
+        };
+        if expect_actual::side_of(self.db, declared) != Side::Actual {
+            return signature;
+        }
+        for counterpart in expect_actual::expect_actual_family(self.db, declared) {
+            if expect_actual::side_of(self.db, counterpart) != Side::Expect {
+                continue;
+            }
+            let expected = match callable {
+                Callable::Constructor {
+                    declaration: None, ..
+                } => Callable::Constructor {
+                    class: counterpart,
+                    declaration: None,
+                },
+                Callable::Constructor { .. } => {
+                    let tree = item_tree(self.db, counterpart.container);
+                    let Some(parent) = tree.item(counterpart.item).parent else {
+                        continue;
+                    };
+                    Callable::Constructor {
+                        class: ItemLocation {
+                            container: counterpart.container,
+                            item: parent,
+                        },
+                        declaration: Some(counterpart),
+                    }
+                }
+                _ => Callable::Function(counterpart),
+            };
+            let Some(expected_signature) = self.signature(expected) else {
+                continue;
+            };
+            if expected_signature.parameters.len() != signature.parameters.len() {
+                continue;
+            }
+            for (parameter, expected_parameter) in signature
+                .parameters
+                .iter_mut()
+                .zip(expected_signature.parameters.iter())
+            {
+                parameter.has_default |= expected_parameter.has_default;
+            }
+            break;
+        }
         signature
     }
 

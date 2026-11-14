@@ -4,7 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{ModelOrigin, Module, ModuleId, ProjectModel, SourceSet, SourceSetId, SourceSetKind};
+use crate::{
+    Classpath, ModelOrigin, Module, ModuleId, Platform, ProjectModel, SourceSet, SourceSetId,
+    SourceSetKind,
+};
 
 /// Directories that never hold workspace sources (unless a model lists one
 /// explicitly, as Gradle does for generated code under `build/`).
@@ -48,10 +51,12 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
                 id,
                 module: module_id,
                 kind: SourceSetKind::of_name(&name),
+                platform: Platform::of_name(&name),
                 name,
                 directories,
                 dependencies: Vec::new(),
                 libraries: Vec::new(),
+                classpath: Classpath::Complete,
             });
         }
         modules.push(Module {

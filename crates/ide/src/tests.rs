@@ -559,6 +559,178 @@ fun icon(): Any = R.drawable.icon
 }
 
 #[test]
+fn platform_code_calls_the_actual_typealiases_chains_receiver_values_and_member_extensions() {
+    let fixture = r#"
+//- /lib/java/net/SocketTimeout.java module=:shared set=jvmMain deps=:app
+package java.net;
+public class SocketTimeout { public SocketTimeout() {} public SocketTimeout(String message) {} }
+//- /shared/common/a/Sockets.kt module=:shared set=commonMain deps=:app
+package a
+expect class SocketTimeout(message: String)
+expect fun nonce(size: Int = 16): String
+expect class Clock(zone: String = "UTC")
+expect class Server {
+    fun stop(grace: Long, timeout: Long)
+}
+typealias Cancelled = Inner
+typealias Inner = Failure
+open class Failure(message: String?)
+class Builder {
+    var test: suspend Scope.(client: Int) -> Unit = {}
+}
+// An extension of the property's name: the member property is called.
+fun Builder.test(block: suspend Scope.(client: Int) -> Unit) {}
+class Response
+class Delegated(val origin: Response, private val content: Response.() -> String) {
+    val raw: String get() = origin.content()
+}
+class Scope
+interface Template<in Outer> {
+    fun Outer.apply()
+}
+class Page
+fun <T> T.apply(block: T.() -> Unit): T = this
+fun Page.render(template: Template<Page>) {
+    with(template) { apply() }
+}
+//- /shared/jvm/a/Sockets.jvm.kt module=:shared set=jvmMain deps=:shared/commonMain,:app
+package a
+actual typealias SocketTimeout = java.net.SocketTimeout
+actual fun nonce(size: Int): String = TODO()
+actual class Clock actual constructor(zone: String)
+actual class Server {
+    actual fun stop(grace: Long, timeout: Long) {}
+    fun stop(grace: Long, timeout: Long, unit: String) {}
+}
+//- /shared/jvm/b/Use.kt module=:shared set=jvmMain deps=:shared/commonMain,:app
+package b
+
+import a.Builder
+import a.Cancelled
+import a.Clock
+import a.nonce
+import a.Scope
+import a.Server
+import a.SocketTimeout
+
+suspend fun use(server: Server, builder: Builder, scope: Scope) {
+    val timeout = SocketTimeout()
+    server.stop(1, 5, "seconds")
+    val cancelled = Cancelled("gone")
+    builder.test(scope, 1)
+    val token = nonce()
+    val clock = Clock()
+}
+"#;
+    let fixture = Fixture::with_mini_stdlib(fixture);
+    let file = fixture.file("/shared/jvm/b/Use.kt");
+    let common = fixture.file("/shared/common/a/Sockets.kt");
+    let config = crate::DiagnosticsConfig {
+        experimental: true,
+        ..crate::DiagnosticsConfig::default()
+    };
+    let render = |file| {
+        analysis(&fixture)
+            .diagnostics(file, &config)
+            .unwrap()
+            .iter()
+            .map(|diagnostic| format!("[{}] {}", diagnostic.check.name(), diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    expect![[""]].assert_eq(&render(file));
+    expect![[""]].assert_eq(&render(common));
+}
+
+#[test]
+fn members_through_where_bounds_and_a_smart_cast_to_a_generic_class() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/a/Schemes.kt
+package a
+interface Scheme {
+    val name: String
+}
+class Roles<B>(val base: B) where B : Scheme {
+    val key: String = "roles:" + base.name
+}
+sealed interface ReferenceOr<out A>
+data class Value<out A>(val value: A) : ReferenceOr<A>
+data class Schema(val title: String, val required: List<String>? = null)
+fun withRequired(schema: ReferenceOr<Schema>): ReferenceOr<Schema> {
+    if (schema !is Value) return schema
+    return Value(schema.value.copy(required = listOf("id")))
+}
+"#,
+    );
+    let file = fixture.file("/app/a/Schemes.kt");
+    let config = crate::DiagnosticsConfig {
+        experimental: true,
+        ..crate::DiagnosticsConfig::default()
+    };
+    let found: Vec<String> = analysis(&fixture)
+        .diagnostics(file, &config)
+        .unwrap()
+        .iter()
+        .map(|diagnostic| format!("[{}] {}", diagnostic.check.name(), diagnostic.message))
+        .collect();
+    expect![[""]].assert_eq(&found.join("\n"));
+}
+
+#[test]
+fn a_lambda_receivers_member_hides_an_outer_local_but_not_the_lambdas_own_parameter() {
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+
+class Pipe {
+    fun send(first: Int, second: Int) {}
+}
+class Sink {
+    fun send(value: Int) {}
+}
+class Scope {
+    val channel: Sink = Sink()
+}
+fun produce(block: Scope.() -> Unit) {}
+fun consume(block: Scope.(Pipe) -> Unit) {}
+
+class Socket(private val channel: Pipe) {
+    // `channel` is the Scope's here, not the constructor parameter.
+    val receiver = produce { channel.send(1) }
+    // The lambda's own parameter is as near as its receiver: it wins.
+    val sender = consume { channel -> channel.send(1, 2) }
+}
+"#,
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+}
+
+#[test]
+fn a_partly_resolved_classpath_calls_nothing_missing() {
+    // `Price` may be in the library the build couldn't fetch.
+    let fixture = |header: &str| {
+        format!(
+            "//- /app/c/Price.kt\npackage c\nclass Price\n{header}\npackage b\n\nfun price(): Price = TODO()\n"
+        )
+    };
+    check_diagnostics(
+        &fixture("//- /app/b/Use.kt"),
+        crate::DiagnosticsConfig::default(),
+        expect![[
+            r#"[missing-import] 3: `Price` isn't imported: `import c.Price` | Import `c.Price`: "\nimport c.Price\n""#
+        ]],
+    );
+    check_diagnostics(
+        &fixture("//- /app/b/Use.kt classpath=partial"),
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+}
+
+#[test]
 fn diagnostics_for_calls_nullability_and_when() {
     check_diagnostics(
         r#"

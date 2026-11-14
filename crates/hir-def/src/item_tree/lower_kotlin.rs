@@ -157,7 +157,7 @@ impl<'parse> Lowering<'parse> {
                     range: TextRange::of(alias.syntax()),
                     visibility,
                     modifiers,
-                    type_parameters: self.type_parameters(alias.type_parameters()),
+                    type_parameters: self.type_parameters(alias.type_parameters(), alias.syntax()),
                     signature: Signature::TypeAlias { target },
                 };
                 Some(self.push(item, parent))
@@ -243,7 +243,7 @@ impl<'parse> Lowering<'parse> {
             range: TextRange::of(class.syntax()),
             visibility,
             modifiers,
-            type_parameters: self.type_parameters(class.type_parameters()),
+            type_parameters: self.type_parameters(class.type_parameters(), class.syntax()),
             signature: Signature::Class {
                 supertypes: self.supertypes(class.supertypes()),
                 primary_constructor,
@@ -378,7 +378,7 @@ impl<'parse> Lowering<'parse> {
             range: TextRange::of(function.syntax()),
             visibility,
             modifiers,
-            type_parameters: self.type_parameters(function.type_parameters()),
+            type_parameters: self.type_parameters(function.type_parameters(), function.syntax()),
             signature: Signature::Function {
                 receiver: function.receiver().map(|node| self.type_ref(node)),
                 parameters: self.parameters(function.parameters()),
@@ -406,7 +406,7 @@ impl<'parse> Lowering<'parse> {
             range: TextRange::of(property.syntax()),
             visibility,
             modifiers,
-            type_parameters: self.type_parameters(property.type_parameters()),
+            type_parameters: self.type_parameters(property.type_parameters(), property.syntax()),
             signature: Signature::Property {
                 receiver: property.receiver().map(|node| self.type_ref(node)),
                 type_ref: variable.type_node().map(|node| self.type_ref(node)),
@@ -433,21 +433,52 @@ impl<'parse> Lowering<'parse> {
             .collect()
     }
 
-    fn type_parameters(&self, parameters: Option<TypeParameters<'_>>) -> Box<[TypeParameter]> {
+    /// The type parameters with their bounds: the one written beside each
+    /// (`<B : Scheme>`) and those of the declaration's `where` clause
+    /// (`where B : Scheme, B : Named`).
+    fn type_parameters(
+        &self,
+        parameters: Option<TypeParameters<'_>>,
+        declaration: SyntaxNode<'_>,
+    ) -> Box<[TypeParameter]> {
         let Some(parameters) = parameters else {
             return Box::new([]);
         };
+        let constraints = self.where_constraints(declaration);
         parameters
             .parameters()
             .filter_map(|parameter| {
+                let name = self.name(parameter.name()?);
+                let written_beside = parameter.bound().map(|bound| self.type_ref(bound));
+                let from_where = constraints
+                    .iter()
+                    .filter(|(constrained, _)| *constrained == name)
+                    .map(|(_, bound)| bound.clone());
                 Some(TypeParameter {
-                    name: self.name(parameter.name()?),
-                    bounds: parameter
-                        .bound()
-                        .map(|bound| self.type_ref(bound))
-                        .into_iter()
-                        .collect(),
+                    name,
+                    bounds: written_beside.into_iter().chain(from_where).collect(),
                 })
+            })
+            .collect()
+    }
+
+    /// `where T : Bound` pairs of a declaration.
+    fn where_constraints(&self, declaration: SyntaxNode<'_>) -> Vec<(Name, TypeRef)> {
+        let Some(clause) =
+            syntax::named_children(declaration).find(|child| child.kind() == "type_constraints")
+        else {
+            return Vec::new();
+        };
+        syntax::named_children(clause)
+            .filter(|child| child.kind() == "type_constraint")
+            .filter_map(|constraint| {
+                let mut parts = syntax::named_children(constraint)
+                    .filter(|part| !part.kind().contains("annotation"));
+                let constrained = parts
+                    .next()
+                    .filter(|part| part.kind() == "type_identifier")?;
+                let bound = parts.next()?;
+                Some((self.name(constrained), self.type_ref(bound)))
             })
             .collect()
     }

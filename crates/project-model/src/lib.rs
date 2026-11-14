@@ -72,18 +72,77 @@ impl SourceSetKind {
     }
 }
 
+/// What a source set is compiled for, as far as its classpath goes: only
+/// JVM (and Android) code sees the JDK.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Platform {
+    /// The JVM or Android — and, approximately, Kotlin Multiplatform's
+    /// common code, which the build also compiles for them.
+    Jvm,
+    /// Kotlin/JS, Wasm or Native only.
+    NotJvm,
+}
+
+/// The source set name prefixes Kotlin Multiplatform uses for targets that
+/// aren't the JVM (`jsMain`, `iosArm64Test`, `nativeMain`, `webMain`).
+const NOT_JVM_PREFIXES: &[&str] = &[
+    "js",
+    "wasm",
+    "web",
+    "native",
+    "apple",
+    "ios",
+    "macos",
+    "tvos",
+    "watchos",
+    "linux",
+    "mingw",
+    "androidNative",
+    "posix",
+    "nix",
+    "darwin",
+    "windows",
+];
+
+impl Platform {
+    /// The platform a source set's name implies, for a model without one.
+    pub fn of_name(name: &str) -> Platform {
+        let not_jvm = NOT_JVM_PREFIXES.iter().any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|char: char| char.is_ascii_uppercase())
+            })
+        });
+        if not_jvm {
+            Platform::NotJvm
+        } else {
+            Platform::Jvm
+        }
+    }
+}
+
+/// Whether the build resolved a source set's whole classpath. A partial one
+/// (a library that couldn't be fetched, a toolchain that isn't installed)
+/// leaves names that come from it unknown, so nothing may be called missing.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Classpath {
+    Complete,
+    Partial,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SourceSet {
     pub id: SourceSetId,
     pub module: ModuleId,
     pub name: String,
     pub kind: SourceSetKind,
+    pub platform: Platform,
     /// Absolute source directories, generated ones included.
     pub directories: Vec<PathBuf>,
     /// The source sets this one sees, besides itself (transitively closed
     /// when exported by Gradle).
     pub dependencies: Vec<SourceSetId>,
     pub libraries: Vec<Library>,
+    pub classpath: Classpath,
 }
 
 /// A classpath entry of a source set.
@@ -237,5 +296,37 @@ impl ProjectModel {
                 .iter()
                 .map(move |directory| (source_set.id, directory.as_path()))
         })
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::Platform;
+
+    #[test]
+    fn a_source_set_name_tells_jvm_code_from_js_wasm_and_native_code() {
+        for jvm in [
+            "main",
+            "test",
+            "commonMain",
+            "jvmMain",
+            "jvmAndPosixMain",
+            "androidMain",
+            "debug",
+            "jsonMain",
+        ] {
+            assert_eq!(Platform::of_name(jvm), Platform::Jvm, "{jvm}");
+        }
+        for other in [
+            "jsMain",
+            "wasmJsTest",
+            "iosArm64Main",
+            "nativeMain",
+            "webMain",
+            "posixMain",
+            "linuxX64Test",
+        ] {
+            assert_eq!(Platform::of_name(other), Platform::NotJvm, "{other}");
+        }
     }
 }

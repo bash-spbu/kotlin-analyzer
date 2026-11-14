@@ -268,6 +268,20 @@ impl<'db> Inferrer<'db> {
                 vec![Level::Declarations(found)]
             }
         };
+        // A member property of function type is called before an extension
+        // function of the name (`builder.test(scope, client)` for `var
+        // test: suspend Scope.(Client) -> Unit`, its receiver the first
+        // argument) — when no function takes the arguments.
+        if let Typed::Value(receiver_type) = &receiver
+            && let Some((location, Ty::Function(function))) = self.property_of(receiver_type, name)
+            && function.parameters.len() + usize::from(function.receiver.is_some())
+                == arguments.len()
+            && !self.any_shape_fits(&levels, name, arguments)
+        {
+            let result = self.invoke(Some(*function), arguments);
+            self.record(name_node, Reference::Declaration(location), result.clone());
+            return if safe { result.nullable() } else { result };
+        }
         let site = match &receiver {
             Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
             Typed::Class(_) => NameSite::Static,
@@ -305,6 +319,13 @@ impl<'db> Inferrer<'db> {
                     _ if let Some((local, function)) = self.local_extension(&receiver, name) => {
                         let result = self.invoke(Some(function), arguments);
                         self.record(name_node, Reference::Local(local), result.clone());
+                        result
+                    }
+                    _ if let Some((location, function)) =
+                        self.receiver_property_extension(&receiver, name) =>
+                    {
+                        let result = self.invoke(Some(function), arguments);
+                        self.record(name_node, Reference::Declaration(location), result.clone());
                         result
                     }
                     _ => {
@@ -413,13 +434,16 @@ impl<'db> Inferrer<'db> {
 
     // --- candidates -------------------------------------------------------
 
-    /// The levels of an unqualified call: each implicit receiver's members
-    /// and extensions, innermost first; constructors of the class the name
-    /// means; top-level functions.
+    /// The levels of an unqualified call: each implicit receiver's members,
+    /// member extensions another implicit receiver's class declares for it
+    /// (`with(template) { apply() }` for `fun Outer.apply()` in
+    /// `Template`), and extensions, innermost first; constructors of the
+    /// class the name means; top-level functions.
     fn simple_levels(&mut self, name: Name, offset: usize) -> Vec<Level> {
         let mut levels = Vec::new();
         for receiver in self.receivers.iter().rev() {
             levels.push(Level::Members(receiver.ty.clone()));
+            levels.push(Level::MemberExtensions(receiver.ty.clone()));
             for level in 0..TOP_LEVEL_LEVELS {
                 levels.push(Level::Extensions {
                     receiver: receiver.ty.clone(),
@@ -459,6 +483,23 @@ impl<'db> Inferrer<'db> {
 
     /// A local extension function `fun T.name(…)` declared in the body,
     /// called on a value: its type, the receiver taken.
+    /// An implicit receiver's property of extension function type the
+    /// explicit receiver can be called with: `origin.content()` for
+    /// `val content: HttpResponse.() -> ByteReadChannel` of the class.
+    fn receiver_property_extension(
+        &mut self,
+        receiver: &Typed,
+        name: Name,
+    ) -> Option<(ItemLocation, FunctionType)> {
+        let Typed::Value(receiver_type) = receiver else {
+            return None;
+        };
+        let (location, function) = self.function_property_in_scope(name)?;
+        let declared_receiver = function.receiver.as_ref()?;
+        let receiver_fits = self.types.fits(receiver_type, declared_receiver) != Fit::No;
+        receiver_fits.then_some((location, function))
+    }
+
     fn local_extension(&self, receiver: &Typed, name: Name) -> Option<(LocalId, FunctionType)> {
         let Typed::Value(receiver_type) = receiver else {
             return None;

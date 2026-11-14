@@ -74,6 +74,14 @@ def resolveClasspathInto = { Map found, project, String configurationName, boole
         if (!failures.isEmpty()) {
             project.logger.warn("kotlin-analyzer: ${project.path} ${configurationName}: ${failures.size()} artifacts not resolved (${failures.first().message?.take(160)})")
         }
+        // A library that couldn't be fetched leaves the classpath partial;
+        // a variant mismatch (a JVM module seen through the Android view)
+        // doesn't: the plain view has it.
+        def missing = failures.any { failure ->
+            def text = failure.toString() + " " + (failure.cause?.toString() ?: "")
+            text.contains("Could not resolve") || text.contains("Could not download") || text.contains("Could not find")
+        }
+        if (missing) found.complete = false
         view.artifacts.each { artifact ->
             def component = artifact.id.componentIdentifier
             if (component instanceof ProjectComponentIdentifier) {
@@ -99,10 +107,11 @@ def resolveClasspathInto = { Map found, project, String configurationName, boole
 // installed, a repository that's down) gives what resolved before it failed,
 // with a warning: one source set's classpath doesn't stop the export.
 def resolveClasspath = { project, String configurationName, boolean android ->
-    def found = [libraries: [], projects: []]
+    def found = [libraries: [], projects: [], complete: true]
     try {
         resolveClasspathInto(found, project, configurationName, android)
     } catch (Exception failure) {
+        found.complete = false
         def cause = failure
         while (cause.cause != null && cause.cause != cause) cause = cause.cause
         project.logger.warn("kotlin-analyzer: ${project.path} ${configurationName} not resolved: ${cause.message?.take(200)}")
@@ -150,6 +159,7 @@ def javaSourceSetExport = { project, sourceSet ->
         sourceDirectories: directories.toList(),
         moduleDependencies: moduleDependencies,
         libraries: resolved.libraries,
+        classpath: resolved.complete ? "complete" : "partial",
     ]
 }
 
@@ -176,6 +186,14 @@ def declaredProjects = { project, sourceSet ->
         }
     }
     return paths
+}
+
+// The source sets of another project a source set sees: the same
+// platform's main code (`jvmMain` for `jvmMain` and `jvmTest`), its common
+// code, and a JVM or Android project's `main`.
+def projectSourceSets = { String sourceSetName ->
+    def platformMain = sourceSetName.endsWith("Test") ? sourceSetName[0..-5] + "Main" : sourceSetName
+    [platformMain, "commonMain", "main"].unique()
 }
 
 def multiplatformExport = { project ->
@@ -228,9 +246,7 @@ def multiplatformExport = { project ->
             (tested ?: []).each { addDependency(moduleDependencies, project.path, it) }
         }
         declaredProjects(project, sourceSet).each { path ->
-            (isTest ? [] : [sourceSet.name]).plus(["commonMain", "main"]).each {
-                addDependency(moduleDependencies, path, it)
-            }
+            projectSourceSets(sourceSet.name).each { addDependency(moduleDependencies, path, it) }
         }
         // Built for the JVM or Android: that compilation's classpath — the
         // source set's own one first, the JVM's before Android's (common
@@ -242,22 +258,25 @@ def multiplatformExport = { project ->
             jvmCompilations.find { mainOrTest(it) } ?:
             jvmCompilations.find()
         def libraries = standardLibrary
+        def complete = true
         if (preferred != null) {
             def resolved = classpathOf(preferred)
             libraries = resolved.libraries
+            complete = resolved.complete
             if (platformOf(preferred) == "androidJvm") libraries = libraries + androidBootClasspath(project)
             resolved.projects.each { dependency ->
-                (isTest ? [] : [sourceSet.name]).plus(["commonMain", "main"]).each {
-                    addDependency(moduleDependencies, dependency.path, it)
-                }
+                projectSourceSets(sourceSet.name).each { addDependency(moduleDependencies, dependency.path, it) }
             }
         }
         return [
             name: sourceSet.name,
             kind: isTest ? "test" : "main",
+            // Only code built for the JVM or Android sees the JDK.
+            platform: preferred != null ? "jvm" : "other",
             sourceDirectories: sourceSet.kotlin.srcDirs.collect { it.absolutePath },
             moduleDependencies: moduleDependencies,
             libraries: libraries,
+            classpath: complete ? "complete" : "partial",
         ]
     }
 }
@@ -282,7 +301,7 @@ def androidExport = { project ->
     def isFixtures = { String name -> name.startsWith("testFixtures") }
     def isUnitTest = { String name -> name.startsWith("test") && !isFixtures(name) }
     def isDeviceTest = { String name -> name.startsWith("androidTest") }
-    def mainClasspath = variant == null ? [libraries: [], projects: []] : resolveClasspath(project, "${variant}CompileClasspath", true)
+    def mainClasspath = variant == null ? [libraries: [], projects: [], complete: true] : resolveClasspath(project, "${variant}CompileClasspath", true)
     def unitTestClasspath = variant == null ? mainClasspath : resolveClasspath(project, "${variant}UnitTestCompileClasspath", true)
     def deviceTestClasspath = variant == null ? mainClasspath : resolveClasspath(project, "${variant}AndroidTestCompileClasspath", true)
     def variantSets = android.sourceSets.names.findAll {
@@ -316,6 +335,7 @@ def androidExport = { project ->
             sourceDirectories: directories.toList(),
             moduleDependencies: moduleDependencies,
             libraries: classpath.libraries + bootClasspath,
+            classpath: classpath.complete == false ? "partial" : "complete",
         ]
     }
 }
