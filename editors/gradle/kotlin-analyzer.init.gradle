@@ -1,6 +1,7 @@
 // kotlin-analyzer: exports the build's model for the language server.
 //
-//   ./gradlew --init-script kotlin-analyzer.init.gradle kotlinAnalyzerModel
+//   ./gradlew --no-configuration-cache -Dorg.gradle.isolated-projects=false \
+//       --init-script kotlin-analyzer.init.gradle kotlinAnalyzerModel
 //
 // writes .kotlin-analyzer/project.json in the root project: every module, its
 // source sets (generated directories included), the source sets of other
@@ -8,72 +9,331 @@
 // (with sources JARs found next to them in the Gradle cache), plus the JDK.
 // `-PkotlinAnalyzerOutput=<file>` writes elsewhere.
 //
+// Three kinds of module are read:
+// - JVM (the `java` plugin's source sets: Java, Kotlin/JVM, Spring, …);
+// - Kotlin Multiplatform (`kotlin.sourceSets`, their `dependsOn`, and per
+//   source set the classpath of a JVM or Android compilation it is part of;
+//   a source set compiled only for Native or JS gets the standard library);
+// - Android (AGP: `android.sourceSets`, one debug variant's classpaths, the
+//   SDK's android.jar).
+//
 // Each project resolves its own classpaths in its own task (Gradle 9 forbids
 // resolving another project's configurations); the root task merges them.
+// The tasks read the project at execution time, so the export runs without
+// the configuration cache and isolated projects.
 
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import org.gradle.api.artifacts.ProjectDependency
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.attributes.Attribute
 
 def partFile = { project -> new File(project.layout.buildDirectory.get().asFile, "kotlin-analyzer/module.json") }
 
-// A sources JAR next to a JAR in the Gradle cache (…/<version>/<hash>/name.jar)
-// or in a Maven repository (…/<version>/name.jar); never downloaded.
-def sourcesJarOf = { File jar ->
+// A sources JAR for a library: next to its JAR in the Gradle cache
+// (…/<version>/<hash>/name.jar) or a Maven repository (…/<version>/name.jar),
+// else — for a JAR unpacked from an Android archive — under the module's
+// coordinates in the Gradle cache. Never downloaded.
+def sourcesJarOf = { project, ModuleComponentIdentifier component, File jar ->
     def sourcesName = jar.name.replaceAll(/\.jar$/, "-sources.jar")
     def sibling = new File(jar.parentFile, sourcesName)
     if (sibling.isFile()) return sibling.absolutePath
     def versionDirectory = jar.parentFile?.parentFile
-    def found = versionDirectory?.listFiles()?.findResult { hashDirectory ->
+    def nearby = versionDirectory?.listFiles()?.findResult { hashDirectory ->
         def candidate = new File(hashDirectory, sourcesName)
         candidate.isFile() ? candidate : null
     }
-    return found?.absolutePath
+    if (nearby != null) return nearby.absolutePath
+    def cached = new File(project.gradle.gradleUserHomeDir,
+        "caches/modules-2/files-2.1/${component.group}/${component.module}/${component.version}")
+    def byCoordinates = cached.listFiles()?.findResult { hashDirectory ->
+        def candidate = new File(hashDirectory, "${component.module}-${component.version}-sources.jar")
+        candidate.isFile() ? candidate : null
+    }
+    return byCoordinates?.absolutePath
 }
 
-def sourceSetExport = { project, sourceSet ->
+def artifactType = Attribute.of("artifactType", String)
+
+def resolveClasspathInto = { Map found, project, String configurationName, boolean android ->
+    def libraries = found.libraries
+    def projects = found.projects
+    def configuration = project.configurations.findByName(configurationName)
+    if (configuration == null || !configuration.canBeResolved) return
+    def views = [configuration.incoming.artifactView { lenient(true) }]
+    if (android) {
+        views << configuration.incoming.artifactView {
+            lenient(true)
+            attributes { it.attribute(artifactType, "android-classes-jar") }
+        }
+    }
+    def seenJars = new HashSet<String>()
+    views.each { view ->
+        def failures = view.artifacts.failures
+        if (!failures.isEmpty()) {
+            project.logger.warn("kotlin-analyzer: ${project.path} ${configurationName}: ${failures.size()} artifacts not resolved (${failures.first().message?.take(160)})")
+        }
+        view.artifacts.each { artifact ->
+            def component = artifact.id.componentIdentifier
+            if (component instanceof ProjectComponentIdentifier) {
+                def fixtures = artifact.variant.capabilities.any { it.name.endsWith("-test-fixtures") }
+                def dependency = [path: component.projectPath, fixtures: fixtures]
+                if (!projects.contains(dependency)) projects << dependency
+            } else if (component instanceof ModuleComponentIdentifier
+                && artifact.file.name.endsWith(".jar")
+                && seenJars.add(artifact.file.absolutePath)) {
+                libraries << [
+                    coordinates: "${component.group}:${component.module}:${component.version}",
+                    jar: artifact.file.absolutePath,
+                    sourcesJar: sourcesJarOf(project, component, artifact.file),
+                ]
+            }
+        }
+    }
+}
+
+// The JARs and the other projects a configuration resolves to. Android
+// archives are read through AGP's `android-classes-jar` artifacts. A
+// configuration that can't be resolved here (a toolchain that isn't
+// installed, a repository that's down) gives what resolved before it failed,
+// with a warning: one source set's classpath doesn't stop the export.
+def resolveClasspath = { project, String configurationName, boolean android ->
+    def found = [libraries: [], projects: []]
+    try {
+        resolveClasspathInto(found, project, configurationName, android)
+    } catch (Exception failure) {
+        def cause = failure
+        while (cause.cause != null && cause.cause != cause) cause = cause.cause
+        project.logger.warn("kotlin-analyzer: ${project.path} ${configurationName} not resolved: ${cause.message?.take(200)}")
+    }
+    return found
+}
+
+// The SDK's android.jar (and the optional platform JARs) an Android module
+// compiles against.
+def androidBootClasspath = { project ->
+    def jars = []
+    try {
+        project.extensions.getByName("androidComponents").sdkComponents.bootClasspath.get().each {
+            def jar = it.asFile
+            if (jar.isFile()) jars << [coordinates: "android:android:sdk", jar: jar.absolutePath, sourcesJar: null]
+        }
+    } catch (ignored) {
+    }
+    return jars
+}
+
+def addDependency = { List dependencies, String module, String sourceSet ->
+    def dependency = [module: module, sourceSet: sourceSet]
+    if (!dependencies.contains(dependency)) dependencies << dependency
+}
+
+// --- JVM: the `java` plugin's source sets -----------------------------------
+
+def javaSourceSetExport = { project, sourceSet ->
     def directories = new LinkedHashSet<String>()
     sourceSet.java.srcDirs.each { directories << it.absolutePath }
     def kotlinSources = sourceSet.extensions.findByName("kotlin")
     if (kotlinSources != null) {
         kotlinSources.srcDirs.each { directories << it.absolutePath }
     }
+    def resolved = resolveClasspath(project, sourceSet.compileClasspathConfigurationName, false)
     def moduleDependencies = []
-    def libraries = []
-    def classpath = project.configurations.findByName(sourceSet.compileClasspathConfigurationName)
-    if (classpath != null && classpath.canBeResolved) {
-        def artifacts = classpath.incoming.artifactView { lenient(true) }.artifacts
-        artifacts.each { artifact ->
-            def component = artifact.id.componentIdentifier
-            if (component instanceof ProjectComponentIdentifier) {
-                def fixtures = artifact.variant.capabilities.any { it.name.endsWith("-test-fixtures") }
-                def dependency = [module: component.projectPath, sourceSet: fixtures ? "testFixtures" : "main"]
-                if (!moduleDependencies.contains(dependency)) moduleDependencies << dependency
-            } else if (component instanceof ModuleComponentIdentifier && artifact.file.name.endsWith(".jar")) {
-                libraries << [
-                    coordinates: "${component.group}:${component.module}:${component.version}",
-                    jar: artifact.file.absolutePath,
-                    sourcesJar: sourcesJarOf(artifact.file),
-                ]
-            }
-        }
+    resolved.projects.each { dependency ->
+        // A JVM module's view of a Kotlin Multiplatform one is its JVM side.
+        def targets = dependency.fixtures ? ["testFixtures"] : ["main", "commonMain", "jvmMain"]
+        targets.each { addDependency(moduleDependencies, dependency.path, it) }
     }
     return [
         name: sourceSet.name,
         sourceDirectories: directories.toList(),
         moduleDependencies: moduleDependencies,
-        libraries: libraries,
+        libraries: resolved.libraries,
     ]
 }
 
+// --- Kotlin Multiplatform ----------------------------------------------------
+
+def isMultiplatform = { project ->
+    def kotlin = project.extensions.findByName("kotlin")
+    kotlin != null && kotlin.class.name.contains("KotlinMultiplatformExtension")
+}
+
+def platformOf = { compilation -> compilation.target.platformType.name() }
+def isJvmLike = { compilation -> platformOf(compilation) in ["jvm", "androidJvm"] }
+def isTestCompilation = { compilation -> compilation.name.toLowerCase().contains("test") }
+
+// The other projects a source set declares (api / implementation /
+// compileOnly), by path.
+def declaredProjects = { project, sourceSet ->
+    def paths = []
+    [sourceSet.apiConfigurationName, sourceSet.implementationConfigurationName,
+     sourceSet.compileOnlyConfigurationName].each { name ->
+        project.configurations.findByName(name)?.dependencies?.withType(ProjectDependency)?.each { dependency ->
+            def path = dependency.hasProperty("path") ? dependency.path : dependency.dependencyProject.path
+            if (!paths.contains(path)) paths << path
+        }
+    }
+    return paths
+}
+
+def multiplatformExport = { project ->
+    def kotlin = project.extensions.getByName("kotlin")
+    // Which compilations (not the metadata ones) each source set is part of.
+    def compilationsOf = [:].withDefault { [] }
+    kotlin.targets.each { target ->
+        if (target.platformType.name() == "common") return
+        target.compilations.each { compilation ->
+            compilation.allKotlinSourceSets.each { compilationsOf[it.name] << compilation }
+        }
+    }
+    def classpaths = [:]
+    def classpathOf = { compilation ->
+        classpaths.computeIfAbsent(compilation.compileDependencyConfigurationName) {
+            resolveClasspath(project, it, platformOf(compilation) == "androidJvm")
+        }
+    }
+    // The standard library, for source sets no JVM compilation builds.
+    def standardLibrary = []
+    def anyJvm = compilationsOf.values().flatten().find { isJvmLike(it) && !isTestCompilation(it) }
+    if (anyJvm != null) {
+        standardLibrary = classpathOf(anyJvm).libraries.findAll {
+            it.coordinates.startsWith("org.jetbrains.kotlin:kotlin-stdlib")
+        }
+    }
+    return kotlin.sourceSets.collect { sourceSet ->
+        def compilations = compilationsOf[sourceSet.name]
+        def isTest = compilations.isEmpty()
+            ? sourceSet.name.endsWith("Test")
+            : compilations.every { isTestCompilation(it) }
+        def moduleDependencies = []
+        // What it's built on, and for a test, the main code it tests.
+        def parents = new LinkedHashSet()
+        def frontier = [sourceSet]
+        while (!frontier.isEmpty()) {
+            def next = []
+            frontier.each { current -> current.dependsOn.each { if (parents.add(it)) next << it } }
+            frontier = next
+        }
+        parents.each { addDependency(moduleDependencies, project.path, it.name) }
+        if (isTest) {
+            // The main code every compilation it's part of tests: for
+            // commonTest, commonMain — not jvmMain because jvmTest tests it.
+            def tested = null
+            compilations.each { compilation ->
+                def main = compilation.target.compilations.findByName("main")?.allKotlinSourceSets?.collect { it.name } ?: []
+                tested = tested == null ? main : tested.intersect(main)
+            }
+            (tested ?: []).each { addDependency(moduleDependencies, project.path, it) }
+        }
+        declaredProjects(project, sourceSet).each { path ->
+            (isTest ? [] : [sourceSet.name]).plus(["commonMain", "main"]).each {
+                addDependency(moduleDependencies, path, it)
+            }
+        }
+        // Built for the JVM or Android: that compilation's classpath — the
+        // source set's own one first, the JVM's before Android's (common
+        // code doesn't see Android); else only the standard library.
+        def jvmCompilations = compilations.findAll { isJvmLike(it) }
+        def mainOrTest = { it.name in ["main", "debug", "test", "debugUnitTest", "unitTest", "hostTest"] }
+        def preferred = jvmCompilations.find { it.defaultSourceSet.name == sourceSet.name } ?:
+            jvmCompilations.find { platformOf(it) == "jvm" && mainOrTest(it) } ?:
+            jvmCompilations.find { mainOrTest(it) } ?:
+            jvmCompilations.find()
+        def libraries = standardLibrary
+        if (preferred != null) {
+            def resolved = classpathOf(preferred)
+            libraries = resolved.libraries
+            if (platformOf(preferred) == "androidJvm") libraries = libraries + androidBootClasspath(project)
+            resolved.projects.each { dependency ->
+                (isTest ? [] : [sourceSet.name]).plus(["commonMain", "main"]).each {
+                    addDependency(moduleDependencies, dependency.path, it)
+                }
+            }
+        }
+        return [
+            name: sourceSet.name,
+            kind: isTest ? "test" : "main",
+            sourceDirectories: sourceSet.kotlin.srcDirs.collect { it.absolutePath },
+            moduleDependencies: moduleDependencies,
+            libraries: libraries,
+        ]
+    }
+}
+
+// --- Android (AGP) -------------------------------------------------------------
+
+def isAndroid = { project -> project.extensions.findByName("androidComponents") != null }
+
+def androidExport = { project ->
+    def android = project.extensions.getByName("android")
+    // One debug variant stands for the module: `debug`, else the first
+    // `<flavours>Debug`, else the first variant.
+    def variants = project.configurations.names
+        .findAll { it.endsWith("CompileClasspath") }
+        .collect { it - "CompileClasspath" }
+        .findAll { !(it =~ /(UnitTest|AndroidTest|TestFixtures|ScreenshotTest)$/) && it != "" }
+        .sort()
+    def variant = variants.find { it == "debug" } ?: variants.find { it.endsWith("Debug") } ?: variants.find()
+    def bootClasspath = androidBootClasspath(project)
+    def variantWords = variant == null ? [] : variant.split(/(?=[A-Z])/).collect { it.uncapitalize() }
+    def inVariant = { String name -> name == "main" || name == variant || variantWords.contains(name) }
+    def isFixtures = { String name -> name.startsWith("testFixtures") }
+    def isUnitTest = { String name -> name.startsWith("test") && !isFixtures(name) }
+    def isDeviceTest = { String name -> name.startsWith("androidTest") }
+    def mainClasspath = variant == null ? [libraries: [], projects: []] : resolveClasspath(project, "${variant}CompileClasspath", true)
+    def unitTestClasspath = variant == null ? mainClasspath : resolveClasspath(project, "${variant}UnitTestCompileClasspath", true)
+    def deviceTestClasspath = variant == null ? mainClasspath : resolveClasspath(project, "${variant}AndroidTestCompileClasspath", true)
+    def variantSets = android.sourceSets.names.findAll {
+        !isUnitTest(it) && !isDeviceTest(it) && !isFixtures(it) && inVariant(it)
+    }
+    return android.sourceSets.collect { sourceSet ->
+        def name = sourceSet.name
+        def isTest = isUnitTest(name) || isDeviceTest(name)
+        def kind = isTest ? "test" : (isFixtures(name) ? "testFixtures" : "main")
+        def directories = new LinkedHashSet<String>()
+        sourceSet.java.srcDirs.each { directories << it.absolutePath }
+        try {
+            sourceSet.kotlin.srcDirs.each { directories << it.absolutePath }
+        } catch (ignored) {
+        }
+        def classpath = isUnitTest(name) ? unitTestClasspath : (isDeviceTest(name) ? deviceTestClasspath : mainClasspath)
+        def moduleDependencies = []
+        // The variant's main code sees itself as one; tests see it; another
+        // flavour or build type sees main only.
+        // Test fixtures see it too, like tests.
+        def sees = isTest || isFixtures(name) || inVariant(name) ? variantSets : ["main"]
+        sees.findAll { it != name }.each { addDependency(moduleDependencies, project.path, it) }
+        classpath.projects.each { dependency ->
+            addDependency(moduleDependencies, dependency.path, dependency.fixtures ? "testFixtures" : "main")
+            addDependency(moduleDependencies, dependency.path, "commonMain")
+            variantSets.each { addDependency(moduleDependencies, dependency.path, it) }
+        }
+        return [
+            name: name,
+            kind: kind,
+            sourceDirectories: directories.toList(),
+            moduleDependencies: moduleDependencies,
+            libraries: classpath.libraries + bootClasspath,
+        ]
+    }
+}
+
 allprojects { project ->
-    def moduleTask = project.tasks.register("kotlinAnalyzerModule") {
+    project.tasks.register("kotlinAnalyzerModule") {
         group = "kotlin-analyzer"
         description = "Writes this module's part of the kotlin-analyzer model."
         doLast {
-            def sourceSets = project.extensions.findByName("sourceSets")
-            def exported = sourceSets == null ? [] : sourceSets.collect { sourceSetExport(project, it) }
+            def exported
+            if (isMultiplatform(project)) {
+                exported = multiplatformExport(project)
+            } else if (isAndroid(project)) {
+                exported = androidExport(project)
+            } else {
+                def sourceSets = project.extensions.findByName("sourceSets")
+                exported = sourceSets == null ? [] : sourceSets.collect { javaSourceSetExport(project, it) }
+            }
             def part = partFile(project)
             part.parentFile.mkdirs()
             part.text = JsonOutput.toJson([

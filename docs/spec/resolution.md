@@ -108,7 +108,13 @@ depends on itself is `Unknown`.
 A class's primary-constructor parameters are visible in its initializers
 (property initializers, `init` blocks, supertype arguments), not in its
 functions and accessors — there the name is the property. `Name(…)` may
-call an object's or a companion's `operator fun invoke`. An override takes
+call an object's or a companion's `operator fun invoke` — a member, or an
+extension on the companion in scope (`operator fun
+SavedStateHandle.Companion.invoke(route)`) — and `Name { … }` the SAM
+constructor of a `fun interface` or of a Java interface with one abstract
+method (it takes that method as a function). An import of a Java class's
+static member reaches the ones its superclasses declare (`import
+ActivityCompat.checkSelfPermission` is `ContextCompat`'s). An override takes
 its parameters' default values from what it overrides. Member extensions of
 the implicit receivers' classes are candidates for `receiver.f()`.
 

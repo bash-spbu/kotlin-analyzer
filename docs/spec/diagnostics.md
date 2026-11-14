@@ -26,7 +26,9 @@ import names, or any name in a file with an unresolved star import, is never
 reported as missing — the import is what's broken. Nor is any name when the
 file can't see the packages default imports come from (`kotlin`,
 `java.lang`): a model guessed from the directory layout knows no libraries,
-and `Result` may be `kotlin.Result`. A file with syntax errors gets only
+and `Result` may be `kotlin.Result`. In a file built with the Android SDK,
+`R`, `BuildConfig` and `Manifest` aren't reported either: the Android Gradle
+plugin generates them in the module's namespace before compiling. A file with syntax errors gets only
 `syntax` diagnostics.
 
 `@file:Suppress("…")` turns a check off for the file under the name the

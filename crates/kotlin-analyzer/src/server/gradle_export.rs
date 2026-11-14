@@ -140,6 +140,16 @@ fn newest_build_file(root: &Path) -> Option<SystemTime> {
         .max()
 }
 
+/// The export's tasks read projects while they run, which the
+/// configuration cache and isolated projects forbid — builds that turn
+/// them on in `gradle.properties` get them turned off for the export.
+const EXPORT_ARGUMENTS: &[&str] = &[
+    "--quiet",
+    "--no-configuration-cache",
+    "-Dorg.gradle.isolated-projects=false",
+    "-Dorg.gradle.unsafe.isolated-projects=false",
+];
+
 /// Runs the export (the build's wrapper, else `gradle` on the PATH) and
 /// writes the model to `output`.
 fn export(root: &Path, output: &Path) -> Result<(), String> {
@@ -155,7 +165,7 @@ fn export(root: &Path, output: &Path) -> Result<(), String> {
     };
     let result = Command::new(&program)
         .current_dir(root)
-        .arg("--quiet")
+        .args(EXPORT_ARGUMENTS)
         .arg("--init-script")
         .arg(&script)
         .arg("kotlinAnalyzerModel")
@@ -207,6 +217,42 @@ mod tests {
         std::fs::write(stamp_path(&model), stamp(newest_build_file(&root))).unwrap();
         assert!(!is_stale(&model, newest_build_file(&root)));
         assert!(!is_gradle_build(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_export_runs_without_the_configuration_cache_and_isolated_projects() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "kotlin-analyzer-export-arguments-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A wrapper that records its arguments and writes the model where
+        // it's told to.
+        let wrapper = root.join("gradlew");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > arguments\nfor argument in \"$@\"; do case \"$argument\" in -PkotlinAnalyzerOutput=*) echo '{}' > \"${argument#-PkotlinAnalyzerOutput=}\";; esac; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = root.join("cache/project.json");
+
+        export(&root, &output).unwrap();
+
+        let arguments = std::fs::read_to_string(root.join("arguments")).unwrap();
+        let arguments: Vec<&str> = arguments.lines().collect();
+        for expected in [
+            "--no-configuration-cache",
+            "-Dorg.gradle.isolated-projects=false",
+            "kotlinAnalyzerModel",
+        ] {
+            assert!(arguments.contains(&expected), "{expected} in {arguments:?}");
+        }
+        assert!(output.is_file());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

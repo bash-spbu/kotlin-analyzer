@@ -31,7 +31,8 @@ pub enum Callable {
     },
 }
 
-/// What the compiler generates for data classes and enums.
+/// What the compiler generates for data classes, enums and functional
+/// interfaces.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum GeneratedFunction {
     /// A data class's `copy(…)`: its constructor's parameters, each
@@ -41,14 +42,21 @@ pub enum GeneratedFunction {
     ValueOf,
     /// An enum's `values()`.
     Values,
+    /// `Name { … }` of a `fun interface` or a Java interface with one
+    /// abstract method: takes that method as a function, gives the
+    /// interface. Called by the interface's own name.
+    SamConstructor,
 }
 
 impl GeneratedFunction {
-    pub fn name(self) -> &'static str {
+    /// The name a call uses, for the functions named apart from their
+    /// class (`None`: the SAM constructor, called by the class's name).
+    pub fn name(self) -> Option<&'static str> {
         match self {
-            GeneratedFunction::Copy => "copy",
-            GeneratedFunction::ValueOf => "valueOf",
-            GeneratedFunction::Values => "values",
+            GeneratedFunction::Copy => Some("copy"),
+            GeneratedFunction::ValueOf => Some("valueOf"),
+            GeneratedFunction::Values => Some("values"),
+            GeneratedFunction::SamConstructor => None,
         }
     }
 }
@@ -205,6 +213,24 @@ impl Types<'_> {
                 Vec::new(),
                 crate::lower::builtin(self.db, self.from, "kotlin", "Array", vec![class_type]),
             ),
+            GeneratedFunction::SamConstructor => {
+                let class_type = self.self_type(class);
+                let function = self.functional_interface_type(&class_type)?;
+                let class_item_tree = item_tree(self.db, class.container);
+                let type_parameter_count = class_item_tree.item(class.item).type_parameters.len();
+                return Some(CallableSignature {
+                    type_parameters: own_type_parameters(class, type_parameter_count),
+                    receiver: None,
+                    parameters: vec![ParameterSignature {
+                        name: Name::new("function"),
+                        ty: Ty::Function(Box::new(function)),
+                        has_default: false,
+                        vararg: false,
+                    }],
+                    result: Ty::Class(class_type),
+                    java: false,
+                });
+            }
         };
         Some(CallableSignature {
             type_parameters: Vec::new(),
@@ -234,12 +260,32 @@ impl Types<'_> {
         };
         candidates
             .iter()
-            .filter(|function| function.name() == name.as_str())
+            .filter(|function| function.name() == Some(name.as_str()))
             .map(|function| Callable::Generated {
                 class,
                 function: *function,
             })
             .collect()
+    }
+
+    /// The SAM constructor of `class`, when it's a Kotlin `fun interface`
+    /// or a Java interface — with one abstract method.
+    pub fn sam_constructor(&self, class: ItemLocation) -> Option<Callable> {
+        let tree = item_tree(self.db, class.container);
+        let item = tree.item(class.item);
+        let is_interface = item.kind == ItemKind::Class(hir_def::item_tree::ClassKind::Interface);
+        let may_have_one = item
+            .modifiers
+            .contains(hir_def::item_tree::Modifiers::FUN_INTERFACE)
+            || crate::members::is_java(self.db, class);
+        if !is_interface || !may_have_one {
+            return None;
+        }
+        self.functional_interface_type(&self.self_type(class))?;
+        Some(Callable::Generated {
+            class,
+            function: GeneratedFunction::SamConstructor,
+        })
     }
 
     /// The constructors a call of the class's name can mean.

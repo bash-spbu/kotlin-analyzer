@@ -54,12 +54,42 @@ are ordinary source directories that happen to be produced by the build.
    Paths are relative to the root unless absolute. Libraries carry exactly the
    versions the build resolves for that source set — never "the newest in the
    Gradle cache".
+
+   The init script reads three kinds of module:
+   - **JVM** — the `java` plugin's source sets (Java, Kotlin/JVM, Spring…);
+     a dependency on a Kotlin Multiplatform module reaches its `commonMain`
+     and `jvmMain`.
+   - **Kotlin Multiplatform** — `kotlin.sourceSets` with `kind` from the
+     compilations they're part of (only test compilations: `test`). A source
+     set sees what it `dependsOn` (transitively), a test also the main code
+     *every* one of its compilations tests (`commonTest` → `commonMain`,
+     `jvmTest` → `jvmMain` and `commonMain`), and the projects it declares
+     (`api`/`implementation`/`compileOnly`), as their same-named, `commonMain`
+     and `main` source sets. Libraries: the classpath of a JVM or Android
+     compilation the source set is part of (its own one first), so
+     `commonMain` gets the JVM's; a source set built only for Native or JS
+     gets the standard library alone (their klibs aren't read).
+   - **Android** (AGP) — `android.sourceSets`. One debug variant stands for
+     the module (`debug`, else the first `<flavours>Debug`): its source sets
+     (`main`, the flavours', the build type's) see one another, tests
+     (`test…`, `androidTest…`) see them, another flavour or build type sees
+     `main` only. Libraries: the variant's compile classpaths (main, unit
+     test, device test) with Android archives read as their classes JARs, and
+     the SDK's `android.jar`.
+
+   A source set with an explicit `kind` and dependencies (all of these) sees
+   only what it lists; the implicit "a test sees its module's `main` and
+   test fixtures" applies to source sets named `main` and `testFixtures`.
+   Artifacts that don't resolve (offline, a failed download) are left out
+   and reported as a Gradle warning.
    When neither `projectJson` nor `.kotlin-analyzer/project.json` is given
    and the root is a Gradle build, **the server runs the export itself**:
    the init script is bundled in the binary, runs in the background
    (`./gradlew` when the build has a wrapper, else `gradle`) and writes the
    model to the cache (`$XDG_CACHE_HOME/kotlin-analyzer/projects/<root>-<hash>/project.json`),
    so nothing lands in the project besides Gradle's own `build/` output.
+   The export runs with `--no-configuration-cache` and isolated projects off
+   (its tasks read projects while they run).
    The workspace loads by convention meanwhile and reloads when the export
    finishes. The export is redone when the build files
    (`build.gradle(.kts)`, `settings.gradle(.kts)`, `gradle.properties`,
@@ -82,9 +112,7 @@ are ordinary source directories that happen to be produced by the build.
    sets (`common…`) see only common code, never the platform source sets
    built on them.
 
-   *Not yet:* the Gradle export reads the `java` plugin's source sets only,
-   so Android (AGP) and Kotlin Multiplatform modules export none of their
-   own; such builds are better served by the layout guess for now.
+
 
 `workspace/executeCommand` `kotlin-analyzer.reloadWorkspace` re-exports the
 model if the build files changed and reads the workspace again: new files

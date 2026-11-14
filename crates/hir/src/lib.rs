@@ -22,6 +22,7 @@ pub use hir_def::library::{
 pub use hir_def::resolver::{
     DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, default_imports_visible,
     is_classifier, resolve_import_path, resolve_type_path, resolve_type_path_in_declaration,
+    sees_android_sdk,
 };
 pub use hir_def::{
     ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,

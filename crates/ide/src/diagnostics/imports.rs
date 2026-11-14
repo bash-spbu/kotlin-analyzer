@@ -49,6 +49,11 @@ const CONVENTION_NAMES: &[&str] = &[
     "remAssign",
 ];
 
+/// The classes the Android Gradle plugin generates in a module's namespace
+/// package before compiling it: not on disk, not on the classpath, until a
+/// build has run.
+const ANDROID_GENERATED_CLASSES: &[&str] = &["R", "BuildConfig", "Manifest"];
+
 /// What kind of declaration a missing name needs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Wanted {
@@ -142,6 +147,9 @@ fn missing_names(
         }
     }
     missing.retain(|(_, name, _)| !imported.contains(name));
+    if hir::sees_android_sdk(db, file) {
+        missing.retain(|(_, name, _)| !ANDROID_GENERATED_CLASSES.contains(&name.as_str()));
+    }
     missing
 }
 

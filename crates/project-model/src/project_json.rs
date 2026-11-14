@@ -138,16 +138,19 @@ pub(crate) fn parse(root: &Path, text: &str) -> Result<ProjectModel, LoadError> 
             .filter_map(|dependency| find(&dependency.module, &dependency.source_set))
             .filter(|target| *target != id)
             .collect();
-        // A test source set always sees its own module's main and fixtures,
-        // whether or not the build lists them.
+        // A test source set always sees its own module's `main` and
+        // fixtures, whether or not the build lists them. (Kotlin
+        // Multiplatform and Android source sets list what they see.)
         let own = &source_sets[id.0 as usize];
         if own.kind != SourceSetKind::Main {
             let module = &modules[own.module.0 as usize];
             for sibling in &module.source_sets {
-                let sibling_kind = source_sets[sibling.0 as usize].kind;
+                let sibling_set = &source_sets[sibling.0 as usize];
+                let is_main = sibling_set.kind == SourceSetKind::Main && sibling_set.name == "main";
+                let is_fixtures = sibling_set.kind == SourceSetKind::TestFixtures;
                 let below = match own.kind {
-                    SourceSetKind::Test => sibling_kind != SourceSetKind::Test,
-                    _ => sibling_kind == SourceSetKind::Main,
+                    SourceSetKind::Test => is_main || is_fixtures,
+                    _ => is_main,
                 };
                 if below && !targets.contains(sibling) && *sibling != id {
                     targets.push(*sibling);
@@ -193,6 +196,32 @@ mod tests {
         ]}
       ]
     }"#;
+
+    #[test]
+    fn multiplatform_source_sets_see_what_they_list_and_their_own_main_only_by_name() {
+        let text = r#"{
+          "version": 1,
+          "modules": [
+            { "path": ":shared", "directory": "shared", "sourceSets": [
+                { "name": "commonMain", "kind": "main", "sourceDirectories": ["shared/src/commonMain/kotlin"] },
+                { "name": "jvmMain", "kind": "main", "sourceDirectories": ["shared/src/jvmMain/kotlin"],
+                  "moduleDependencies": [{ "module": ":shared", "sourceSet": "commonMain" }] },
+                { "name": "jsMain", "kind": "main", "sourceDirectories": ["shared/src/jsMain/kotlin"],
+                  "moduleDependencies": [{ "module": ":shared", "sourceSet": "commonMain" }] },
+                { "name": "jvmTest", "kind": "test", "sourceDirectories": ["shared/src/jvmTest/kotlin"],
+                  "moduleDependencies": [{ "module": ":shared", "sourceSet": "jvmMain" },
+                                         { "module": ":shared", "sourceSet": "commonMain" },
+                                         { "module": ":gone", "sourceSet": "main" }] }
+            ]}
+          ]
+        }"#;
+        let model = parse(Path::new("/work"), text).unwrap();
+        let [common, jvm, js, jvm_test] = model.modules[0].source_sets[..] else {
+            panic!("four source sets");
+        };
+        assert_eq!(model.source_set(jvm_test).dependencies, vec![jvm, common]);
+        assert!(!model.visible_source_sets(jvm_test).contains(&js));
+    }
 
     #[test]
     fn modules_source_sets_and_dependencies_are_read() {

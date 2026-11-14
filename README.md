@@ -64,10 +64,13 @@ background and keeps the result in its cache. To export by hand instead
 (for example, to commit it or point several tools at it):
 
 ```bash
-./gradlew --init-script /path/to/kotlin-analyzer/editors/gradle/kotlin-analyzer.init.gradle kotlinAnalyzerModel
+./gradlew --no-configuration-cache -Dorg.gradle.isolated-projects=false \
+    --init-script /path/to/kotlin-analyzer/editors/gradle/kotlin-analyzer.init.gradle kotlinAnalyzerModel
 ```
 
-which writes `.kotlin-analyzer/project.json`. Until a model is there,
+which writes `.kotlin-analyzer/project.json`. JVM, Kotlin Multiplatform and
+Android modules are read; Android builds need the SDK (`ANDROID_HOME` or
+`local.properties`), as for any Gradle run. Until a model is there,
 modules and source sets are guessed from the directory layout.
 
 ## Layout

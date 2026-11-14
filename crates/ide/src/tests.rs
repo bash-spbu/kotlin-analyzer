@@ -467,6 +467,98 @@ class Extension
 }
 
 #[test]
+fn calls_through_an_imported_inherited_static_a_companion_invoke_extension_and_a_sam_constructor() {
+    check_diagnostics(
+        r#"
+//- /app/a/ContextCompat.java
+package a;
+public class ContextCompat {
+    public static int checkSelfPermission(a.Context context, String permission) { return 0; }
+}
+//- /app/a/ActivityCompat.java
+package a;
+public class ActivityCompat extends ContextCompat {}
+//- /app/a/Context.kt
+package a
+abstract class Context {
+    abstract fun checkSelfPermission(permission: String): Int
+}
+//- /app/a/Handle.kt
+package a
+class Handle(val initial: Map<String, Any?>) {
+    constructor() : this(TODO())
+    companion object
+}
+fun interface Override {
+    fun wrap(content: () -> Unit)
+}
+// A function named like the interface, as compose-ui-test has one.
+fun Override(override: Override, content: () -> Unit) {}
+//- /app/a/Task.java
+package a;
+public interface Task { String run(int attempt); }
+//- /app/t/Testing.kt
+package t
+import a.Handle
+operator fun Handle.Companion.invoke(route: Any): Handle = Handle()
+//- /app/b/Use.kt
+package b
+
+import a.ActivityCompat.checkSelfPermission
+import a.Context
+import a.Handle
+import a.Override
+import a.Task
+import t.invoke
+
+fun granted(context: Context): Boolean = with(context) {
+    checkSelfPermission(this, "camera") == 0
+}
+
+fun handle(): Handle = Handle(route = 1)
+
+fun override(): Override = Override { content -> content() }
+
+fun task(): Int = Task { attempt -> "try $attempt" }.run(1).length
+"#,
+        crate::DiagnosticsConfig {
+            experimental: true,
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[""]],
+    );
+}
+
+#[test]
+fn an_android_modules_generated_r_is_not_called_missing() {
+    // `R` is generated in the module's namespace by the build; a library's
+    // `R` elsewhere isn't the fix. Without the Android SDK it would be.
+    let module = r#"
+//- /app/androidx/core/R.kt
+package androidx.core
+object R
+//- /app/b/Use.kt
+package b
+
+fun icon(): Any = R.drawable.icon
+"#;
+    check_diagnostics(
+        &format!(
+            "//- /app/android/app/Activity.kt\npackage android.app\nopen class Activity\n{module}"
+        ),
+        crate::DiagnosticsConfig::default(),
+        expect![[""]],
+    );
+    check_diagnostics(
+        module,
+        crate::DiagnosticsConfig::default(),
+        expect![[
+            r#"[missing-import] 3: `R` isn't imported: `import androidx.core.R` | Import `androidx.core.R`: "\nimport androidx.core.R\n""#
+        ]],
+    );
+}
+
+#[test]
 fn diagnostics_for_calls_nullability_and_when() {
     check_diagnostics(
         r#"

@@ -9,7 +9,7 @@ use intern::{Name, Path};
 use rustc_hash::FxHashMap;
 
 use crate::def_map::{package_exists, visible_top_level};
-use crate::item_tree::{ImportTarget, ItemId, Signature, TypeRef};
+use crate::item_tree::{ImportTarget, ItemId, Modifiers, Signature, TypeRef};
 use crate::{ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_tree};
 
 /// Kotlin's own default imports.
@@ -27,6 +27,13 @@ pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
 /// The JVM platform's default imports, one level below Kotlin's own:
 /// `String` is `kotlin.String`, not `java.lang.String`.
 pub const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
+
+/// Whether `from` is built with the Android SDK on its classpath — by the
+/// Android Gradle plugin, which generates classes (`R`, `BuildConfig`) a
+/// build makes before compiling.
+pub fn sees_android_sdk(db: &dyn SourceDatabase, from: SourceFile) -> bool {
+    package_exists(db, from, &Path::parse("android.app"))
+}
 
 /// Whether `from` sees the packages default imports come from: the Kotlin
 /// standard library's `kotlin` and the platform's `java.lang`. Without them
@@ -150,7 +157,7 @@ pub fn resolve_import_path(db: &dyn SourceDatabase, file: SourceFile, path: &Pat
             .filter(|location| is_classifier(db, *location))
             .collect();
         if let Some(Resolution::Declaration(class)) = Resolution::of_candidates(classes) {
-            return walk_members(db, class, rest);
+            return walk_members(db, file, class, rest);
         }
     }
     if package_exists(db, file, path) {
@@ -220,7 +227,12 @@ pub fn is_classifier(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
 
 /// Follows `rest` from `class` through members of any kind (for imports:
 /// `import a.Outer.Inner`, `import a.Registry.lookup`).
-fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> Resolution {
+fn walk_members(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    class: ItemLocation,
+    rest: &[Name],
+) -> Resolution {
     let mut current = vec![class];
     for (position, name) in rest.iter().enumerate() {
         let is_last = position + 1 == rest.len();
@@ -228,7 +240,7 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
             return Resolution::Unresolved;
         };
         let tree = item_tree(db, container.container);
-        let members: Vec<ItemLocation> = tree
+        let mut members: Vec<ItemLocation> = tree
             .named(Some(container.item), *name)
             .iter()
             .filter(|child| is_last || tree.item(**child).kind.is_classifier())
@@ -237,6 +249,11 @@ fn walk_members(db: &dyn SourceDatabase, class: ItemLocation, rest: &[Name]) -> 
                 item: *child,
             })
             .collect();
+        // Java statics are inherited: `import ActivityCompat.checkSelfPermission`
+        // names the method `ContextCompat` declares.
+        if members.is_empty() && is_last {
+            members = HierarchyWalk::new(db).inherited_statics(file, container, *name);
+        }
         if members.is_empty() {
             return Resolution::Unresolved;
         }
@@ -350,6 +367,43 @@ impl<'db> HierarchyWalk<'db> {
             inherited.extend(self.nested_classifiers(from, super_class, name));
         }
         inherited
+    }
+
+    /// The static members named `name` of `class`'s supertypes, nearest
+    /// first: what Java lets a subclass's name reach.
+    fn inherited_statics(
+        &mut self,
+        from: SourceFile,
+        class: ItemLocation,
+        name: Name,
+    ) -> Vec<ItemLocation> {
+        let mut found = Vec::new();
+        let mut visited = vec![class];
+        let mut frontier = vec![class];
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for current in frontier {
+                for super_class in self.supertypes(from, current) {
+                    if visited.contains(&super_class) {
+                        continue;
+                    }
+                    visited.push(super_class);
+                    let tree = item_tree(self.db, super_class.container);
+                    let statics = tree
+                        .named(Some(super_class.item), name)
+                        .iter()
+                        .filter(|child| tree.item(**child).modifiers.contains(Modifiers::STATIC))
+                        .map(|child| ItemLocation {
+                            container: super_class.container,
+                            item: *child,
+                        });
+                    found.extend(statics);
+                    next.push(super_class);
+                }
+            }
+            frontier = next;
+        }
+        found
     }
 
     /// The classes `class` extends or implements, as far as they resolve.

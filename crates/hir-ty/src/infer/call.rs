@@ -576,6 +576,16 @@ impl<'db> Inferrer<'db> {
                 .collect(),
             Level::Constructors(class) => {
                 let mut candidates = self.constructor_candidates(*class);
+                if let Some(sam_constructor) = self.types.sam_constructor(*class)
+                    && let Some(signature) = self.types.signature(sam_constructor)
+                {
+                    candidates.push(Candidate {
+                        callable: sam_constructor,
+                        signature,
+                        substitution: Substitution::default(),
+                        receiver: None,
+                    });
+                }
                 candidates.extend(self.invoke_candidates(*class));
                 candidates
             }
@@ -688,18 +698,29 @@ impl<'db> Inferrer<'db> {
     }
 
     /// `Name(…)` of an object, or of a class with a companion, that has an
-    /// `operator fun invoke`: calls that.
-    fn invoke_candidates(&self, class: ItemLocation) -> Vec<Candidate> {
+    /// `operator fun invoke` — a member, or an extension on it in scope
+    /// (`operator fun SavedStateHandle.Companion.invoke(route)`): calls that.
+    fn invoke_candidates(&mut self, class: ItemLocation) -> Vec<Candidate> {
         let Some(instance) = self.types.object_instance(class) else {
             return Vec::new();
         };
         let instance = Ty::Class(instance);
-        self.types
-            .members_named(&instance, Name::new("invoke"))
+        let invoke = Name::new("invoke");
+        let mut candidates: Vec<Candidate> = self
+            .types
+            .members_named(&instance, invoke)
             .into_iter()
             .filter(|member| self.item_kind(member.location) == ItemKind::Function)
             .filter_map(|member| self.member_candidate(member, &instance))
-            .collect()
+            .collect();
+        for level in 0..TOP_LEVEL_LEVELS {
+            let extensions = Level::Extensions {
+                receiver: instance.clone(),
+                level,
+            };
+            candidates.extend(self.level_candidates(&extensions, invoke));
+        }
+        candidates
     }
 
     /// The constructors of `class` (a type alias's class's, through the
