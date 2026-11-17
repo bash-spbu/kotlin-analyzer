@@ -1,6 +1,6 @@
 id = "kotlin-analyzer"
 name = "kotlin-analyzer"
-version = "1.0.0"
+version = "1.0.1"
 schema_version = 1
 authors = ["Alexander Bashkirov"]
 description = "Kotlin for Zed: the language (highlighting, outline, brackets, indentation, text objects) and the kotlin-analyzer language server, also for Java."
