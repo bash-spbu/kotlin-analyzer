@@ -4,7 +4,8 @@
 //! and declaration names themselves. Shared by `definition` and `hover`.
 
 use hir::{
-    FileId, ItemLocation, Local, Path, Reference, RootDatabase, SourceDatabase, SourceFile, Ty,
+    FileId, ItemLocation, Local, LocalKind, Path, Reference, RootDatabase, SourceDatabase,
+    SourceFile, Ty,
 };
 use syntax::ast::AstNode;
 use syntax::ast::kotlin::{Identifier, UserType};
@@ -72,9 +73,17 @@ pub(crate) fn name_at(db: &RootDatabase, file: FileId, offset: usize) -> Option<
 /// declaration.
 fn body_name(db: &RootDatabase, file: SourceFile, range: TextRange) -> Option<NameAt> {
     let inference = hir::infer_file(db, file);
-    let local_target = |local| NameTarget::Local {
-        file,
-        local: inference.local(local).clone(),
+    let local_target = |local| {
+        let local = inference.local(local).clone();
+        // A `val`/`var` constructor parameter is the class's property: the
+        // item declared at the same name.
+        if local.kind == LocalKind::PropertyParameter {
+            let property = declaration_named_at(db, file, local.name_range);
+            if !property.is_empty() {
+                return NameTarget::Declarations(property);
+            }
+        }
+        NameTarget::Local { file, local }
     };
     if let Some(resolved) = inference.name_at(range.start) {
         let target = match &resolved.reference {
@@ -105,12 +114,15 @@ fn identifier_at(root: SyntaxNode<'_>, offset: usize) -> Option<SyntaxNode<'_>> 
             "simple_identifier" | "type_identifier" | "identifier"
         )
     };
-    let at = root.named_descendant_for_byte_range(offset, offset);
-    if let Some(node) = at.filter(is_identifier) {
+    // The character after the cursor, then the one before it: an empty
+    // range at a node's boundary can find the enclosing node instead (an
+    // annotation's arguments, for a name right after its `(`).
+    let after = root.named_descendant_for_byte_range(offset, offset + 1);
+    if let Some(node) = after.filter(is_identifier) {
         return Some(node);
     }
     let before = offset.checked_sub(1)?;
-    root.named_descendant_for_byte_range(before, before)
+    root.named_descendant_for_byte_range(before, offset)
         .filter(is_identifier)
 }
 
@@ -138,6 +150,12 @@ fn kotlin_declarations(
                     .iter()
                     .map(|(segment, _)| hir::Name::new(parse.text_of(*segment))),
             );
+            hir::resolve_type_path(db, file, &path, identifier.start_byte())
+        }
+        // `Type::class` and `Type::member` in an annotation: the grammar
+        // leaves the type a bare name, not a `user_type`.
+        "callable_reference" if identifier.kind() == "type_identifier" => {
+            let path = Path::new([hir::Name::new(parse.text_of(identifier))]);
             hir::resolve_type_path(db, file, &path, identifier.start_byte())
         }
         "identifier" if is_import_path(parent) => {

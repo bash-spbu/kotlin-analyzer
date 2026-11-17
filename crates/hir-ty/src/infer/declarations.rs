@@ -10,7 +10,9 @@ use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::FxHashMap;
 use syntax::ast::AstNode;
-use syntax::ast::kotlin::{FunctionDeclaration, PropertyDeclaration};
+use syntax::ast::kotlin::{
+    ClassParameter, FunctionDeclaration, ParameterBinding, PropertyDeclaration,
+};
 use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use super::{
@@ -570,7 +572,7 @@ impl<'db> Inferrer<'db> {
                 if let Some(name) =
                     named_children(parameter).find(|child| child.kind() == "simple_identifier")
                 {
-                    self.declare_node(name, ty, LocalKind::Parameter);
+                    self.declare_node(name, ty, class_parameter_kind(parameter));
                 }
             }
         }
@@ -658,7 +660,7 @@ impl<'db> Inferrer<'db> {
             if let Some(name) =
                 named_children(*parameter).find(|child| child.kind() == "simple_identifier")
             {
-                self.declare_node(name, ty.clone(), LocalKind::Parameter);
+                self.declare_node(name, ty.clone(), class_parameter_kind(*parameter));
             }
             types.push(ty);
         }
@@ -1177,16 +1179,25 @@ fn ancestor_spanning(node: SyntaxNode<'_>, range: TextRange) -> Option<SyntaxNod
     None
 }
 
+/// A primary-constructor parameter's kind: `val`/`var` makes it a property
+/// too.
+fn class_parameter_kind(parameter: SyntaxNode<'_>) -> LocalKind {
+    match ClassParameter::new_unchecked(parameter).binding() {
+        ParameterBinding::None => LocalKind::Parameter,
+        ParameterBinding::Val | ParameterBinding::Var => LocalKind::PropertyParameter,
+    }
+}
+
 /// A property's accessors: the grammar puts a `get()`/`set()` on its own
 /// line after the declaration, as its sibling; on the declaration's line,
 /// as its child.
 fn accessors(property: SyntaxNode<'_>) -> Vec<SyntaxNode<'_>> {
     let is_accessor = |node: &SyntaxNode<'_>| matches!(node.kind(), "getter" | "setter");
     let mut found: Vec<SyntaxNode<'_>> = named_children(property).filter(is_accessor).collect();
-    let mut next = property.next_named_sibling();
+    let mut next = syntax::next_named_sibling(property);
     while let Some(sibling) = next.filter(is_accessor) {
         found.push(sibling);
-        next = sibling.next_named_sibling();
+        next = syntax::next_named_sibling(sibling);
     }
     found
 }

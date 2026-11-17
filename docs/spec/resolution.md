@@ -107,7 +107,10 @@ depends on itself is `Unknown`.
 
 A class's primary-constructor parameters are visible in its initializers
 (property initializers, `init` blocks, supertype arguments), not in its
-functions and accessors — there the name is the property. `Name(…)` may
+functions and accessors — there the name is the property. Comments
+are skipped wherever the first or next piece of code is looked for: a
+body, a lambda or parentheses that start with a comment, an accessor on
+its own line after one. `Name(…)` may
 call an object's or a companion's `operator fun invoke` — a member, or an
 extension on the companion in scope (`operator fun
 SavedStateHandle.Companion.invoke(route)`) — and `Name { … }` the SAM

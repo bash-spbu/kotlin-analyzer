@@ -296,9 +296,31 @@ pub fn children_of_kind<'tree>(
     named_children(node).filter(move |child| child.kind() == kind)
 }
 
-/// The named children of `node`.
+/// The next named sibling of `node`, past comments (see
+/// [`named_children`]).
+pub fn next_named_sibling(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let mut next = node.next_named_sibling();
+    while let Some(sibling) = next.filter(|sibling| sibling.is_extra()) {
+        next = sibling.next_named_sibling();
+    }
+    next
+}
+
+/// The previous named sibling of `node`, past comments (see
+/// [`named_children`]).
+pub fn previous_named_sibling(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let mut previous = node.prev_named_sibling();
+    while let Some(sibling) = previous.filter(|sibling| sibling.is_extra()) {
+        previous = sibling.prev_named_sibling();
+    }
+    previous
+}
+
+/// The named children of `node`, without comments. A comment is an extra
+/// in both grammars: it may sit between any two nodes, so the first child
+/// of a body, a lambda or parentheses can be a comment instead of the code.
 pub fn named_children(node: SyntaxNode<'_>) -> impl Iterator<Item = SyntaxNode<'_>> {
-    children(node).filter(|child| child.is_named())
+    children(node).filter(|child| child.is_named() && !child.is_extra())
 }
 
 /// Every child of `node`, named or not, walked with a cursor: asking for a
@@ -338,6 +360,24 @@ pub fn has_token(node: SyntaxNode<'_>, token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn siblings_and_children_skip_comments() {
+        let text = "class A {\n    val a: Int\n        // read\n        get() = 1\n}\n";
+        let parse = parse(Arc::from(text), Language::Kotlin);
+        let nodes: Vec<SyntaxNode<'_>> = descendants(parse.root()).collect();
+        let find = |kind: &str| *nodes.iter().find(|node| node.kind() == kind).unwrap();
+        let (property, getter) = (find("property_declaration"), find("getter"));
+        assert_eq!(next_named_sibling(property), Some(getter));
+        assert_eq!(previous_named_sibling(getter), Some(property));
+        assert_eq!(
+            property.next_named_sibling().unwrap().kind(),
+            "line_comment"
+        );
+        let body = find("class_body");
+        let kinds: Vec<&str> = named_children(body).map(|child| child.kind()).collect();
+        assert_eq!(kinds, ["property_declaration", "getter"]);
+    }
 
     #[test]
     fn errors_report_broken_code_and_nothing_for_valid_code() {

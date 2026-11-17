@@ -60,12 +60,12 @@ files each). Known exceptions are
 findings against generated code that is stale on disk (its source spec newer
 than the generated file) — these are true.
 
-Status (2026-11-13), stable checks:
+Status (2026-11-17), stable checks:
 
 | corpus | files | errors and warnings | which |
 |---|---|---|---|
-| backend A | 3677 | 1 | `argument-mismatch` against a stale generated client |
-| backend B | 8364 | 2 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none |
+| backend A | 3677 | 14 | `argument-mismatch` against a stale generated client (one method, its 14 calls) |
+| backend B | 8364 | 3 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none; **false** `unsafe-call` after JUnit's `assertNotNull(x)`, whose contract (`x != null` once it returns) isn't read: only the `kotlin` package's contracts are known |
 | backend C | 4416 | 0 | |
 | backend D | 3819 | 0 | |
 | backend E | 1332 | 1 | `missing-package` on a file that really has none |

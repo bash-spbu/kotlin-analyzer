@@ -149,7 +149,7 @@ impl Types<'_> {
         }
     }
 
-    fn is_any(&self, class: &ClassType) -> bool {
+    pub(crate) fn is_any(&self, class: &ClassType) -> bool {
         matches!(self.builtin("Any"), Ty::Class(any) if any.class == class.class)
     }
 

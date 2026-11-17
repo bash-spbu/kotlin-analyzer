@@ -291,6 +291,7 @@ pub(super) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
         TokenKind::EnumMember => Type::ENUM_MEMBER,
         TokenKind::Function => Type::FUNCTION,
         TokenKind::Method => Type::METHOD,
+        TokenKind::Decorator => Type::DECORATOR,
     };
     lsp_types::SemanticTokensLegend {
         token_types: TokenKind::ALL.into_iter().map(token_type).collect(),

@@ -116,6 +116,21 @@ suspend fun load(id: UUID, retry: suspend () -> Unit): Result<com.example.Model>
 }
 
 #[test]
+fn a_comment_between_suspend_and_its_function_type_keeps_it_suspending() {
+    check_item_tree(
+        r#"
+//- /src/Retry.kt
+package app
+fun retry(block: suspend /* later */ () -> Unit) {}
+"#,
+        expect![[r#"
+            package app
+            fun retry(block: suspend () -> Unit)
+        "#]],
+    );
+}
+
+#[test]
 fn java_item_tree() {
     check_item_tree(
         r#"

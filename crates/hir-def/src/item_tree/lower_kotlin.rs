@@ -633,7 +633,7 @@ fn keyword_range(node: SyntaxNode<'_>, keyword: &str) -> Option<TextRange> {
 /// `suspend () -> T` puts `suspend` in a `type_modifiers` sibling before
 /// the function type.
 fn preceded_by_suspend(node: SyntaxNode<'_>) -> bool {
-    node.prev_named_sibling()
+    syntax::previous_named_sibling(node)
         .filter(|sibling| sibling.kind() == "type_modifiers")
         .is_some_and(|modifiers| {
             syntax::descendants(modifiers).any(|token| token.kind() == "suspend")

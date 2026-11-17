@@ -56,6 +56,67 @@ fun price(): Mo$0ney? = null
 }
 
 #[test]
+fn definition_in_annotation_arguments_on_every_declaration() {
+    let fixture = r#"
+//- /app/a/Props.kt
+package a
+annotation class Enable(val value: Any)
+class Props
+const val PREFIX = "p"
+//- /app/c/Props.kt
+package c
+class Props
+const val PREFIX = "q"
+//- /app/b/Config.kt
+package b
+import a.Enable
+import a.Props
+import a.PREFIX
+@Enable(Props::class)
+class Config
+@Enable(PREFIX)
+class Prefixed
+class Holder(@param:Enable(Props::class) val x: Int) {
+    @Enable(Props::class) fun method() {}
+    @Enable(Props::class) val property = 1
+}
+@Enable(Props::class) fun top() {}
+"#;
+    let mut found = Vec::new();
+    let cursors = [
+        ("Props", 2),
+        ("PREFIX", 2),
+        ("Props", 3),
+        ("Props", 4),
+        ("Props", 5),
+        ("Props", 6),
+    ];
+    for (word, nth) in cursors {
+        let marked = Fixture::with_mini_stdlib(&mark_nth(fixture, "/app/b/Config.kt", word, nth));
+        let (file, offset) = marked.cursor();
+        let targets = analysis(&marked).goto_definition(file, offset).unwrap();
+        let described: Vec<String> = targets
+            .iter()
+            .map(|target| {
+                let crate::NavigationFile::Workspace(file) = target.file else {
+                    return format!("library:{}", target.name);
+                };
+                format!("{}:{}", marked.vfs.path(file).display(), target.name)
+            })
+            .collect();
+        found.push(format!("{word} #{nth}: {}", described.join(", ")));
+    }
+    expect![[r#"
+        Props #2: /app/a/Props.kt:Props
+        PREFIX #2: /app/a/Props.kt:PREFIX
+        Props #3: /app/a/Props.kt:Props
+        Props #4: /app/a/Props.kt:Props
+        Props #5: /app/a/Props.kt:Props
+        Props #6: /app/a/Props.kt:Props"#]]
+    .assert_eq(&found.join("\n"));
+}
+
+#[test]
 fn definition_of_each_segment_of_a_qualified_type_and_of_an_import() {
     let fixture = r#"
 //- /app/a/b/Outer.kt
@@ -1193,6 +1254,72 @@ fun use() = storeUrl()
 }
 
 #[test]
+fn a_constructor_property_is_one_symbol_from_its_declaration_and_every_use() {
+    let fixture = r#"
+//- /app/a/Switches.kt
+package a
+class Switches(
+    val enabled: Boolean,
+    val fallback: Boolean = enabled,
+) {
+    val shown = enabled
+    fun check(): Boolean = enabled
+}
+class Other(val enabled: Boolean)
+fun plain(enabled: Boolean) = enabled
+//- /app/b/Use.kt
+package b
+import a.Switches
+fun use(switches: Switches, other: a.Other): Boolean {
+    val made = Switches(enabled = true)
+    return switches.enabled && other.enabled && made.enabled
+}
+"#;
+    // Each cursor is the `nth` `enabled` of the file; all mean one symbol.
+    let cursors = [
+        ("/app/a/Switches.kt", 1),
+        ("/app/a/Switches.kt", 3),
+        ("/app/a/Switches.kt", 4),
+        ("/app/b/Use.kt", 2),
+    ];
+    for (path, nth) in cursors {
+        let marked = Fixture::with_mini_stdlib(&mark_nth(fixture, path, "enabled", nth));
+        let (file, offset) = marked.cursor();
+        let found = analysis(&marked).references(file, offset, true).unwrap();
+        let mut lines: Vec<String> = found
+            .iter()
+            .map(|range| {
+                let text = marked.vfs.contents(range.file).unwrap();
+                let line = text[..range.range.start as usize].matches('\n').count() + 1;
+                format!("{}:{line}", marked.vfs.path(range.file).display())
+            })
+            .collect();
+        lines.sort();
+        expect![[r#"
+            /app/a/Switches.kt:3
+            /app/a/Switches.kt:4
+            /app/a/Switches.kt:6
+            /app/a/Switches.kt:7
+            /app/b/Use.kt:4
+            /app/b/Use.kt:5
+            /app/b/Use.kt:5"#]]
+        .assert_eq(&lines.join("\n"));
+    }
+}
+
+/// `fixture` with `$0` before the `nth` (1-based) occurrence of `word` in
+/// the file at `path`.
+fn mark_nth(fixture: &str, path: &str, word: &str, nth: usize) -> String {
+    let file_start = fixture.find(&format!("//- {path}\n")).unwrap();
+    let mut position = file_start;
+    for _ in 0..nth {
+        position = fixture[position..].find(word).unwrap() + position + 1;
+    }
+    let at = position - 1;
+    format!("{}$0{}", &fixture[..at], &fixture[at..])
+}
+
+#[test]
 fn references_skip_a_namesake_and_rename_edits_every_file() {
     let fixture = r#"
 //- /app/a/Money.kt
@@ -1356,26 +1483,6 @@ class Account(val owner: String) {
 }
 "#,
     );
-    let file = fixture.file("/app/b/Use.kt");
-    let text = fixture.vfs.contents(file).unwrap().clone();
-    let tokens = analysis(&fixture).semantic_tokens(file).unwrap();
-    let rendered: Vec<String> = tokens
-        .iter()
-        .map(|token| {
-            let names: Vec<&str> = crate::TokenModifiers::NAMES
-                .iter()
-                .enumerate()
-                .filter(|(bit, _)| token.modifiers.0 & (1 << bit) != 0)
-                .map(|(_, name)| *name)
-                .collect();
-            format!(
-                "{} {:?} {}",
-                &text[token.range.start as usize..token.range.end as usize],
-                token.kind,
-                names.join(",")
-            )
-        })
-        .collect();
     expect![[r#"
         LIMIT Property declaration,readonly,static
         Account Class declaration
@@ -1399,7 +1506,68 @@ class Account(val owner: String) {
         prefix Parameter readonly
         owner Property readonly
         label Variable readonly"#]]
-    .assert_eq(&rendered.join("\n"));
+    .assert_eq(&rendered_tokens(&fixture, "/app/b/Use.kt"));
+}
+
+#[test]
+fn semantic_tokens_mark_annotation_names_as_decorators() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/a/Marks.kt
+package a
+annotation class Enable(val value: Any)
+annotation class Plain
+//- /app/b/Use.kt
+@file:a.Plain
+package b
+import a.Enable
+import a.Plain
+@Plain
+@Enable(Enable::class)
+class Config(@param:Enable(Plain::class) val limit: Int) {
+    @a.Plain fun run(): Enable? = null
+}
+"#,
+    );
+    expect![[r#"
+        Plain Decorator 
+        Plain Decorator 
+        Enable Decorator 
+        Enable Interface 
+        Config Class declaration
+        Enable Decorator 
+        Plain Interface 
+        limit Property declaration,readonly
+        Int Class 
+        Plain Decorator 
+        run Method declaration
+        Enable Interface "#]]
+    .assert_eq(&rendered_tokens(&fixture, "/app/b/Use.kt"));
+}
+
+/// `text kind modifiers` per semantic token of the file at `path`.
+fn rendered_tokens(fixture: &Fixture, path: &str) -> String {
+    let file = fixture.file(path);
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let tokens = analysis(fixture).semantic_tokens(file).unwrap();
+    let rendered: Vec<String> = tokens
+        .iter()
+        .map(|token| {
+            let names: Vec<&str> = crate::TokenModifiers::NAMES
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| token.modifiers.0 & (1 << bit) != 0)
+                .map(|(_, name)| *name)
+                .collect();
+            format!(
+                "{} {:?} {}",
+                &text[token.range.start as usize..token.range.end as usize],
+                token.kind,
+                names.join(",")
+            )
+        })
+        .collect();
+    rendered.join("\n")
 }
 
 #[test]

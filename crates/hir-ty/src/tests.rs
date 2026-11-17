@@ -335,6 +335,81 @@ fun use(account: Account) {
 }
 
 #[test]
+fn comments_before_the_first_statement_or_expression_are_skipped() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Switches(val enabled: Boolean)
+fun <T> run(block: () -> T): T = block()
+fun blockBody(switches: Switches) {
+    // given
+    val value = switches
+    value.enabled
+}
+fun expressionBody(switches: Switches) = /* the flag */ switches.enabled
+fun lambda(switches: Switches) = run {
+    // first
+    switches.enabled
+}
+fun parenthesized(switches: Switches) = (/* inner */ switches).enabled
+fun branch(switches: Switches) = when {
+    switches.enabled -> {
+        /* chosen */
+        switches
+    }
+    else -> null
+}
+"#,
+        expect![[r#"
+            block@3 -> local block@3: T
+            switches@6 -> local switches@4: Switches
+            value@7 -> local value@6: Switches
+            enabled@7 -> app.Switches.enabled: Boolean
+            switches@9 -> local switches@9: Switches
+            enabled@9 -> app.Switches.enabled: Boolean
+            run@10 -> app.run: Boolean
+            switches@12 -> local switches@10: Switches
+            enabled@12 -> app.Switches.enabled: Boolean
+            switches@14 -> local switches@14: Switches
+            enabled@14 -> app.Switches.enabled: Boolean
+            switches@16 -> local switches@15: Switches
+            enabled@16 -> app.Switches.enabled: Boolean
+            switches@18 -> local switches@15: Switches"#]],
+    );
+}
+
+#[test]
+fn a_smart_cast_to_a_type_parameter_is_unknown_not_the_parameter() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+open class Node { fun remove(): Boolean = true }
+fun <T> List<T>.remove(index: Int): T = TODO()
+inline fun <reified T> firstOf(node: Node): T? {
+    if (node !is T) return null
+    node.remove()
+    return node
+}
+fun <T> same(value: T, other: Any?) {
+    if (other is T) other
+    if (value is T) value
+}
+"#,
+        expect![[r#"
+            TODO@3 -> kotlin.TODO: Nothing
+            node@5 -> local node@4: Node
+            node@6 -> local node@4: {unknown}
+            node@7 -> local node@4: {unknown}
+            other@10 -> local other@9: Any?
+            other@10 -> local other@9: T
+            value@11 -> local value@9: T
+            value@11 -> local value@9: T"#]],
+    );
+}
+
+#[test]
 fn overloads_are_chosen_by_argument_types_and_levels() {
     check_inference(
         r#"
@@ -1284,6 +1359,29 @@ val total: Int = 0
             prefix@9 -> app.Account.prefix: String
             length@9 -> kotlin.String.length: Int
             field@12 -> local field@12: Int"#]],
+    );
+}
+
+#[test]
+fn accessors_after_a_comment_still_belong_to_their_property() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Account {
+    var balance: Long = 0
+        // read
+        get() = field + 1
+        /* written */
+        set(value) {
+            field = value
+        }
+}
+"#,
+        expect![[r#"
+            field@5 -> local field@5: Long
+            field@8 -> local field@7: Long
+            value@8 -> local value@7: Long"#]],
     );
 }
 

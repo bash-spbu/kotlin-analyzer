@@ -6,7 +6,7 @@ use hir::{
     ClassKind, FileId, ItemKind, ItemLocation, LocalKind, Modifiers, Name, Path, Reference,
     Resolution, RootDatabase, SourceDatabase,
 };
-use syntax::{Language, TextRange, named_children};
+use syntax::{Language, SyntaxNode, TextRange, named_children};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TokenKind {
@@ -21,11 +21,13 @@ pub enum TokenKind {
     EnumMember,
     Function,
     Method,
+    /// An annotation's name where it annotates (`@Name`, `@Name(…)`).
+    Decorator,
 }
 
 impl TokenKind {
     /// The legend's order: a token's index there is its type in LSP.
-    pub const ALL: [TokenKind; 11] = [
+    pub const ALL: [TokenKind; 12] = [
         TokenKind::Namespace,
         TokenKind::Class,
         TokenKind::Interface,
@@ -37,6 +39,7 @@ impl TokenKind {
         TokenKind::EnumMember,
         TokenKind::Function,
         TokenKind::Method,
+        TokenKind::Decorator,
     ];
 }
 
@@ -145,14 +148,26 @@ pub(crate) fn semantic_tokens(db: &RootDatabase, file: FileId) -> Vec<SemanticTo
     tokens
 }
 
-/// Names in types (`List<Money>`), as resolution says.
+/// Names in types (`List<Money>`, `Money::class`), as resolution says.
 fn type_tokens(db: &RootDatabase, source: hir::SourceFile) -> Vec<SemanticToken> {
     let parse = hir::parse(db, source);
     let mut tokens = Vec::new();
-    for user_type in syntax::descendants(parse.root()).filter(|node| node.kind() == "user_type") {
+    for node in syntax::descendants(parse.root()) {
+        let segments: Vec<SyntaxNode<'_>> = match node.kind() {
+            "user_type" => named_children(node)
+                .filter(|child| child.kind() == "type_identifier")
+                .collect(),
+            // `Type::class` in an annotation: the grammar leaves the type a
+            // bare name, not a `user_type`.
+            "callable_reference" => named_children(node)
+                .take_while(|child| child.kind() == "type_identifier")
+                .collect(),
+            _ => continue,
+        };
+        let annotates = is_annotation_name(node);
         let mut path: Vec<Name> = Vec::new();
-        for segment in named_children(user_type).filter(|child| child.kind() == "type_identifier") {
-            path.push(Name::new(parse.text_of(segment)));
+        for (index, segment) in segments.iter().enumerate() {
+            path.push(Name::new(parse.text_of(*segment)));
             let resolution =
                 hir::resolve_type_path(db, source, &Path::new(path.clone()), segment.start_byte());
             let token = match resolution {
@@ -163,9 +178,16 @@ fn type_tokens(db: &RootDatabase, source: hir::SourceFile) -> Vec<SemanticToken>
                 Resolution::Package(_) => Some((TokenKind::Namespace, TokenModifiers::default())),
                 Resolution::Ambiguous(_) | Resolution::Unresolved => None,
             };
+            let is_last = index + 1 == segments.len();
+            let token = match token {
+                Some((_, modifiers)) if annotates && is_last => {
+                    Some((TokenKind::Decorator, modifiers))
+                }
+                other => other,
+            };
             if let Some((kind, modifiers)) = token {
                 tokens.push(SemanticToken {
-                    range: TextRange::of(segment),
+                    range: TextRange::of(*segment),
                     kind,
                     modifiers,
                 });
@@ -173,6 +195,21 @@ fn type_tokens(db: &RootDatabase, source: hir::SourceFile) -> Vec<SemanticToken>
         }
     }
     tokens
+}
+
+/// Whether `user_type` names the annotation in `@Name`, `@Name(…)`,
+/// `@target:Name` or `@file:Name`.
+fn is_annotation_name(user_type: SyntaxNode<'_>) -> bool {
+    let is_annotation =
+        |node: SyntaxNode<'_>| matches!(node.kind(), "annotation" | "file_annotation");
+    let Some(parent) = user_type.parent() else {
+        return false;
+    };
+    if is_annotation(parent) {
+        return true;
+    }
+    let invoked = parent.kind() == "constructor_invocation";
+    invoked && parent.parent().is_some_and(is_annotation)
 }
 
 fn declaration_token(
@@ -223,9 +260,10 @@ fn declaration_token(
 
 fn local_kind(kind: LocalKind) -> TokenKind {
     match kind {
-        LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::ImplicitIt => {
-            TokenKind::Parameter
-        }
+        LocalKind::Parameter
+        | LocalKind::PropertyParameter
+        | LocalKind::LambdaParameter
+        | LocalKind::ImplicitIt => TokenKind::Parameter,
         LocalKind::Function => TokenKind::Function,
         LocalKind::Class => TokenKind::Class,
         LocalKind::Value | LocalKind::Variable | LocalKind::BackingField => TokenKind::Variable,

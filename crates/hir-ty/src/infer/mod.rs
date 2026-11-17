@@ -53,6 +53,10 @@ pub enum LocalKind {
     Value,
     Variable,
     Parameter,
+    /// A `val`/`var` parameter of a primary constructor: one declaration
+    /// that is the parameter in the class's initializers and defaults, and
+    /// the class's property of the same name everywhere else.
+    PropertyParameter,
     LambdaParameter,
     /// A lambda's implicit single parameter.
     ImplicitIt,

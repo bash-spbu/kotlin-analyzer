@@ -79,11 +79,11 @@ pub(super) fn data_flow_scope(node: SyntaxNode<'_>) -> SyntaxNode<'_> {
 /// The property an accessor written on its own line belongs to: the
 /// nearest property declared before it.
 fn accessed_property(accessor: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
-    let mut previous = accessor.prev_named_sibling();
+    let mut previous = syntax::previous_named_sibling(accessor);
     while let Some(sibling) = previous {
         match sibling.kind() {
             "property_declaration" => return Some(sibling),
-            "getter" | "setter" => previous = sibling.prev_named_sibling(),
+            "getter" | "setter" => previous = syntax::previous_named_sibling(sibling),
             _ => return None,
         }
     }

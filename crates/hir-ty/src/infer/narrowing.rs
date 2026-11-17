@@ -10,7 +10,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 use super::declarations::Inferrer;
 use super::member_scope::data_flow_scope;
 use super::{LocalId, Reference, UnsafeCall};
-use crate::ty::{ClassType, Nullability, Ty};
+use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
 
 /// Members every value has, which Kotlin also offers on a nullable
 /// receiver (`Any?.toString()`, `Any?.hashCode()`).
@@ -231,6 +231,9 @@ impl Inferrer<'_> {
     /// specific of the two when one is a subtype of the other. Unrelated
     /// types would make it both at once, which a `Ty` can't say: unknown.
     pub(super) fn smart_cast(&self, current: &Ty, target: Ty) -> Ty {
+        if let Ty::TypeParameter { parameter, .. } = &target {
+            return self.smart_cast_to_parameter(current, *parameter, &target);
+        }
         let Some(target_class) = target.class().map(|class| class.class) else {
             return target.non_null();
         };
@@ -251,6 +254,21 @@ impl Inferrer<'_> {
             Ty::Class(class) => Ty::Class(self.with_inferred_arguments(&holders, class)).non_null(),
             other => other.non_null(),
         }
+    }
+
+    /// `x is T` for a type parameter `T`: `T` itself when `x` is already a
+    /// `T` or is `Any` (every `T` is narrower); else `x` is both its type
+    /// and `T` (`Node & T`), which a `Ty` can't say: unknown.
+    fn smart_cast_to_parameter(&self, current: &Ty, parameter: TypeParameterId, target: &Ty) -> Ty {
+        let already_the_parameter = matches!(
+            current,
+            Ty::TypeParameter { parameter: own, .. } if *own == parameter
+        );
+        let is_any = matches!(current, Ty::Class(class) if self.types.is_any(class));
+        if already_the_parameter || is_any {
+            return target.clone().non_null();
+        }
+        Ty::Unknown
     }
 
     /// `x is Value` for `x: ReferenceOr<Schema>`: a generic class tested
