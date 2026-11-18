@@ -76,8 +76,23 @@ impl Inferrer<'_> {
             }
             _ => return None,
         };
-        let Reference::Declaration(declaration) = self.recorded_at(name)?.reference else {
-            return None;
+        let declaration = match self.recorded_at(name)?.reference {
+            Reference::Declaration(declaration) => declaration,
+            // Overloads the call couldn't tell apart (`assertNotNull(x)`
+            // and `assertNotNull(x, message)`): their contract when they
+            // all have the same.
+            Reference::Candidates(candidates) => {
+                let first = *candidates.first()?;
+                let first_contract = contract_of(self, first)?;
+                let shared = candidates.iter().all(|candidate| {
+                    contract_of(self, *candidate).as_ref() == Some(&first_contract)
+                });
+                if !shared {
+                    return None;
+                }
+                first
+            }
+            _ => return None,
         };
         let tree = hir_def::item_tree(self.db, declaration.container);
         let contract = tree.contract(declaration.item)?.clone();
@@ -217,4 +232,10 @@ fn arguments_by_parameter<'tree>(
         }
     }
     found
+}
+
+fn contract_of(inferrer: &Inferrer<'_>, function: ItemLocation) -> Option<Contract> {
+    hir_def::item_tree(inferrer.db, function.container)
+        .contract(function.item)
+        .cloned()
 }

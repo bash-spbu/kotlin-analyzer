@@ -25,6 +25,9 @@ struct WhenSubject<'subject> {
     /// Whether the subject's type is the one the compiler gives it (see
     /// `examinable`).
     examinable: bool,
+    /// What a branch matching a value that can't be null makes the
+    /// subject's root local (`existedOrder` of `when (existedOrder?.status)`).
+    not_null_when_matched: Option<&'subject (super::LocalId, Ty)>,
 }
 
 /// What an expression denotes: a value, or — as the qualifier before a
@@ -116,7 +119,13 @@ impl Inferrer<'_> {
                 Some(inner) => return self.typed(inner, expected),
                 None => Ty::Unknown,
             },
-            "call_expression" => self.call(node, expected),
+            "call_expression" => {
+                let ty = self.call(node, expected);
+                // `requireNotNull(x)` anywhere — an argument, a receiver,
+                // an initializer: `x` isn't null once it returned.
+                self.narrow_after_contract(node);
+                ty
+            }
             "integer_literal" | "hex_literal" | "bin_literal" => self.types.builtin("Int"),
             "long_literal" => self.types.builtin("Long"),
             "real_literal" => {
@@ -908,18 +917,43 @@ impl Inferrer<'_> {
         let is_plain = has_token(node, "=");
         let expected = if is_plain { Some(&target_type) } else { None };
         let required = is_plain.then(|| self.written_target_type(target)).flatten();
-        match required {
+        let ty = match required {
             Some(required) => {
                 let requirement = super::type_mismatches::Requirement::new(
                     super::MismatchSite::Assignment,
                     &required,
                 );
-                self.required(value, expected, requirement);
+                self.required(value, expected, requirement)
             }
-            None => {
-                self.expression(value, expected);
-            }
+            None => self.expression(value, expected),
+        };
+        if is_plain {
+            self.narrow_assigned(target, &ty);
         }
+    }
+
+    /// `x = value` makes a local `var` what was assigned: `var t: T? =
+    /// null; t = load()` is a `T` after it. A value of a type that doesn't
+    /// fit, or isn't known, leaves it its declared type.
+    fn narrow_assigned(&mut self, target: SyntaxNode<'_>, assigned: &Ty) {
+        let children: Vec<SyntaxNode<'_>> = named_children(target).collect();
+        let [name] = children[..] else {
+            return;
+        };
+        let Some(Reference::Local(local)) =
+            self.recorded_at(name).map(|resolved| resolved.reference)
+        else {
+            return;
+        };
+        if self.local_kind(local) != LocalKind::Variable {
+            return;
+        }
+        let declared = self.local_declared_type(local);
+        let fits = !assigned.is_unknown()
+            && !matches!(assigned, Ty::Nothing { .. })
+            && self.types.fits(assigned, &declared) == super::Fit::Yes;
+        let now = if fits { assigned.clone() } else { declared };
+        self.narrow(&[(local, now)]);
     }
 
     /// The type an assignment's target writes: a local or property
@@ -1071,34 +1105,80 @@ impl Inferrer<'_> {
         if let Some(receiver) = &receiver_narrowed {
             self.push_receiver(receiver.clone(), None);
         }
+        self.take_last_popped();
         let then_type = match then_branch {
             Some(branch) => self.body_required(branch, expected, requirement.clone()),
             None => self.types.builtin("Unit"),
         };
+        let then_body = self.take_last_popped();
         if receiver_narrowed.is_some() {
             self.pop_receiver();
         }
-        self.pop_scope();
+        let mut then_end = self.pop_scope_narrowings();
+        then_end.extend(then_body);
         self.push_scope();
         self.narrow(&narrowing.when_false);
         let else_type =
             else_branch.map(|branch| self.body_required(branch, expected, requirement.clone()));
-        self.pop_scope();
+        let else_body = self.take_last_popped();
+        let mut else_end = self.pop_scope_narrowings();
+        if else_branch.is_some() {
+            else_end.extend(else_body);
+        }
+        // What follows knows what both ways it can come from know; a way
+        // that jumps (`return`, `throw`) doesn't come: `if (x == null)
+        // return`, `if (x == null) x = Default`.
         let then_jumps = matches!(then_type, Ty::Nothing { nullable: false });
-        if else_branch.is_none() && then_jumps {
-            // `if (x == null) return`: what follows sees `x` as not null.
-            self.narrow(&narrowing.when_false);
-        }
-        if else_type
+        let else_jumps = else_type
             .as_ref()
-            .is_some_and(|ty| matches!(ty, Ty::Nothing { nullable: false }))
-        {
-            self.narrow(&narrowing.when_true);
-        }
+            .is_some_and(|ty| matches!(ty, Ty::Nothing { nullable: false }));
+        let after = match (then_jumps, else_jumps) {
+            (true, true) => Vec::new(),
+            (true, false) => else_end,
+            (false, true) => then_end,
+            (false, false) => self.joined(&then_end, &else_end),
+        };
+        self.narrow(&after);
         match else_type {
             Some(else_type) => self.types.common_type(&[then_type, else_type]),
             None => self.types.builtin("Unit"),
         }
+    }
+
+    /// The narrowings both ways know: a local narrowed on both, to the
+    /// wider of the two types (one must fit the other).
+    pub(super) fn joined(
+        &self,
+        first: &[(super::LocalId, Ty)],
+        second: &[(super::LocalId, Ty)],
+    ) -> Vec<(super::LocalId, Ty)> {
+        let latest = |narrowings: &[(super::LocalId, Ty)], local: super::LocalId| {
+            narrowings
+                .iter()
+                .rev()
+                .find(|(narrowed, _)| *narrowed == local)
+                .map(|(_, ty)| ty.clone())
+        };
+        let mut joined: Vec<(super::LocalId, Ty)> = Vec::new();
+        for (local, _) in first {
+            if joined.iter().any(|(known, _)| known == local) {
+                continue;
+            }
+            let (Some(one), Some(other)) = (latest(first, *local), latest(second, *local)) else {
+                continue;
+            };
+            let wider = if one == other || self.types.fits(&other, &one) == super::Fit::Yes {
+                Some(one)
+            } else if self.types.fits(&one, &other) == super::Fit::Yes {
+                Some(other)
+            } else {
+                None
+            };
+            if let Some(wider) = wider {
+                joined.push((*local, wider));
+            }
+        }
+        joined
     }
 
     fn when_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
@@ -1119,7 +1199,9 @@ impl Inferrer<'_> {
         let subject_is_this =
             subject_value.is_some_and(|subject| subject.kind() == "this_expression");
         let mut subject_examinable = false;
+        let mut not_null_when_matched = None;
         let mut branches = Vec::new();
+        let mut branch_ends = Vec::new();
         let mut has_else = false;
         for child in named_children(node) {
             match child.kind() {
@@ -1129,6 +1211,8 @@ impl Inferrer<'_> {
                     subject_type = Some(ty);
                     subject_examinable =
                         subject_value.is_some_and(|subject| self.examinable(subject));
+                    not_null_when_matched =
+                        subject_value.and_then(|subject| self.asserted_not_null(subject));
                 }
                 "when_entry" => {
                     let subject = WhenSubject {
@@ -1136,20 +1220,40 @@ impl Inferrer<'_> {
                         ty: subject_type.as_ref(),
                         is_this: subject_is_this,
                         examinable: subject_examinable,
+                        not_null_when_matched: not_null_when_matched.as_ref(),
                     };
-                    let (ty, is_else) =
+                    let before = self.scope_narrowings();
+                    let (ty, is_else, mut entry_end) =
                         self.when_entry(child, subject, expected, requirement.clone());
                     has_else |= is_else;
+                    if !matches!(ty, Ty::Nothing { nullable: false }) {
+                        let mut branch_end = before;
+                        branch_end.append(&mut entry_end);
+                        branch_ends.push(branch_end);
+                    }
                     branches.push(ty);
                     // Later branches run only when this one's condition
                     // was false.
-                    let when_false = self.narrowed_when_entry_false(child, subject);
+                    let mut when_false = self.narrowed_when_entry_false(child, subject);
+                    when_false.append(&mut self.entry_false);
                     self.narrow(&when_false);
                 }
                 _ => {}
             }
         }
-        self.pop_scope();
+        let no_branch_taken = self.pop_scope_narrowings();
+        if !has_else {
+            branch_ends.push(no_branch_taken);
+        }
+        // What follows knows what every way it can come from knows.
+        let after = branch_ends
+            .split_first()
+            .map(|(first, rest)| {
+                rest.iter()
+                    .fold(first.clone(), |known, end| self.joined(&known, end))
+            })
+            .unwrap_or_default();
+        self.narrow(&after);
         if let (false, Some(subject_type)) = (has_else, &subject_type) {
             self.check_exhaustive(node, subject_type);
         }
@@ -1200,17 +1304,19 @@ impl Inferrer<'_> {
     }
 
     /// One `when` branch: its conditions (with the smart casts they give
-    /// the branch) and its body.
+    /// the branch) and its body; whether it is `else`, and what is narrowed
+    /// where it ends.
     fn when_entry(
         &mut self,
         node: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
         expected: Option<&Ty>,
         requirement: Option<super::type_mismatches::Requirement>,
-    ) -> (Ty, bool) {
+    ) -> (Ty, bool, Vec<(LocalId, Ty)>) {
         let mut each_condition = Vec::new();
         let mut receivers = Vec::new();
         let mut body = None;
+        self.entry_false.clear();
         for child in named_children(node) {
             match child.kind() {
                 "when_condition" => {
@@ -1221,6 +1327,8 @@ impl Inferrer<'_> {
             }
         }
         let is_else = each_condition.is_empty();
+        // Kept past the body, whose own `when`s use it too.
+        let entry_false = std::mem::take(&mut self.entry_false);
         self.push_scope();
         self.narrow(&narrowed_by_every(each_condition));
         // A branch with one `is T` of `this` sees `this` as a `T`.
@@ -1231,15 +1339,19 @@ impl Inferrer<'_> {
         if let Some(receiver) = &narrowed_receiver {
             self.push_receiver(receiver.clone(), None);
         }
+        self.take_last_popped();
         let ty = match body {
             Some(body) => self.body_required(body, expected, requirement),
             None => self.types.builtin("Unit"),
         };
+        let body_end = self.take_last_popped();
         if narrowed_receiver.is_some() {
             self.pop_receiver();
         }
-        self.pop_scope();
-        (ty, is_else)
+        let mut entry_end = self.pop_scope_narrowings();
+        entry_end.extend(body_end);
+        self.entry_false = entry_false;
+        (ty, is_else, entry_end)
     }
 
     /// What a branch whose one condition is `!is T` tells the branches
@@ -1252,6 +1364,22 @@ impl Inferrer<'_> {
         let conditions: Vec<SyntaxNode<'_>> = named_children(entry)
             .filter(|child| child.kind() == "when_condition")
             .collect();
+        // `null ->` (without a guard): later branches see the subject
+        // not null.
+        let names_null = conditions.iter().any(|condition| {
+            named_children(*condition)
+                .next()
+                .is_some_and(|value| value.kind() == "null_literal")
+        });
+        if names_null && !syntax::ast::kotlin::has_guard(entry) {
+            let subject_local = subject
+                .local
+                .map(|local| (local, self.local_type(local).non_null()));
+            return subject_local
+                .into_iter()
+                .chain(subject.not_null_when_matched.cloned())
+                .collect();
+        }
         let [condition] = conditions[..] else {
             return Vec::new();
         };
@@ -1320,10 +1448,18 @@ impl Inferrer<'_> {
                 }
                 _ => {
                     if subject_type.is_some() {
-                        self.expression(child, subject_type);
+                        let matched = self.expression(child, subject_type);
+                        if let (true, Some(not_null)) =
+                            (matched.is_never_null(), subject.not_null_when_matched)
+                        {
+                            narrowings.push(not_null.clone());
+                        }
                     } else {
+                        // Without a subject a branch is a condition: the
+                        // branches after it see it false.
                         let narrowing = self.condition(child);
                         narrowings.extend(narrowing.when_true);
+                        self.entry_false.extend(narrowing.when_false);
                     }
                 }
             }
@@ -1334,12 +1470,20 @@ impl Inferrer<'_> {
     fn try_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
         let requirement = self.branch_requirement.take();
         let mut branches = Vec::new();
+        let mut try_end = Vec::new();
+        let mut catches_jump = true;
         for child in named_children(node) {
             match child.kind() {
                 "statements" | "block" => {
+                    self.take_last_popped();
                     branches.push(self.block_required(child, requirement.clone()));
+                    try_end = self.take_last_popped();
                 }
-                "catch_block" => branches.push(self.catch_block(child, requirement.clone())),
+                "catch_block" => {
+                    let caught = self.catch_block(child, requirement.clone());
+                    catches_jump &= matches!(caught, Ty::Nothing { nullable: false });
+                    branches.push(caught);
+                }
                 "finally_block" => {
                     for part in named_children(child) {
                         self.block(part);
@@ -1349,6 +1493,11 @@ impl Inferrer<'_> {
                     self.expression(child, expected);
                 }
             }
+        }
+        // `try { … if (x == null) return … } catch (…) { return }`: only the
+        // try block's end leads on.
+        if catches_jump && branches.len() > 1 {
+            self.narrow(&try_end);
         }
         if branches.is_empty() {
             return self.types.builtin("Unit");

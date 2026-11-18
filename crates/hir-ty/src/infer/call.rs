@@ -14,6 +14,7 @@ use syntax::{SyntaxNode, has_token, named_children};
 use super::declarations::Inferrer;
 use super::expressions::Typed;
 use super::fit::Fit;
+use super::type_mismatches::NullCheck;
 use super::{ArgumentMismatch, Certainty, LocalId, NameSite, Reference};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::{Member, class_substitution};
@@ -237,6 +238,43 @@ impl<'db> Inferrer<'db> {
         let name_node = named_children(suffix).find(|child| child.kind() == "simple_identifier");
         let member = name_node.map(|name| self.name(name));
         let receiver = self.member_receiver(receiver_node, member);
+        let safe = has_token(suffix, "?.");
+        // `x?.let { … x … }`: past the receiver, the call runs only when
+        // `x` isn't null.
+        let safely_called = safe
+            .then(|| self.asserted_not_null(receiver_node))
+            .flatten();
+        if let Some(not_null) = &safely_called {
+            self.push_scope();
+            self.narrow(std::slice::from_ref(not_null));
+        }
+        let ty = self.qualified_call_on(
+            receiver_node,
+            suffix,
+            receiver,
+            name_node,
+            arguments,
+            type_arguments,
+            expected,
+        );
+        if safely_called.is_some() {
+            self.pop_scope();
+        }
+        ty
+    }
+
+    /// `receiver.name(arguments)` once `receiver` is inferred.
+    #[allow(clippy::too_many_arguments)]
+    fn qualified_call_on(
+        &mut self,
+        receiver_node: SyntaxNode<'_>,
+        suffix: SyntaxNode<'_>,
+        receiver: Typed,
+        name_node: Option<SyntaxNode<'_>>,
+        arguments: &mut [Argument<'_>],
+        type_arguments: &[Ty],
+        expected: Option<&Ty>,
+    ) -> Ty {
         let safe = has_token(suffix, "?.");
         self.check_safe_call(receiver_node, &receiver, suffix);
         let Some(name_node) = name_node else {
@@ -979,6 +1017,11 @@ impl<'db> Inferrer<'db> {
         if self.is_multiplatform(candidate.callable.location()) {
             return;
         }
+        let null_check = if crate::members::is_java(self.db, candidate.callable.location()) {
+            NullCheck::Skipped
+        } else {
+            NullCheck::Judged
+        };
         for (argument, parameter_index) in arguments.iter().zip(parameter_of) {
             let parameter = &candidate.signature.parameters[*parameter_index];
             let (ArgumentValue::Typed { ty, .. }, Some(written)) =
@@ -991,7 +1034,13 @@ impl<'db> Inferrer<'db> {
             if parameter.vararg || argument.spread || !independent {
                 continue;
             }
-            self.check_value(super::MismatchSite::Argument, written, ty, &declared);
+            self.check_value(
+                super::MismatchSite::Argument,
+                written,
+                ty,
+                &declared,
+                null_check,
+            );
         }
     }
 

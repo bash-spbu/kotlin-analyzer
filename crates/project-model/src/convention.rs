@@ -56,7 +56,8 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
                 directories,
                 dependencies: Vec::new(),
                 libraries: Vec::new(),
-                classpath: Classpath::Complete,
+                // Libraries are unknown: names from them can't be judged.
+                classpath: Classpath::Partial,
                 compiler: CompilerOptions::default(),
             });
         }
@@ -174,6 +175,8 @@ mod tests {
             .source_set_of(&root.join("api/src/main/kotlin/A.kt"))
             .unwrap();
         assert_eq!(model.source_set(api_test).kind, SourceSetKind::Test);
+        // Without the build, libraries are unknown.
+        assert_eq!(model.source_set(api_main).classpath, Classpath::Partial);
         assert!(model.visible_source_sets(api_main).contains(&core_main));
         assert!(!model.visible_source_sets(api_main).contains(&api_test));
         assert_eq!(

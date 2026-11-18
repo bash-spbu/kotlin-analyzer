@@ -74,11 +74,18 @@ member name of a call or property chain (`getOrThrow` of
 only when the value's class can't be the required one — no supertype of
 it is, every supertype known; a mutable collection required takes its
 read-only one (a Java `List` parameter is `(Mutable)List!`), and a class
-of the same qualified name counts as the same. Silent:
-- for nullability alone and for type arguments: smart casts of
-  properties and of a `var` after an assignment, and generic variance,
-  aren't modelled; a nullable name going where a nullable value goes may be
-  smart-cast to `Nothing?` (`if (x == null) f(x)`);
+of the same qualified name counts as the same. Nullability alone is
+reported for a local only (`fun f(dog: Dog?) = feed(dog)`), after the
+smart casts the data flow gives it (resolution.md), and only where the
+source set's classpath is complete — a missing library's contract would
+have narrowed it. Silent:
+- for nullability alone of anything but a local (smart casts of
+  properties aren't modelled), of an argument of a Java method (its
+  overloads differing in boxing alone, `isGreaterThan(long)` and
+  `isGreaterThan(Long)`, aren't all weighed), and for type arguments
+  (generic variance isn't modelled); a nullable name going where a
+  nullable value goes may be smart-cast to `Nothing?` (`if (x == null)
+  f(x)`);
 - for a value whose type isn't the compiler's for certain (also what
   cast checks require, below):
   - anything but a name, property, `this`, literal or call of a function

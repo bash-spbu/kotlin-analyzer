@@ -1034,6 +1034,7 @@ class Converter(private val exchange: Exchange, private val settings: Settings<S
         expect![[r#"
             [return-type-mismatch] 7: Return type mismatch: expected `Dog`, actual `Result`
             [return-type-mismatch] 9: Return type mismatch: expected `Dog`, actual `Result`
+            [return-type-mismatch] 15: Return type mismatch: expected `Dog`, actual `Dog?`
             [return-type-mismatch] 31: Return type mismatch: expected `Dog`, actual `Car`
             [return-type-mismatch] 34: Return type mismatch: expected `Car`, actual `Dog`
             [type-mismatch] 36: Initializer type mismatch: expected `Int`, actual `String`
@@ -1041,6 +1042,7 @@ class Converter(private val exchange: Exchange, private val settings: Settings<S
             [type-mismatch] 45: Assignment type mismatch: expected `Animal`, actual `Car`
             [type-mismatch] 48: Initializer type mismatch: expected `Int`, actual `String`
             [type-mismatch] 55: Argument type mismatch: expected `Dog`, actual `Car`
+            [type-mismatch] 60: Argument type mismatch: expected `Dog`, actual `Dog?`
             [return-type-mismatch] 79: Return type mismatch: expected `Int`, actual `Success`"#]],
     );
 }
@@ -1095,6 +1097,122 @@ fun fine(flag: Boolean, dog: Dog, car: Car): Animal {
             [return-type-mismatch] 15: Return type mismatch: expected `Dog`, actual `Car`
             [type-mismatch] 19: Initializer type mismatch: expected `Dog`, actual `Car`
             [return-type-mismatch] 25: Return type mismatch: expected `Dog`, actual `Car`"#]],
+    );
+}
+
+#[test]
+fn a_nullable_local_is_judged_after_the_smart_casts_the_compiler_makes() {
+    // Every way the compiler learns a local isn't null, beside a near
+    // twin where some way to the use still lets it be null.
+    let config = || crate::DiagnosticsConfig {
+        only: vec![crate::Check::TypeMismatch],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+open class Exception
+class Dog { val name: String? = null; val owner: Owner? = null }
+class Owner(val id: Int)
+enum class Status { NEW, DONE }
+class Order(val status: Status?)
+fun feed(dog: Dog) {}
+fun take(order: Order) {}
+fun greet(name: String) {}
+fun fail(): Nothing = TODO()
+fun later(block: () -> Unit) {}
+fun assigned(input: Dog?) {
+    var dog = input
+    if (dog == null) dog = Dog()
+    feed(dog)
+}
+fun assignedOneWay(input: Dog?, flag: Boolean) {
+    var dog = input
+    if (flag) dog = Dog()
+    feed(dog)
+}
+fun checkedButGoesOn(dog: Dog?) {
+    if (dog == null) println("none")
+    feed(dog)
+}
+fun subjectless(dog: Dog?) {
+    when {
+        dog == null -> return
+        else -> feed(dog)
+    }
+    feed(dog)
+}
+fun subjectlessGoesOn(dog: Dog?, flag: Boolean) {
+    when {
+        dog == null -> println("none")
+        flag -> return
+    }
+    feed(dog)
+}
+fun nullBranch(order: Order?) {
+    when (order?.status) {
+        null -> return
+        Status.NEW -> take(order)
+        Status.DONE -> fail()
+    }
+    take(order)
+}
+fun contracts(dog: Dog?, name: String?) {
+    requireNotNull(dog)
+    feed(dog)
+    require(!name.isNullOrEmpty())
+    greet(name)
+}
+fun nestedContract(dog: Dog?) {
+    feed(requireNotNull(dog))
+    feed(dog)
+}
+fun contractInLambda(dog: Dog?) {
+    later { requireNotNull(dog) }
+    feed(dog)
+}
+fun safeCall(dog: Dog?) {
+    dog?.let { feed(dog) }
+}
+fun safeChainCompared(dog: Dog?) {
+    if (dog?.owner != null) feed(dog)
+}
+fun comparedWithValue(dog: Dog?, other: Dog) {
+    if (dog == other) feed(dog)
+}
+fun comparedWithNotValue(order: Order?) {
+    if (order?.status != Status.NEW) return
+    take(order)
+}
+fun tried(input: Dog?) {
+    try {
+        if (input == null) return
+    } catch (exception: Exception) {
+        return
+    }
+    feed(input)
+}
+fun triedCatchGoesOn(input: Dog?) {
+    try {
+        if (input == null) return
+    } catch (exception: Exception) {
+        println("failed")
+    }
+    feed(input)
+}
+fun aliased(info: Dog?) {
+    val chain = info?.let { it.name }
+    chain?.let { feed(info) }
+}
+"#,
+        config(),
+        expect![[r#"
+            [type-mismatch] 20: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 24: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 38: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 60: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 89: Argument type mismatch: expected `Dog`, actual `Dog?`"#]],
     );
 }
 

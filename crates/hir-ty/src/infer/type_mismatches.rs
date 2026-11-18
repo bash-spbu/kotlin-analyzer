@@ -8,11 +8,11 @@
 //! merely told to expect. Like rust-analyzer's `CoerceMany`, a requirement
 //! on a branching expression (`if`, `when`, `try`, `?:`) passes to the
 //! value each branch ends with, so a mismatch is shown on that innermost
-//! value. Only a class mismatch with every supertype known is
-//! reported — not one of nullability alone (smart casts from contracts
-//! such as `checkNotNull` aren't all modelled), not type arguments — and
-//! only for a value whose type inference knows as the compiler does (see
-//! `examinable`: a generic call's may come from what it's passed to).
+//! value. A class mismatch with every supertype known is reported, and
+//! one of nullability alone for a local (see `null_mismatch`), not type
+//! arguments — and only for a value whose type inference knows as the
+//! compiler does (see `examinable`: a generic call's may come from what
+//! it's passed to).
 
 use syntax::{SyntaxNode, TextRange, named_children};
 
@@ -21,6 +21,15 @@ use super::expressions::Typed;
 use super::fit::Fit;
 use super::{MismatchSite, TypeMismatch};
 use crate::ty::{Nullability, Ty};
+
+/// Whether a value that may be null is judged where one that can't goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum NullCheck {
+    Judged,
+    /// A Java method's: its overloads that differ in boxing alone
+    /// (`isGreaterThan(long)`, `isGreaterThan(Long)`) aren't all weighed.
+    Skipped,
+}
 
 /// The classes the compiler converts an integer literal between
 /// (`fun f(): Long = 1`).
@@ -119,7 +128,13 @@ impl Inferrer<'_> {
             Meets::Itself => {
                 let typed = self.typed_inner(node, expected);
                 let ty = self.value_of(typed.clone());
-                self.check_value(requirement.site, node, &ty, &requirement.ty);
+                self.check_value(
+                    requirement.site,
+                    node,
+                    &ty,
+                    &requirement.ty,
+                    NullCheck::Judged,
+                );
                 typed
             }
         }
@@ -196,6 +211,7 @@ impl Inferrer<'_> {
         value: SyntaxNode<'_>,
         actual: &Ty,
         expected: &Ty,
+        null_check: NullCheck,
     ) {
         // A Java value's type (`T!`) may come through generics this
         // inference doesn't follow (a builder's `build(): T`).
@@ -208,10 +224,12 @@ impl Inferrer<'_> {
             both_nullable && matches!(value.kind(), "simple_identifier" | "navigation_expression");
         // The class comparison first: whether the value is certain asks
         // receivers for members, and almost every value fits anyway.
-        let mismatch = !from_java
+        let class_mismatch = !from_java
             && !may_be_null_only
             && self.class_mismatch(actual, expected)
             && self.examinable(value);
+        let mismatch = class_mismatch
+            || null_check == NullCheck::Judged && self.null_mismatch(value, actual, expected);
         let finding = mismatch.then(|| TypeMismatch {
             site,
             range: salient_range(value),
@@ -219,6 +237,27 @@ impl Inferrer<'_> {
             actual: actual.clone(),
         });
         self.record_type_mismatch(value.start_byte() as u32, finding);
+    }
+
+    /// A local that may be null where a value that can't be goes: its
+    /// class fits, its `?` doesn't. Only a local, whose smart casts this
+    /// inference follows as the compiler does (assignments, conditions,
+    /// contracts, jumps), and only with the whole classpath — a contract
+    /// on a library function that's missing would have narrowed it.
+    fn null_mismatch(&self, value: SyntaxNode<'_>, actual: &Ty, expected: &Ty) -> bool {
+        let is_local = value.kind() == "simple_identifier"
+            && matches!(
+                self.recorded_at(value).map(|resolved| resolved.reference),
+                Some(super::Reference::Local(_))
+            );
+        let only_null_differs = actual.nullability() == Nullability::Nullable
+            && expected.nullability() == Nullability::NotNull
+            && matches!(expected, Ty::Class(_))
+            && self.types.fits(&actual.clone().non_null(), expected) == Fit::Yes;
+        is_local
+            && only_null_differs
+            && hir_def::def_map::classpath_complete(self.db, self.file)
+            && self.examinable(value)
     }
 
     /// Whether no value of `actual`'s class is an `expected`, ignoring

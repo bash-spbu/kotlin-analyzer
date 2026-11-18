@@ -86,10 +86,33 @@ never assumed from a name: after it returns (`returns()`: `requireNotNull`,
 `assertIs<T>` with `T` written), where it gave `true` or `false`
 (`returns(true)`/`returns(false)`: `!s.isNullOrEmpty()`), for the receiver
 or any argument, positional or named, whether the call is a statement, an
-initializer or an assigned value. `assert(x != null)` has no contract
+initializer, an assigned value or nested in another call's arguments
+(`feed(requireNotNull(dog))`), and for an overloaded name whose every
+candidate promises the same. `assert(x != null)` has no contract
 (assertions may be off) and casts nothing. Not followed: `returnsNotNull()`,
 a condition of two alternatives (`||`), a negated one, a type the call
 infers rather than writes.
+
+Smart casts follow the data flow within a body:
+- a local `var` assigned a value has that value's type (when it fits the
+  declared one) until assigned again;
+- after an `if`, a `when` or a `try`, what holds is what every way out
+  that doesn't jump (`return`, `throw`, `break`, `continue`, a call
+  returning `Nothing`) knows: `if (x == null) x = Default`, `when { x ==
+  null -> return; else -> … }`, `try { … } catch (…) { return }` (the
+  try block's end, when every `catch` jumps). A `when` without `else`
+  also has the way where no branch was taken;
+- a branch of a `when` without a subject sees every earlier condition
+  false; with a subject, a `null ->` branch tells later branches the
+  subject isn't null, and a branch matching a value that can't be null
+  (`when (x?.status) { Status.NEW -> … }`) sees the safe chain's root not
+  null;
+- `x?.f(…)` evaluates its arguments with `x` not null (`x?.let { x }`);
+  `x?.y != null` and `x?.y == value` for a value that can't be null say
+  `x` isn't null, and so does `x == value`;
+- a `val` initialized by a safe chain (`val chain = info?.let { … }`)
+  isn't null only when the chain's root (a `val` or parameter) isn't:
+  narrowing the one narrows the other.
 
 ## Types in bodies
 
@@ -158,8 +181,9 @@ its class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
 
 ### Not modelled yet (stays `Unknown`, never reported)
 
-- smart casts of properties (`a.b` after `a.b != null`), of a `var`
-  after it's assigned a non-null value, and to `Nothing?` after `== null`;
+- smart casts of properties (`a.b` after `a.b != null`), to `Nothing?`
+  after `== null`, a `var` captured by a lambda that changes it, and
+  `callsInPlace` (a lambda's smart casts don't outlive it);
 - members of anonymous objects (`object { val x = 1 }`);
 - declarations compiler plugins generate (`serializer()` of
   `@Serializable` classes);

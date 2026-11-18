@@ -104,6 +104,13 @@ pub(crate) struct Inferrer<'db> {
     pub(super) uncertain_calls: FxHashSet<u32>,
     /// The type the value inferred next must have — taken by it.
     pub(super) requirement: Option<super::type_mismatches::Requirement>,
+    /// What the scope popped last had narrowed.
+    last_popped: Vec<(LocalId, Ty)>,
+    /// What the `when` branch being inferred being false says (its
+    /// conditions, without a subject, all false).
+    pub(super) entry_false: Vec<(LocalId, Ty)>,
+    /// `val chain = info?.let { … }`: `chain` not null means `info` isn't.
+    not_null_implies: FxHashMap<LocalId, LocalId>,
     /// The type each branch of the branching expression inferred next
     /// (`if`, `when`, `try`, `?:`) must give — taken by it.
     pub(super) branch_requirement: Option<super::type_mismatches::Requirement>,
@@ -150,6 +157,9 @@ impl<'db> Inferrer<'db> {
             uncertain_calls: FxHashSet::default(),
             requirement: None,
             branch_requirement: None,
+            last_popped: Vec::new(),
+            entry_false: Vec::new(),
+            not_null_implies: FxHashMap::default(),
         }
     }
 
@@ -387,10 +397,35 @@ impl<'db> Inferrer<'db> {
     }
 
     pub(super) fn pop_scope(&mut self) {
-        self.scopes.pop();
+        self.pop_scope_narrowings();
+    }
+
+    /// Pops the innermost scope and gives what was narrowed in it, in the
+    /// order narrowed — what a branch ending there knows.
+    pub(super) fn pop_scope_narrowings(&mut self) -> Vec<(LocalId, Ty)> {
+        let popped = self
+            .scopes
+            .pop()
+            .map(|scope| scope.narrowed)
+            .unwrap_or_default();
         if self.scopes.is_empty() {
             self.scopes.push(Scope::default());
         }
+        self.last_popped = popped.clone();
+        popped
+    }
+
+    /// What the innermost scope has narrowed so far.
+    pub(super) fn scope_narrowings(&self) -> Vec<(LocalId, Ty)> {
+        self.scopes
+            .last()
+            .map(|scope| scope.narrowed.clone())
+            .unwrap_or_default()
+    }
+
+    /// What the scope popped last narrowed (a branch body's block).
+    pub(super) fn take_last_popped(&mut self) -> Vec<(LocalId, Ty)> {
+        std::mem::take(&mut self.last_popped)
     }
 
     pub(super) fn declare(
@@ -606,8 +641,49 @@ impl<'db> Inferrer<'db> {
     }
 
     pub(super) fn narrow(&mut self, narrowings: &[(LocalId, Ty)]) {
+        let implied = self.implied_not_null(narrowings);
         let scope = self.scopes.last_mut().expect("there's always a scope");
         scope.narrowed.extend(narrowings.iter().cloned());
+        scope.narrowed.extend(implied);
+    }
+
+    /// The values a local narrowed to not null vouches for: what its
+    /// initializer's safe chain started from, transitively.
+    fn implied_not_null(&self, narrowings: &[(LocalId, Ty)]) -> Vec<(LocalId, Ty)> {
+        if self.not_null_implies.is_empty() {
+            return Vec::new();
+        }
+        let mut implied: Vec<(LocalId, Ty)> = Vec::new();
+        for (local, ty) in narrowings {
+            if !ty.is_never_null() {
+                continue;
+            }
+            let mut current = *local;
+            while let Some(root) = self.not_null_implies.get(&current).copied() {
+                if implied.iter().any(|(known, _)| *known == root) {
+                    break;
+                }
+                implied.push((root, self.local_type(root).non_null()));
+                current = root;
+            }
+        }
+        implied
+    }
+
+    /// Remembers that `local`, a `val` whose initializer is a safe chain
+    /// from a value that can't change (`val chain = info?.let { … }`), is
+    /// not null only when that value isn't.
+    fn remember_not_null_implication(&mut self, local: LocalId, initializer: SyntaxNode<'_>) {
+        let Some((root, _)) = self.asserted_not_null(initializer) else {
+            return;
+        };
+        let root_is_stable = matches!(
+            self.local_kind(root),
+            LocalKind::Value | LocalKind::Parameter | LocalKind::LambdaParameter
+        );
+        if root_is_stable && root != local {
+            self.not_null_implies.insert(local, root);
+        }
     }
 
     pub(super) fn push_receiver(&mut self, ty: Ty, label: Option<Name>) {
@@ -1208,10 +1284,6 @@ impl<'db> Inferrer<'db> {
         match node.kind() {
             "property_declaration" => {
                 self.local_property(node);
-                // `val y = requireNotNull(x)`: `x` isn't null after it.
-                if let Some(initializer) = initializer_of(node) {
-                    self.narrow_after_contract(initializer);
-                }
                 self.types.builtin("Unit")
             }
             "function_declaration" => {
@@ -1229,18 +1301,7 @@ impl<'db> Inferrer<'db> {
             }
             "label" | "line_comment" | "multiline_comment" => self.types.builtin("Unit"),
             "statements" => self.block(node),
-            _ => {
-                let ty = self.expression(node, None);
-                // `y = checkNotNull(x)` as well as `require(x != null)`.
-                let called = match node.kind() {
-                    "assignment" => named_children(node).nth(1),
-                    _ => Some(node),
-                };
-                if let Some(called) = called {
-                    self.narrow_after_contract(called);
-                }
-                ty
-            }
+            _ => self.expression(node, None),
         }
     }
 
@@ -1267,6 +1328,10 @@ impl<'db> Inferrer<'db> {
                         let local = self.declare_node(name, value_type.clone(), kind);
                         if certain {
                             self.mark_certain_if_known(local, &value_type);
+                        }
+                        let initializer = initializer_of(node).filter(|_| kind == LocalKind::Value);
+                        if let Some(initializer) = initializer {
+                            self.remember_not_null_implication(local, initializer);
                         }
                     }
                 }

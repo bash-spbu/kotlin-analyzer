@@ -186,14 +186,39 @@ impl Inferrer<'_> {
             );
         }
         let checked = match (left.kind(), right.kind()) {
-            ("simple_identifier", "null_literal") => left,
-            ("null_literal", "simple_identifier") => right,
-            _ => return Narrowing::default(),
+            (_, "null_literal") => left,
+            ("null_literal", _) => right,
+            // `x == Value` with a value that can't be null: `x` isn't
+            // null where they're equal (`direction != INCOMING` false,
+            // `order?.status == PROCESSING` true).
+            _ => {
+                let compared_with_value = match (types[0].is_never_null(), types[1].is_never_null())
+                {
+                    (_, true) => self.asserted_not_null(left),
+                    (true, false) => self.asserted_not_null(right),
+                    (false, false) => None,
+                };
+                let Some(not_null) = compared_with_value else {
+                    return Narrowing::default();
+                };
+                let equal = has_token(node, "==") || has_token(node, "===");
+                return if equal && !is_not_equal {
+                    Narrowing {
+                        when_true: vec![not_null],
+                        ..Narrowing::default()
+                    }
+                } else {
+                    Narrowing {
+                        when_false: vec![not_null],
+                        ..Narrowing::default()
+                    }
+                };
+            }
         };
-        let Some(local) = self.lookup_value_local(self.name(checked)) else {
+        let Some(not_null) = self.asserted_not_null(checked) else {
             return Narrowing::default();
         };
-        let not_null = vec![(local, self.local_type(local).non_null())];
+        let not_null = vec![not_null];
         if is_not_equal {
             Narrowing {
                 when_true: not_null,
@@ -367,6 +392,25 @@ impl Inferrer<'_> {
             "conjunction_expression" => named_children(condition)
                 .flat_map(|operand| self.asserted(operand))
                 .collect(),
+            // `require(!s.isNullOrBlank())`: what the call's contract says
+            // where it gave `false` (or `true`, not negated).
+            "call_expression" => self
+                .called_contract(condition)
+                .map(|called| {
+                    self.contract_narrowings(&called, |returns| {
+                        matches!(returns, Returns::Normally | Returns::Value(true))
+                    })
+                })
+                .unwrap_or_default(),
+            "prefix_expression" if has_token(condition, "!") => named_children(condition)
+                .last()
+                .and_then(|operand| self.called_contract(operand))
+                .map(|called| {
+                    self.contract_narrowings(&called, |returns| {
+                        matches!(returns, Returns::Normally | Returns::Value(false))
+                    })
+                })
+                .unwrap_or_default(),
             "equality_expression" if has_token(condition, "!=") => {
                 let operands: Vec<SyntaxNode<'_>> = named_children(condition).collect();
                 match operands[..] {
@@ -397,12 +441,14 @@ impl Inferrer<'_> {
         }
     }
 
-    /// `x` known not to be null.
+    /// `x` known not to be null — `x` itself, or the root of a chain with a
+    /// safe call (`x?.y` isn't null only when `x` isn't).
     pub(super) fn asserted_not_null(&self, node: SyntaxNode<'_>) -> Option<(LocalId, Ty)> {
-        if node.kind() != "simple_identifier" {
-            return None;
-        }
-        let local = self.lookup_value_local(self.name(node))?;
+        let name = match node.kind() {
+            "simple_identifier" => node,
+            _ => safe_chain_root(node)?,
+        };
+        let local = self.lookup_value_local(self.name(name))?;
         Some((local, self.local_type(local).non_null()))
     }
 }
@@ -509,6 +555,25 @@ impl Inferrer<'_> {
                     .is_some_and(|name| StablePath::of(self.text(name)) == *path)
             }
             _ => false,
+        }
+    }
+}
+
+/// The name a chain of calls and properties starts from, when one of its
+/// steps is a safe call: `x` of `x?.y`, `x.y?.z()`.
+fn safe_chain_root(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let mut current = node;
+    let mut safe = false;
+    loop {
+        match current.kind() {
+            "navigation_expression" => {
+                let suffix = named_children(current).last()?;
+                safe |= has_token(suffix, "?.");
+                current = named_children(current).next()?;
+            }
+            "call_expression" => current = named_children(current).next()?,
+            "simple_identifier" => return safe.then_some(current),
+            _ => return None,
         }
     }
 }
