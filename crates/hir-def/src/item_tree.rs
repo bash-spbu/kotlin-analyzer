@@ -8,6 +8,7 @@
 mod lower_java;
 mod lower_kotlin;
 mod pretty;
+mod written_deprecation;
 
 use intern::{Name, Path};
 use std::hash::{Hash, Hasher};
@@ -15,6 +16,7 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
+pub use classfile::{DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin};
 pub(crate) use lower_java::lower_java;
 pub use lower_kotlin::kotlin_type_ref;
 pub(crate) use lower_kotlin::lower_kotlin;
@@ -70,9 +72,17 @@ pub struct ItemTree {
     /// mustn't walk them.
     named: FxHashMap<(Option<ItemId>, Name), Box<[ItemId]>>,
     pub top_level: Box<[ItemId]>,
+    /// What each deprecated item's deprecation says (its modifiers have
+    /// `DEPRECATED`).
+    deprecations: FxHashMap<ItemId, Deprecation>,
 }
 
 impl ItemTree {
+    /// What `@Deprecated` on the item says, if it's deprecated.
+    pub fn deprecation(&self, id: ItemId) -> Option<&Deprecation> {
+        self.deprecations.get(&id)
+    }
+
     pub fn item(&self, id: ItemId) -> &Item {
         &self.items[self.positions[&id] as usize]
     }
@@ -448,9 +458,20 @@ pub(crate) struct ItemTreeBuilder {
     ordinals: FxHashMap<(Option<ItemId>, IdentityKind, Name), u32>,
     taken: FxHashSet<ItemId>,
     ranges: FxHashMap<ItemId, ItemRanges>,
+    deprecations: FxHashMap<ItemId, Deprecation>,
 }
 
 impl ItemTreeBuilder {
+    /// Marks the pushed item `id` deprecated, as `deprecation` says.
+    pub(crate) fn deprecate(&mut self, id: ItemId, deprecation: Deprecation) {
+        if let Some(position) = self.positions.get(&id) {
+            self.items[*position as usize]
+                .modifiers
+                .insert(Modifiers::DEPRECATED);
+        }
+        self.deprecations.insert(id, deprecation);
+    }
+
     /// Adds `item` (its `parent` set, its children to come) found at
     /// `ranges`.
     pub(crate) fn push(&mut self, item: Item, ranges: ItemRanges) -> ItemId {
@@ -510,6 +531,7 @@ impl ItemTreeBuilder {
                 .map(|(key, items)| (key, items.into_boxed_slice()))
                 .collect(),
             top_level: top_level.into_boxed_slice(),
+            deprecations: self.deprecations,
         };
         let source_map = ItemSourceMap {
             items: self.ranges,

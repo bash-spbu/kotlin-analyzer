@@ -124,7 +124,28 @@ impl<'parse> Lowering<'parse> {
             type_parameters: item.type_parameters,
             signature: item.signature,
         };
-        self.builder.push(new, ranges)
+        let deprecated = new.modifiers.contains(Modifiers::DEPRECATED);
+        let id = self.builder.push(new, ranges);
+        if deprecated
+            && let Some(declaration) = self.node_spanning(item.range)
+            && let Some(deprecation) =
+                super::written_deprecation::written_deprecation(self.parse, declaration)
+        {
+            self.builder.deprecate(id, deprecation);
+        }
+        id
+    }
+
+    /// The node that spans exactly `range`: an item's declaration.
+    fn node_spanning(&self, range: TextRange) -> Option<SyntaxNode<'parse>> {
+        let mut node = self
+            .parse
+            .root()
+            .descendant_for_byte_range(range.start as usize, range.end as usize)?;
+        while TextRange::of(node) != range {
+            node = node.parent()?;
+        }
+        Some(node)
     }
 
     fn set_children(&mut self, parent: ItemId, children: Vec<ItemId>) {

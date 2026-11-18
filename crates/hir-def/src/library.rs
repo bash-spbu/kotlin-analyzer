@@ -40,7 +40,7 @@ fn place_of(kind: &ArchiveKind, name: &str) -> Option<EntryPlace> {
     }
     match kind {
         ArchiveKind::Jar => Some(EntryPlace { module: None }),
-        ArchiveKind::JdkSymbols { release } => {
+        ArchiveKind::JdkSymbols { release, .. } => {
             // `<releases>/<module>/<package path>/<Class>.sig`
             let mut parts = name.splitn(3, '/');
             let releases = parts.next()?;
@@ -61,7 +61,7 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
     let mut archive =
         classfile::Archive::open(&source.archive).map_err(|error| error.to_string())?;
     let kind = match source.kind {
-        ArchiveKind::JdkSymbols { release } => {
+        ArchiveKind::JdkSymbols { release, known } => {
             let listed = (0..archive.len()).filter_map(|index| {
                 let name = archive.name(index)?;
                 name.split('/').next().map(str::to_owned)
@@ -70,6 +70,7 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
             ArchiveKind::JdkSymbols {
                 release: newest_release_at_most(releases.iter().map(String::as_str), release)
                     .unwrap_or(release),
+                known,
             }
         }
         ArchiveKind::Jar => ArchiveKind::Jar,
@@ -292,6 +293,7 @@ impl Builder {
         if is_java {
             class_modifiers.insert(Modifiers::PLATFORM);
         }
+        let deprecation = class.deprecation.clone();
         let index = self.push(
             Item {
                 name: class.name.simple_name(),
@@ -326,6 +328,9 @@ impl Builder {
         for member in class.members {
             self.member(member, Some(index), is_java);
         }
+        if let Some(deprecation) = deprecation {
+            self.tree.deprecate(index, *deprecation);
+        }
         index
     }
 
@@ -336,6 +341,7 @@ impl Builder {
         is_java: bool,
     ) -> ItemId {
         let mut kept = modifiers(&member.modifiers);
+        let deprecation = member.deprecation.clone();
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
         }
@@ -367,7 +373,7 @@ impl Builder {
                 },
             ),
         };
-        self.push(
+        let id = self.push(
             Item {
                 name: member.name,
                 kind,
@@ -379,7 +385,11 @@ impl Builder {
                 signature,
             },
             parent,
-        )
+        );
+        if let Some(deprecation) = deprecation {
+            self.tree.deprecate(id, *deprecation);
+        }
+        id
     }
 }
 
@@ -407,7 +417,6 @@ fn modifiers(modifiers: &classfile::Modifiers) -> Modifiers {
         (modifiers.is_operator, Modifiers::OPERATOR),
         (modifiers.is_infix, Modifiers::INFIX),
         (modifiers.is_const, Modifiers::CONST),
-        (modifiers.is_deprecated, Modifiers::DEPRECATED),
     ];
     for (present, modifier) in flags {
         if present {

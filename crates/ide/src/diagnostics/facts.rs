@@ -3,7 +3,9 @@
 //! on values that can't be null, unused locals and `var`s that could be
 //! `val`s.
 
-use hir::{LocalFinding, NonExhaustiveWhen, NullCheckKind, RootDatabase, SourceFile};
+use hir::{
+    DeprecationLevel, LocalFinding, NonExhaustiveWhen, NullCheckKind, RootDatabase, SourceFile,
+};
 use syntax::{Parse, TextRange, has_token};
 
 use super::{Check, Diagnostic, DiagnosticsConfig, Fix, TextEdit};
@@ -61,6 +63,46 @@ pub(super) fn diagnostics(
     }
     found.extend(null_checks(db, file, config));
     found.extend(local_findings(db, file, config));
+    found.extend(deprecations(db, file, config));
+    found
+}
+
+/// Uses of deprecated declarations, as Kotlin words them: `'name' is
+/// deprecated. Message. Replace with 'replacement'.`
+fn deprecations(
+    db: &RootDatabase,
+    file: SourceFile,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let mut found = Vec::new();
+    for deprecated in hir::deprecated_uses(db, file) {
+        let check = match deprecated.level {
+            DeprecationLevel::Warning => Check::Deprecation,
+            DeprecationLevel::Error | DeprecationLevel::Hidden => Check::DeprecationError,
+        };
+        if !config.runs(check) {
+            continue;
+        }
+        let mut message = format!("`{}` is deprecated.", deprecated.name);
+        if let Some(reason) = deprecated.deprecation.message.as_deref().map(str::trim)
+            && !reason.is_empty()
+        {
+            message.push(' ');
+            message.push_str(reason);
+            if !reason.ends_with('.') {
+                message.push('.');
+            }
+        }
+        if let Some(replacement) = &deprecated.deprecation.replace_with {
+            message.push_str(&format!(" Replace with `{replacement}`."));
+        }
+        found.push(Diagnostic {
+            check,
+            range: deprecated.range,
+            message,
+            fixes: Vec::new(),
+        });
+    }
     found
 }
 

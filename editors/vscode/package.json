@@ -119,7 +119,9 @@
               "useless-elvis",
               "senseless-comparison",
               "unused-variable",
-              "can-be-val"
+              "can-be-val",
+              "deprecation",
+              "deprecation-error"
             ]
           },
           "markdownDescription": "Checks that don't run."

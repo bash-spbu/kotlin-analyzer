@@ -3,7 +3,7 @@
 //! the attributes that carry generic signatures, source file names, nested
 //! classes, parameter names and the Kotlin metadata annotation.
 
-use crate::Nesting;
+use crate::{DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin, Nesting};
 
 /// Access flags, as the JVM specification numbers them.
 pub(crate) mod access {
@@ -43,9 +43,7 @@ pub(crate) struct Member {
     pub(crate) signature: Option<String>,
     /// From the `MethodParameters` attribute, when compiled with `-parameters`.
     pub(crate) parameter_names: Vec<String>,
-    pub(crate) deprecated: bool,
-    /// `@kotlin.Deprecated(level = HIDDEN)`: Kotlin code can't call it.
-    pub(crate) hidden: bool,
+    pub(crate) deprecation: Option<Deprecation>,
 }
 
 /// What `InnerClasses` says about one nested class.
@@ -85,7 +83,7 @@ pub(crate) struct ClassFile {
     pub(crate) source_file: Option<String>,
     pub(crate) inner_classes: Vec<InnerClass>,
     pub(crate) kotlin_metadata: Option<KotlinMetadata>,
-    pub(crate) deprecated: bool,
+    pub(crate) deprecation: Option<Deprecation>,
 }
 
 struct Bytes<'data> {
@@ -156,8 +154,9 @@ impl ClassFile {
             source_file: None,
             inner_classes: Vec::new(),
             kotlin_metadata: None,
-            deprecated: false,
+            deprecation: None,
         };
+        let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
         for _ in 0..attribute_count {
             let attribute_name = utf8(&pool, bytes.u16()?)?;
@@ -170,18 +169,19 @@ impl ClassFile {
             match attribute_name {
                 "Signature" => class.signature = utf8(&pool, body.u16()?).map(str::to_owned),
                 "SourceFile" => class.source_file = utf8(&pool, body.u16()?).map(str::to_owned),
-                "Deprecated" => class.deprecated = true,
+                "Deprecated" => found.in_javadoc = true,
                 "InnerClasses" => class.inner_classes = read_inner_classes(&mut body, &pool)?,
-                "RuntimeVisibleAnnotations" => {
+                "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
                     let annotations = read_annotations(&mut body, &pool)?;
-                    if annotations.deprecated {
-                        class.deprecated = true;
+                    found.add(&annotations);
+                    if annotations.kotlin_metadata.is_some() {
+                        class.kotlin_metadata = annotations.kotlin_metadata;
                     }
-                    class.kotlin_metadata = annotations.kotlin_metadata;
                 }
                 _ => {}
             }
         }
+        class.deprecation = found.deprecation();
         Some(class)
     }
 }
@@ -300,9 +300,9 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             descriptor,
             signature: None,
             parameter_names: Vec::new(),
-            deprecated: false,
-            hidden: false,
+            deprecation: None,
         };
+        let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
         for _ in 0..attribute_count {
             let attribute_name = utf8(pool, bytes.u16()?)?;
@@ -314,7 +314,7 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             };
             match attribute_name {
                 "Signature" => member.signature = utf8(pool, body.u16()?).map(str::to_owned),
-                "Deprecated" => member.deprecated = true,
+                "Deprecated" => found.in_javadoc = true,
                 "MethodParameters" => {
                     let count = body.u8()?;
                     for _ in 0..count {
@@ -330,12 +330,12 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
                 }
                 "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
                     let annotations = read_annotations(&mut body, pool)?;
-                    member.deprecated |= annotations.deprecated;
-                    member.hidden |= annotations.hidden;
+                    found.add(&annotations);
                 }
                 _ => {}
             }
         }
+        member.deprecation = found.deprecation();
         members.push(member);
     }
     Some(members)
@@ -365,10 +365,45 @@ fn read_inner_classes(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<In
 
 #[derive(Default)]
 struct Annotations {
-    deprecated: bool,
-    /// `@kotlin.Deprecated(level = HIDDEN)`.
-    hidden: bool,
+    /// `@kotlin.Deprecated(…)`.
+    kotlin_deprecation: Option<Deprecation>,
+    /// `@java.lang.Deprecated`.
+    java_deprecated: bool,
+    since_kotlin: Option<DeprecatedSinceKotlin>,
     kotlin_metadata: Option<KotlinMetadata>,
+}
+
+/// What a declaration's attributes say about its deprecation, read in
+/// whatever order they come.
+#[derive(Default)]
+struct Deprecations {
+    kotlin: Option<Deprecation>,
+    java_annotation: bool,
+    /// The `Deprecated` attribute: a Javadoc `@deprecated`, or what the
+    /// compiler adds beside an annotation.
+    in_javadoc: bool,
+    since_kotlin: Option<DeprecatedSinceKotlin>,
+}
+
+impl Deprecations {
+    fn add(&mut self, annotations: &Annotations) {
+        if annotations.kotlin_deprecation.is_some() {
+            self.kotlin = annotations.kotlin_deprecation.clone();
+        }
+        self.java_annotation |= annotations.java_deprecated;
+        if annotations.since_kotlin.is_some() {
+            self.since_kotlin = annotations.since_kotlin.clone();
+        }
+    }
+
+    /// Kotlin's annotation over Java's, Java's over the Javadoc tag.
+    fn deprecation(self) -> Option<Deprecation> {
+        if let Some(mut kotlin) = self.kotlin {
+            kotlin.since_kotlin = self.since_kotlin;
+            return Some(kotlin);
+        }
+        (self.java_annotation || self.in_javadoc).then(Deprecation::java)
+    }
 }
 
 fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotations> {
@@ -379,19 +414,104 @@ fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotati
         match type_name.as_str() {
             "Lkotlin/Metadata;" => found.kotlin_metadata = Some(read_metadata(bytes, pool)?),
             "Ljava/lang/Deprecated;" => {
-                found.deprecated = true;
+                found.java_deprecated = true;
                 skip_element_pairs(bytes, Nesting::TOP)?;
             }
             "Lkotlin/Deprecated;" => {
-                found.deprecated = true;
-                found.hidden |= deprecation_is_hidden(bytes, pool)?;
+                found.kotlin_deprecation = Some(read_kotlin_deprecation(bytes, pool)?);
             }
             "Lkotlin/DeprecatedSinceKotlin;" => {
-                // `hiddenSince`: hidden from that language version on — which
-                // the code this reads for is past.
-                found.hidden |= has_element(bytes, pool, "hiddenSince")?;
+                found.since_kotlin = Some(read_deprecated_since_kotlin(bytes, pool)?);
             }
             _ => skip_element_pairs(bytes, Nesting::TOP)?,
+        }
+    }
+    Some(found)
+}
+
+/// `@kotlin.Deprecated(message, replaceWith = ReplaceWith(expression),
+/// level)`.
+fn read_kotlin_deprecation(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Deprecation> {
+    let mut deprecation = Deprecation {
+        level: DeprecationLevel::Warning,
+        message: None,
+        replace_with: None,
+        origin: DeprecationOrigin::Kotlin,
+        since_kotlin: None,
+    };
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        let element = utf8(pool, bytes.u16()?)?.to_owned();
+        let tag = bytes.data.get(bytes.position).copied();
+        match (element.as_str(), tag) {
+            ("message", Some(b's')) => {
+                bytes.u8()?;
+                deprecation.message = Some(utf8(pool, bytes.u16()?)?.into());
+            }
+            ("level", Some(b'e')) => {
+                bytes.u8()?;
+                bytes.u16()?;
+                deprecation.level = match utf8(pool, bytes.u16()?)? {
+                    "ERROR" => DeprecationLevel::Error,
+                    "HIDDEN" => DeprecationLevel::Hidden,
+                    _ => DeprecationLevel::Warning,
+                };
+            }
+            ("replaceWith", Some(b'@')) => {
+                bytes.u8()?;
+                bytes.u16()?;
+                deprecation.replace_with = read_string_element(bytes, pool, "expression")?;
+            }
+            _ => skip_element_value(bytes, Nesting::TOP)?,
+        }
+    }
+    Some(deprecation)
+}
+
+/// `@DeprecatedSinceKotlin(warningSince, errorSince, hiddenSince)`.
+fn read_deprecated_since_kotlin(
+    bytes: &mut Bytes<'_>,
+    pool: &[Constant],
+) -> Option<DeprecatedSinceKotlin> {
+    let mut since = DeprecatedSinceKotlin::default();
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        let element = utf8(pool, bytes.u16()?)?.to_owned();
+        let is_string = bytes.data.get(bytes.position) == Some(&b's');
+        let slot = match element.as_str() {
+            "warningSince" => Some(&mut since.warning_since),
+            "errorSince" => Some(&mut since.error_since),
+            "hiddenSince" => Some(&mut since.hidden_since),
+            _ => None,
+        };
+        match slot {
+            Some(slot) if is_string => {
+                bytes.u8()?;
+                *slot = Some(utf8(pool, bytes.u16()?)?.into());
+            }
+            _ => skip_element_value(bytes, Nesting::TOP)?,
+        }
+    }
+    Some(since)
+}
+
+/// The string element `name` of a nested annotation's pairs; the rest
+/// skipped.
+fn read_string_element(
+    bytes: &mut Bytes<'_>,
+    pool: &[Constant],
+    name: &str,
+) -> Option<Option<Box<str>>> {
+    let mut found = None;
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        let element = utf8(pool, bytes.u16()?)?.to_owned();
+        let is_string = bytes.data.get(bytes.position) == Some(&b's');
+        if element == name && is_string {
+            bytes.u8()?;
+            found = Some(utf8(pool, bytes.u16()?)?.into());
+        } else {
+            skip_element_value(bytes, Nesting::TOP.deeper()?)?;
         }
     }
     Some(found)
@@ -451,33 +571,6 @@ fn read_string_array(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Str
 }
 
 /// Reads `@kotlin.Deprecated`'s arguments: whether `level` is `HIDDEN`.
-fn deprecation_is_hidden(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<bool> {
-    let mut hidden = false;
-    let pairs = bytes.u16()?;
-    for _ in 0..pairs {
-        let element = utf8(pool, bytes.u16()?)?.to_owned();
-        if element == "level" && bytes.data.get(bytes.position) == Some(&b'e') {
-            bytes.u8()?;
-            bytes.u16()?;
-            hidden = utf8(pool, bytes.u16()?)? == "HIDDEN";
-        } else {
-            skip_element_value(bytes, Nesting::TOP)?;
-        }
-    }
-    Some(hidden)
-}
-
-/// Whether an annotation's arguments include `name`.
-fn has_element(bytes: &mut Bytes<'_>, pool: &[Constant], name: &str) -> Option<bool> {
-    let mut found = false;
-    let pairs = bytes.u16()?;
-    for _ in 0..pairs {
-        found |= utf8(pool, bytes.u16()?)? == name;
-        skip_element_value(bytes, Nesting::TOP)?;
-    }
-    Some(found)
-}
-
 fn skip_element_pairs(bytes: &mut Bytes<'_>, nesting: Nesting) -> Option<()> {
     let pairs = bytes.u16()?;
     for _ in 0..pairs {

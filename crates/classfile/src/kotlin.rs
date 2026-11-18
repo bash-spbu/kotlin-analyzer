@@ -6,14 +6,15 @@
 //! `BitEncoding` and the string table of `JvmNameResolverBase`.
 
 use intern::{Name, Path};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Nesting;
 use crate::class_file::{ClassFile, KotlinMetadata, latin1_bytes};
 use crate::protobuf::Reader;
 use crate::{
-    ClassContents, ClassKind, ClassName, LibraryClass, LibraryType, Member, MemberKind, Modifiers,
-    Origin, PackageMembers, TypeArgument, TypeParameter, ValueParameter, Variance, Visibility,
+    ClassContents, ClassKind, ClassName, Deprecation, DeprecationOrigin, LibraryClass, LibraryType,
+    Member, MemberKind, Modifiers, Origin, PackageMembers, TypeArgument, TypeParameter,
+    ValueParameter, Variance, Visibility,
 };
 
 /// `kind` of `@kotlin.Metadata`.
@@ -97,16 +98,14 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
     };
     let names = NameTable::jvm(string_table, &metadata.data2);
     let message = reader.rest();
-    let hidden: FxHashSet<String> = class
-        .methods
-        .iter()
-        .filter(|method| method.hidden)
-        .map(|method| format!("{}{}", method.name, method.descriptor))
-        .collect();
+    let deprecations = JvmDeprecations::of(&class.methods);
     match MetadataKind::of(metadata.kind) {
         MetadataKind::Class => {
-            match read_class(message, &names, &hidden, class.source_file.clone()) {
-                Some(library_class) => ClassContents::Class(library_class),
+            match read_class(message, &names, &deprecations, class.source_file.clone()) {
+                Some(library_class) => ClassContents::Class(LibraryClass {
+                    deprecation: kotlin_deprecation(class.deprecation.as_ref()).map(Box::new),
+                    ..library_class
+                }),
                 None => ClassContents::Nothing,
             }
         }
@@ -122,7 +121,7 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
             ClassContents::PackageMembers(read_package(
                 message,
                 &names,
-                &hidden,
+                &deprecations,
                 package,
                 class.source_file.clone(),
             ))
@@ -164,12 +163,12 @@ pub(crate) fn read_builtins(bytes: &[u8], package: Path) -> Vec<ClassContents> {
     };
     let mut contents: Vec<ClassContents> = classes
         .into_iter()
-        .filter_map(|class| read_class(class, &names, &FxHashSet::default(), None))
+        .filter_map(|class| read_class(class, &names, &JvmDeprecations::default(), None))
         .map(ClassContents::Class)
         .collect();
     // The package's own functions and properties (`arrayOf`, `emptyArray`).
     if let Some(message) = package_message {
-        let members = read_package(message, &names, &FxHashSet::default(), package, None);
+        let members = read_package(message, &names, &JvmDeprecations::default(), package, None);
         if !members.members.is_empty() || !members.type_aliases.is_empty() {
             contents.push(ClassContents::PackageMembers(members));
         }
@@ -496,7 +495,7 @@ fn is_fake_override(flags: i32) -> bool {
 fn read_class(
     bytes: &[u8],
     names: &NameTable,
-    hidden: &FxHashSet<String>,
+    deprecations: &JvmDeprecations,
     source_file: Option<String>,
 ) -> Option<LibraryClass> {
     let mut flags = 6;
@@ -544,7 +543,8 @@ fn read_class(
         names,
         table: &table,
         scopes: Vec::new(),
-        hidden,
+        deprecations,
+        overloaded: &overloaded_names(&functions, &properties, names),
     };
     let (class_type_parameters, scope) = read_type_parameters(&type_parameters, &outer);
     let context = outer.with_scope(scope);
@@ -583,6 +583,8 @@ fn read_class(
             is_fun_interface: bit(flags, 14),
             ..Modifiers::default()
         },
+        // The class file's own annotations, which `read` knows.
+        deprecation: None,
         type_parameters: class_type_parameters,
         supertypes: class_supertypes,
         members,
@@ -611,7 +613,7 @@ fn read_class(
 fn read_package(
     bytes: &[u8],
     names: &NameTable,
-    hidden: &FxHashSet<String>,
+    deprecations: &JvmDeprecations,
     package: Path,
     source_file: Option<String>,
 ) -> PackageMembers {
@@ -634,7 +636,8 @@ fn read_package(
         names,
         table: &table,
         scopes: Vec::new(),
-        hidden,
+        deprecations,
+        overloaded: &overloaded_names(&functions, &properties, names),
     };
     let mut members = Vec::new();
     for function in functions {
@@ -688,11 +691,13 @@ fn read_type_alias(bytes: &[u8], context: &TypeContext<'_>) -> Option<crate::Typ
 fn read_constructor(bytes: &[u8], context: &TypeContext<'_>, class_name: Name) -> Option<Member> {
     let mut flags = 6;
     let mut parameters = Vec::new();
+    let mut jvm_signature = None;
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
             1 => flags = value.as_i32().unwrap_or(6),
             2 => parameters.extend(value.as_bytes()),
+            100 => jvm_signature = value.as_bytes(),
             _ => {}
         }
     }
@@ -701,6 +706,9 @@ fn read_constructor(bytes: &[u8], context: &TypeContext<'_>, class_name: Name) -
         kind: MemberKind::Constructor,
         visibility: visibility_of(flags)?,
         modifiers: Modifiers::default(),
+        deprecation: context
+            .method_deprecation(jvm_signature, "<init>")
+            .map(Box::new),
         type_parameters: Vec::new(),
         receiver: None,
         parameters: parameters
@@ -736,7 +744,12 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
             _ => {}
         }
     }
-    if is_fake_override(flags) || is_hidden(jvm_signature, name, context) {
+    if is_fake_override(flags) {
+        return None;
+    }
+    let kotlin_name = context.names.string(name?)?;
+    let deprecation = context.method_deprecation(jvm_signature, &kotlin_name);
+    if deprecation.as_ref().is_some_and(Deprecation::is_hidden) {
         return None;
     }
     let visibility = visibility_of(flags)?;
@@ -748,7 +761,8 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
                 names: context.names,
                 table: &table,
                 scopes: context.scopes.clone(),
-                hidden: context.hidden,
+                deprecations: context.deprecations,
+                overloaded: context.overloaded,
             }
         }
         None => context.with_scope(Vec::new()),
@@ -769,6 +783,7 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
             is_expect: bit(flags, 14),
             ..Modifiers::default()
         },
+        deprecation: deprecation.map(Box::new),
         type_parameters: parameters_declared,
         receiver: receiver.map(|receiver| context.library_type(&receiver)),
         parameters: parameters
@@ -789,9 +804,11 @@ fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     let mut return_type = None;
     let mut receiver = None;
     let mut type_parameters = Vec::new();
+    let mut jvm_signature = None;
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
+            100 => jvm_signature = value.as_bytes(),
             11 => flags = value.as_i32().unwrap_or(518),
             2 => name = value.as_i32(),
             3 => return_type = value.as_bytes().map(RawType::read),
@@ -806,6 +823,8 @@ fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
         return None;
     }
     let visibility = visibility_of(flags)?;
+    let kotlin_name = context.names.string(name?)?;
+    let deprecation = context.property_deprecation(jvm_signature, &kotlin_name);
     let (parameters_declared, scope) = read_type_parameters(&type_parameters, context);
     let context = context.with_scope(scope);
     Some(Member {
@@ -820,6 +839,7 @@ fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
             is_const: bit(flags, 11),
             ..Modifiers::default()
         },
+        deprecation: deprecation.map(Box::new),
         type_parameters: parameters_declared,
         receiver: receiver.map(|receiver| context.library_type(&receiver)),
         parameters: Vec::new(),
@@ -1054,38 +1074,116 @@ impl TypeTable {
     }
 }
 
-/// What reading a type needs: names, the type table, and the type
-/// parameters in scope (outermost first).
-/// Whether a function's JVM method (`JvmMethodSignature`: name 1, descriptor
-/// 2; the name defaults to the Kotlin one) is deprecated as hidden.
-fn is_hidden(
-    jvm_signature: Option<&[u8]>,
-    kotlin_name: Option<i32>,
-    context: &TypeContext<'_>,
-) -> bool {
-    if context.hidden.is_empty() {
-        return false;
+/// The deprecations of a class file's methods, for the Kotlin members its
+/// metadata describes. Metadata names a member's JVM method only when its
+/// signature isn't the obvious one, so a member is also found by name — when
+/// every method of the name says the same.
+#[derive(Default)]
+struct JvmDeprecations {
+    /// `name` + descriptor of every deprecated method.
+    by_signature: FxHashMap<String, Deprecation>,
+    by_name: FxHashMap<String, NameDeprecation>,
+}
+
+/// What the methods of one name say.
+enum NameDeprecation {
+    Agree(Option<Deprecation>),
+    Differ,
+}
+
+impl JvmDeprecations {
+    fn of(methods: &[crate::class_file::Member]) -> JvmDeprecations {
+        let mut deprecations = JvmDeprecations::default();
+        for method in methods {
+            let deprecation = kotlin_deprecation(method.deprecation.as_ref());
+            if let Some(deprecation) = &deprecation {
+                deprecations.by_signature.insert(
+                    format!("{}{}", method.name, method.descriptor),
+                    deprecation.clone(),
+                );
+            }
+            let agreed = deprecations
+                .by_name
+                .entry(method.name.clone())
+                .or_insert_with(|| NameDeprecation::Agree(deprecation.clone()));
+            if let NameDeprecation::Agree(existing) = agreed
+                && *existing != deprecation
+            {
+                *agreed = NameDeprecation::Differ;
+            }
+        }
+        deprecations
     }
-    let Some(bytes) = jvm_signature else {
-        return false;
-    };
-    let mut name = kotlin_name;
+
+    /// The deprecation every method named `name` has; `None` when there's
+    /// none, or when they differ.
+    fn by_name(&self, name: &str) -> Option<&NameDeprecation> {
+        self.by_name.get(name)
+    }
+}
+
+/// A `JvmMethodSignature` message: its name (1) and descriptor (2), as
+/// string table indices.
+fn jvm_method_signature(bytes: &[u8], names: &NameTable) -> (Option<String>, Option<String>) {
+    let mut name = None;
     let mut descriptor = None;
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
-            1 => name = value.as_i32(),
-            2 => descriptor = value.as_i32(),
+            1 => name = value.as_i32().and_then(|index| names.string(index)),
+            2 => descriptor = value.as_i32().and_then(|index| names.string(index)),
             _ => {}
         }
     }
-    let (Some(name), Some(descriptor)) = (
-        name.and_then(|index| context.names.string(index)),
-        descriptor.and_then(|index| context.names.string(index)),
-    ) else {
-        return false;
-    };
-    context.hidden.contains(&format!("{name}{descriptor}"))
+    (name, descriptor)
+}
+
+/// What a Kotlin class file's `@kotlin.Deprecated` says. The `Deprecated`
+/// attribute there means nothing to Kotlin: the compiler puts it on every
+/// synthetic `$annotations` method and on a deprecated property's
+/// accessors, to keep Java away; the annotation is what was written.
+fn kotlin_deprecation(found: Option<&Deprecation>) -> Option<Deprecation> {
+    found
+        .filter(|deprecation| deprecation.origin == DeprecationOrigin::Kotlin)
+        .cloned()
+}
+
+/// The names that more than one of a container's functions and
+/// properties have.
+fn overloaded_names(
+    functions: &[&[u8]],
+    properties: &[&[u8]],
+    names: &NameTable,
+) -> FxHashSet<String> {
+    let mut seen = FxHashSet::default();
+    let mut overloaded = FxHashSet::default();
+    for member in functions.iter().chain(properties) {
+        let mut reader = Reader::new(member);
+        while let Some((number, value)) = reader.field() {
+            if number == 2
+                && let Some(name) = value.as_i32().and_then(|index| names.string(index))
+                && !seen.insert(name.clone())
+            {
+                overloaded.insert(name);
+            }
+        }
+    }
+    overloaded
+}
+
+/// A property's getter name: `isOpen` stays, `name` becomes `getName`.
+fn getter_name(property: &str) -> String {
+    let after_is = property
+        .strip_prefix("is")
+        .and_then(|rest| rest.chars().next());
+    if after_is.is_some_and(|char| !char.is_lowercase()) {
+        return property.to_owned();
+    }
+    let mut chars = property.chars();
+    match chars.next() {
+        Some(first) => format!("get{}{}", first.to_uppercase(), chars.as_str()),
+        None => "get".to_owned(),
+    }
 }
 
 struct TypeContext<'table> {
@@ -1093,12 +1191,81 @@ struct TypeContext<'table> {
     table: &'table TypeTable,
     /// Type parameters in scope by id, outermost scope first.
     scopes: Vec<Vec<(i32, Name)>>,
-    /// The class file's methods deprecated with level `HIDDEN` (`name` +
-    /// descriptor), which Kotlin code can't call.
-    hidden: &'table FxHashSet<String>,
+    /// The class file's methods' deprecations.
+    deprecations: &'table JvmDeprecations,
+    /// Kotlin member names the container declares more than once
+    /// (`Int.dp`, `Float.dp`): their JVM methods can't be told apart by
+    /// name.
+    overloaded: &'table FxHashSet<String>,
 }
 
 impl<'table> TypeContext<'table> {
+    /// A function's or constructor's deprecation: its JVM method's — named
+    /// by the metadata's signature (the name defaults to the Kotlin one),
+    /// else found by name.
+    fn method_deprecation(
+        &self,
+        jvm_signature: Option<&[u8]>,
+        kotlin_name: &str,
+    ) -> Option<Deprecation> {
+        let (name, descriptor) = jvm_signature
+            .map(|bytes| jvm_method_signature(bytes, self.names))
+            .unwrap_or_default();
+        let name = name.unwrap_or_else(|| kotlin_name.to_owned());
+        if let Some(descriptor) = descriptor {
+            return self
+                .deprecations
+                .by_signature
+                .get(&format!("{name}{descriptor}"))
+                .cloned();
+        }
+        if self.overloaded.contains(kotlin_name) {
+            return None;
+        }
+        self.agreed_deprecation(&name)
+    }
+
+    /// A property's deprecation: its synthetic `get…$annotations` method's,
+    /// where `@Deprecated` on a property is compiled to. A JVM method named
+    /// like the getter says nothing: it may be a function of its own
+    /// (`HttpHeaders.getAuthorization()` beside `const val Authorization`).
+    fn property_deprecation(
+        &self,
+        jvm_signature: Option<&[u8]>,
+        kotlin_name: &str,
+    ) -> Option<Deprecation> {
+        // `JvmPropertySignature`: the synthetic method (2).
+        let mut synthetic = None;
+        if let Some(bytes) = jvm_signature {
+            let mut reader = Reader::new(bytes);
+            while let Some((number, value)) = reader.field() {
+                if number == 2 {
+                    synthetic = value
+                        .as_bytes()
+                        .map(|bytes| jvm_method_signature(bytes, self.names));
+                }
+            }
+        }
+        if self.overloaded.contains(kotlin_name) {
+            return None;
+        }
+        // The synthetic method is named after the property, whatever
+        // `@JvmName` its getter has.
+        let synthetic = synthetic
+            .and_then(|(name, _)| name)
+            .unwrap_or_else(|| format!("{}$annotations", getter_name(kotlin_name)));
+        self.agreed_deprecation(&synthetic)
+    }
+
+    /// The deprecation every method named `name` has; none when they
+    /// differ.
+    fn agreed_deprecation(&self, name: &str) -> Option<Deprecation> {
+        match self.deprecations.by_name(name) {
+            Some(NameDeprecation::Agree(deprecation)) => deprecation.clone(),
+            Some(NameDeprecation::Differ) | None => None,
+        }
+    }
+
     fn with_scope(&self, scope: Vec<(i32, Name)>) -> TypeContext<'table> {
         let mut scopes = self.scopes.clone();
         scopes.push(scope);
@@ -1106,7 +1273,8 @@ impl<'table> TypeContext<'table> {
             names: self.names,
             table: self.table,
             scopes,
-            hidden: self.hidden,
+            deprecations: self.deprecations,
+            overloaded: self.overloaded,
         }
     }
 
@@ -1344,12 +1512,13 @@ mod tests {
             types: vec![looping],
             first_nullable: None,
         };
-        let hidden = FxHashSet::default();
+        let deprecations = JvmDeprecations::default();
         let context = TypeContext {
             names: &names,
             table: &table,
             scopes: Vec::new(),
-            hidden: &hidden,
+            deprecations: &deprecations,
+            overloaded: &FxHashSet::default(),
         };
         assert!(matches!(context.table_type(0), LibraryType::Class { .. }));
     }

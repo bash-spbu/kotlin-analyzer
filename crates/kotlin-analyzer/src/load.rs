@@ -127,16 +127,19 @@ fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
     if !symbols.is_file() {
         return None;
     }
-    let release = model
-        .jdk
-        .as_ref()
-        .and_then(|jdk| jdk.release)
-        .or_else(|| java_version(&home))?;
+    let declared = model.jdk.as_ref().and_then(|jdk| jdk.release);
+    let (release, known) = match declared {
+        Some(release) => (release, hir::JdkRelease::Declared),
+        None => (java_version(&home)?, hir::JdkRelease::RunningJdk),
+    };
     let letter = hir::release_letter(release)?;
     let source_archive = home.join("lib/src.zip");
     Some(hir::LibrarySource {
         archive: symbols,
-        kind: hir::ArchiveKind::JdkSymbols { release: letter },
+        kind: hir::ArchiveKind::JdkSymbols {
+            release: letter,
+            known,
+        },
         sources: source_archive.is_file().then_some(source_archive),
     })
 }

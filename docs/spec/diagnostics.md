@@ -19,6 +19,8 @@ whenever something it would need is `Unknown`, it stays silent.
 | `useless-elvis` | lint | `x ?: y` where `x` can't be null; offers "Remove the elvis operator" |
 | `senseless-comparison` | lint | `x == null`, `x != null` (or `===`, `!==`, `null` on either side) where `x` can't be null: always `false` or always `true` |
 | `unused-variable` | hint (unnecessary) | a local `val`/`var` (one name, not destructured, not delegated, not `_`) never read: inference recorded no use and the name appears nowhere else in the enclosing declaration — not in a string template, not as a namesake |
+| `deprecation` | lint | a use of a deprecated declaration (Kotlin's `DEPRECATION`): `'name' is deprecated. Message. Replace with 'x'.` — see "Deprecation" below |
+| `deprecation-error` | error | the same for a deprecation of level `ERROR` (`DEPRECATION_ERROR`) |
 | `can-be-val` | lint | a local `var` with an initializer that the enclosing declaration never assigns again — no `name = …`, `name += …`, `name++`, `--name` of any local of the name; offers "Change to `val`" |
 
 A value *can't be null* when its type is a class or function type without
@@ -34,6 +36,31 @@ and `SENSELESS_COMPARISON` come from the compiler (and fail an
 `CAN_BE_VAL` only from K2's extended checks, which IntelliJ runs and a
 build doesn't. Where we're not sure we report less than Kotlin does, never
 more.
+
+### Deprecation
+
+A declaration is deprecated by its `@Deprecated` — Kotlin's (with its
+message, `ReplaceWith` and level), Java's, or a Javadoc `@deprecated` — and
+a function or property also by a Kotlin `@Deprecated` on a member it
+overrides (Java's doesn't pass to overrides); a constructor by its class's,
+a type alias by its expansion's. In a Kotlin library it's read from
+`@kotlin.Deprecated` alone: the compiler marks synthetic `$annotations`
+methods and a deprecated property's accessors with the class file's
+`Deprecated` attribute, which says nothing to Kotlin. Reported where the
+declaration is used: a name in a body, a type (signatures, annotations,
+supertypes), an import that imports nothing but deprecated declarations —
+not an assignment's target, not a `name =` label. It stays silent:
+- for a `HIDDEN` declaration — code can't reach one, so resolving to it is
+  our mistake;
+- for a function or constructor with an overload of another deprecation:
+  overloads are chosen without every argument type judged, so the choice
+  says nothing (`format("x")` beside a deprecated `format(String)`);
+- for `@DeprecatedSinceKotlin`, whose level depends on the Kotlin API
+  version;
+- for the JDK's declarations when the model doesn't declare the release
+  the code compiles against: the JDK the build runs on may deprecate what
+  the module's toolchain doesn't (`URL(String)` in 20, for code built with
+  JDK 8).
 
 ### What "known completely" means
 

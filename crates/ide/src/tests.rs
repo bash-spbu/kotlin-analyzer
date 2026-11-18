@@ -527,6 +527,180 @@ fun <R> run(block: () -> R): R = block()
 }
 
 #[test]
+fn uses_of_deprecated_declarations() {
+    check_diagnostics(
+        r#"
+//- /app/a/Legacy.java
+package a;
+public class Legacy {
+    @Deprecated public void stop() {}
+    /** @deprecated use {@link #name()} */
+    public String getTitle() { return ""; }
+    public String name() { return ""; }
+}
+//- /app/a/Api.kt
+package a
+@Deprecated("Use Fresh", ReplaceWith("Fresh"))
+class Old
+class Fresh
+@Deprecated("Gone", level = DeprecationLevel.ERROR)
+fun removed() {}
+@Deprecated("Use format(Int)")
+fun format(text: String) = text
+fun format(number: Int) = number.toString()
+@Deprecated("Use Fresh")
+typealias OldAlias = Fresh
+open class Base {
+    @Deprecated("Use run") open fun start() {}
+    open fun run() {}
+}
+class Derived : Base() {
+    override fun start() {}
+}
+open class JavaBase : Legacy() {
+    override fun stop() {}
+}
+class Settings(@Deprecated("Use size") var count: Int = 0, val size: Int = 0)
+class Span(val weight: Int) {
+    @Deprecated("Old", level = DeprecationLevel.HIDDEN)
+    constructor(weight: Int, style: String) : this(weight)
+}
+//- /app/b/Use.kt
+package b
+import a.Old
+import a.format
+import a.Derived
+import a.JavaBase
+import a.Legacy
+import a.OldAlias
+import a.Settings
+import a.Span
+import a.removed
+fun use(legacy: Legacy, derived: Derived, old: Old): OldAlias? {
+    legacy.stop()
+    legacy.title
+    legacy.name()
+    derived.start()
+    JavaBase().stop()
+    Old()
+    format("x")
+    format(1)
+    removed()
+    val settings = Settings(count = 1)
+    settings.count = 2
+    println(settings.count)
+    Span(1)
+    return null
+}
+@Suppress("DEPRECATION")
+fun quiet(legacy: Legacy) = legacy.stop()
+class Quiet {
+    @Suppress("DEPRECATION_ERROR")
+    val gone: Unit
+        get() = removed()
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::Deprecation, crate::Check::DeprecationError],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [deprecation] 2: `Old` is deprecated. Use Fresh. Replace with `Fresh`.
+            [deprecation] 7: `OldAlias` is deprecated. Use Fresh.
+            [deprecation-error] 10: `removed` is deprecated. Gone.
+            [deprecation] 11: `Old` is deprecated. Use Fresh. Replace with `Fresh`.
+            [deprecation] 11: `OldAlias` is deprecated. Use Fresh.
+            [deprecation] 12: `stop` is deprecated.
+            [deprecation] 13: `getTitle` is deprecated.
+            [deprecation] 15: `start` is deprecated. Use run.
+            [deprecation] 17: `Old` is deprecated. Use Fresh. Replace with `Fresh`.
+            [deprecation-error] 20: `removed` is deprecated. Gone.
+            [deprecation] 23: `count` is deprecated. Use size."#]],
+    );
+}
+
+#[test]
+fn a_jdk_deprecation_counts_only_for_the_release_the_build_declares() {
+    // A ct.sym of one class: `L/java.base/demo/Clock.sig`, compiled by javac.
+    let directory = std::env::temp_dir().join(format!("ka-jdk-deprecation-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let sources = directory.join("sources/demo");
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(
+        sources.join("Clock.java"),
+        "package demo; public class Clock { @Deprecated public void tick() {} public void tock() {} }",
+    )
+    .unwrap();
+    let classes = directory.join("classes");
+    let compiled = std::process::Command::new("javac")
+        .arg("-d")
+        .arg(&classes)
+        .arg(sources.join("Clock.java"))
+        .status();
+    if !compiled.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: javac unavailable");
+        return;
+    }
+    let symbols = directory.join("symbols/L/java.base/demo");
+    std::fs::create_dir_all(&symbols).unwrap();
+    std::fs::copy(classes.join("demo/Clock.class"), symbols.join("Clock.sig")).unwrap();
+    let archive = directory.join("ct.sym");
+    let zipped = std::process::Command::new("jar")
+        .arg("cfM")
+        .arg(&archive)
+        .arg("-C")
+        .arg(directory.join("symbols"))
+        .arg("L")
+        .status();
+    if !zipped.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: jar unavailable");
+        return;
+    }
+    let fixture = r#"
+//- /app/b/Use.kt
+package b
+import demo.Clock
+fun use(clock: Clock) {
+    clock.tick()
+    clock.tock()
+}
+"#;
+    let diagnostics = |known: base_db::JdkRelease| {
+        let mut marked = Fixture::with_mini_stdlib(fixture);
+        let jdk = base_db::LibrarySource {
+            archive: archive.clone(),
+            kind: base_db::ArchiveKind::JdkSymbols {
+                release: 'L',
+                known,
+            },
+            sources: None,
+        };
+        let indexed = hir::index_library(&jdk).unwrap();
+        // The JDK only, no classpath for any source set.
+        marked
+            .database
+            .set_libraries(vec![(jdk, indexed)], Vec::new(), Some(0));
+        let file = marked.file("/app/b/Use.kt");
+        let config = crate::DiagnosticsConfig {
+            only: vec![crate::Check::Deprecation],
+            ..crate::DiagnosticsConfig::default()
+        };
+        analysis(&marked)
+            .diagnostics(file, &config)
+            .unwrap()
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        diagnostics(base_db::JdkRelease::Declared),
+        vec!["`tick` is deprecated."]
+    );
+    assert!(diagnostics(base_db::JdkRelease::RunningJdk).is_empty());
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn unused_locals_and_vars_never_assigned_again() {
     check_diagnostics(
         r#"

@@ -18,7 +18,17 @@ pub enum ArchiveKind {
     Jar,
     /// The JDK's `lib/ct.sym`: `<releases>/<module>/<package>/<Class>.sig`,
     /// read for the release whose letter is given (`P` for 25).
-    JdkSymbols { release: char },
+    JdkSymbols { release: char, known: JdkRelease },
+}
+
+/// Whether the JDK release read is the one the code compiles against.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum JdkRelease {
+    /// The build says so (a toolchain, `-Xjdk-release`).
+    Declared,
+    /// The JDK the build runs on: a module's toolchain may be older (an API
+    /// deprecated in 21 but not in 8).
+    RunningJdk,
 }
 
 /// Where a library's declarations and sources come from.

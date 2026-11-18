@@ -4,6 +4,7 @@ use expect_test::{Expect, expect};
 use intern::Path;
 
 use crate::file_item_tree;
+use crate::item_tree::ItemKind;
 use crate::resolver::{Resolution, resolve_import_path, resolve_type_path};
 
 fn check_item_tree(fixture: &str, expected: Expect) {
@@ -128,6 +129,54 @@ fun retry(block: suspend /* later */ () -> Unit) {}
             fun retry(block: suspend () -> Unit)
         "#]],
     );
+}
+
+#[test]
+fn written_deprecations_keep_their_message_replacement_and_level() {
+    let fixture = Fixture::parse(
+        r#"
+//- /src/Old.kt
+package app
+annotation class Deprecation(val reason: String)
+class Holder(@Deprecated("Use size") val count: Int) {
+    @Deprecated("Use b", ReplaceWith("b()"), level = DeprecationLevel.ERROR)
+    fun a() {}
+    @Deprecated(level = HIDDEN, message = "m" + "n") val c = 1
+    @java.lang.Deprecated fun javaStyle() {}
+    @Deprecation("not this one") fun lookalike() {}
+    fun fresh() {}
+}
+"#,
+    );
+    let db = &fixture.database;
+    let file = db.all_files()[0];
+    let tree = file_item_tree(db, file);
+    let described: Vec<String> = tree
+        .indexed_items()
+        .filter(|(_, item)| item.kind != ItemKind::Constructor)
+        .map(|(id, item)| match tree.deprecation(id) {
+            Some(deprecation) => format!(
+                "{} {:?} {:?} {:?} {:?}",
+                item.name,
+                deprecation.level,
+                deprecation.origin,
+                deprecation.message,
+                deprecation.replace_with
+            ),
+            None => format!("{} -", item.name),
+        })
+        .collect();
+    expect![[r#"
+        Deprecation -
+        reason -
+        Holder -
+        count Warning Kotlin Some("Use size") None
+        a Error Kotlin Some("Use b") Some("b()")
+        c Hidden Kotlin None None
+        javaStyle Warning Java None None
+        lookalike -
+        fresh -"#]]
+    .assert_eq(&described.join("\n"));
 }
 
 #[test]
@@ -762,7 +811,10 @@ package x
     );
     let jdk = base_db::LibrarySource {
         archive: std::path::PathBuf::from("/jdk/lib/ct.sym"),
-        kind: base_db::ArchiveKind::JdkSymbols { release: 'L' },
+        kind: base_db::ArchiveKind::JdkSymbols {
+            release: 'L',
+            known: base_db::JdkRelease::Declared,
+        },
         sources: None,
     };
     let indexed = base_db::IndexedLibrary {

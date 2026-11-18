@@ -2,8 +2,8 @@
 //! declaration is and where — one API in front of `hir-def` and `hir-ty`, so features never depend on how the layers below are split.
 
 pub use base_db::{
-    ArchiveKind, FileChange, FileId, IndexedLibrary, Language, LibrarySource, ProjectModel,
-    RootDatabase, SourceDatabase, SourceFile, SourceSetId, parse, salsa,
+    ArchiveKind, FileChange, FileId, IndexedLibrary, JdkRelease, Language, LibrarySource,
+    ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId, parse, salsa,
 };
 pub use hir_def::def_map::{
     classpath_complete, importable_names, package_exists, package_names, package_prefix_exists,
@@ -16,6 +16,7 @@ pub use hir_def::item_tree::{
     ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
     Modifiers, Parameter, Signature, TypeArgument, TypeRef, Visibility,
 };
+pub use hir_def::item_tree::{Deprecation, DeprecationLevel};
 pub use hir_def::library::{
     LibrarySourceLocation, index_library, library_declaration_source, release_letter,
 };
@@ -28,6 +29,7 @@ pub use hir_def::{
     ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,
     source_set_def_map,
 };
+pub use hir_ty::deprecation::{DeprecatedUse, deprecated_uses};
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
     NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName,

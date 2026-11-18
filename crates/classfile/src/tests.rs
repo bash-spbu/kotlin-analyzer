@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    ClassContents, ClassKind, JarContents, LibraryClass, LibraryType, Member, MemberKind,
-    PackageMembers, TypeArgument, read_class, read_jar,
+    ClassContents, ClassKind, DeprecationLevel, DeprecationOrigin, JarContents, LibraryClass,
+    LibraryType, Member, MemberKind, PackageMembers, TypeArgument, read_class, read_jar,
 };
 
 /// The newest cached compiled JAR of `group:artifact`.
@@ -250,6 +250,50 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         .map(|alias| render(&alias.expanded))
         .collect();
     assert_eq!(aliases, vec!["java.util.ArrayList<E>"]);
+
+    // Deprecations: a function's message, replacement and since-versions
+    // from its JVM method; a property's from its synthetic `$annotations`
+    // method; a class's from its class file.
+    let sum_by = top_level(&contents, "kotlin.collections", "sumBy")
+        .into_iter()
+        .find(|member| {
+            member
+                .receiver
+                .as_ref()
+                .is_some_and(|receiver| render(receiver).starts_with("kotlin.collections.Iterable"))
+        })
+        .expect("Iterable.sumBy");
+    let deprecation = sum_by.deprecation.as_ref().expect("sumBy is deprecated");
+    assert_eq!(deprecation.level, DeprecationLevel::Warning);
+    assert_eq!(deprecation.message.as_deref(), Some("Use sumOf instead."));
+    assert_eq!(
+        deprecation.replace_with.as_deref(),
+        Some("this.sumOf(selector)")
+    );
+    assert_eq!(deprecation.origin, DeprecationOrigin::Kotlin);
+    assert_eq!(
+        deprecation
+            .since_kotlin
+            .as_ref()
+            .and_then(|since| since.warning_since.as_deref()),
+        Some("1.5")
+    );
+    let sum_of = top_level(&contents, "kotlin.collections", "sumOf");
+    assert!(sum_of.iter().all(|member| member.deprecation.is_none()));
+    let end_exclusive = class(&contents, "kotlin.ranges.IntRange")
+        .members
+        .iter()
+        .find(|member| member.name.as_str() == "endExclusive")
+        .expect("IntRange.endExclusive");
+    assert!(end_exclusive.deprecation.is_some());
+    let jvm_default = class(&contents, "kotlin.jvm.JvmDefault");
+    assert_eq!(
+        jvm_default
+            .deprecation
+            .as_ref()
+            .map(|deprecation| deprecation.level),
+        Some(DeprecationLevel::Hidden)
+    );
 }
 
 #[test]
@@ -269,6 +313,9 @@ public class Store<K extends Comparable<K>, V> implements Iterable<V> {
     public static <T> List<T> of(T... items) { return null; }
     protected void evict(Map.Entry<K, V> entry) {}
     public Iterator<V> iterator() { return null; }
+    @Deprecated public void clear() {}
+    /** @deprecated use {@link #clear()} */
+    public void reset() {}
     public class Cursor { public Cursor(String label) {} }
     public static class Builder {}
     public enum Mode { FAST, SAFE }
@@ -303,7 +350,36 @@ public class Store<K extends Comparable<K>, V> implements Iterable<V> {
             "of(vararg items: T): java.util.List<T>",
             "evict(entry: java.util.Map.Entry<K, V>): void",
             "iterator(): java.util.Iterator<V>",
+            "clear(): void",
+            "reset(): void",
         ]
+    );
+    // Java's `@Deprecated` and a Javadoc `@deprecated` alike: a warning.
+    let deprecations: Vec<Option<DeprecationLevel>> = store
+        .members
+        .iter()
+        .map(|member| {
+            member
+                .deprecation
+                .as_ref()
+                .map(|deprecation| deprecation.level)
+        })
+        .collect();
+    assert_eq!(
+        deprecations[4..],
+        [
+            None,
+            None,
+            Some(DeprecationLevel::Warning),
+            Some(DeprecationLevel::Warning)
+        ]
+    );
+    assert_eq!(
+        store.members[6]
+            .deprecation
+            .as_ref()
+            .map(|deprecation| deprecation.origin),
+        Some(DeprecationOrigin::Java)
     );
     assert!(store.members[0].modifiers.is_static);
     assert!(matches!(

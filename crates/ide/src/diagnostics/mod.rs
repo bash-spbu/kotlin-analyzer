@@ -27,6 +27,8 @@ pub enum Check {
     SenselessComparison,
     UnusedVariable,
     CanBeVal,
+    Deprecation,
+    DeprecationError,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,7 +53,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 14] = [
+    pub const ALL: [Check; 16] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -66,6 +68,8 @@ impl Check {
         Check::SenselessComparison,
         Check::UnusedVariable,
         Check::CanBeVal,
+        Check::Deprecation,
+        Check::DeprecationError,
     ];
 
     pub fn name(self) -> &'static str {
@@ -84,6 +88,8 @@ impl Check {
             Check::SenselessComparison => "senseless-comparison",
             Check::UnusedVariable => "unused-variable",
             Check::CanBeVal => "can-be-val",
+            Check::Deprecation => "deprecation",
+            Check::DeprecationError => "deprecation-error",
         }
     }
 
@@ -97,13 +103,15 @@ impl Check {
             | Check::UnresolvedReference
             | Check::ArgumentMismatch
             | Check::UnsafeCall
-            | Check::NonExhaustiveWhen => Severity::Error,
+            | Check::NonExhaustiveWhen
+            | Check::DeprecationError => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
             Check::UnnecessaryNotNullAssertion
             | Check::UnnecessarySafeCall
             | Check::UselessElvis
             | Check::SenselessComparison
-            | Check::CanBeVal => Severity::Lint,
+            | Check::CanBeVal
+            | Check::Deprecation => Severity::Lint,
             Check::UnusedImport | Check::UnusedVariable => Severity::Unnecessary,
         }
     }
@@ -120,6 +128,10 @@ impl Check {
             Check::SenselessComparison => &["SENSELESS_COMPARISON"],
             Check::UnusedVariable => &["UNUSED_VARIABLE", "unused"],
             Check::CanBeVal => &["CAN_BE_VAL", "CanBeVal"],
+            Check::Deprecation => &["DEPRECATION", "TYPEALIAS_EXPANSION_DEPRECATION"],
+            Check::DeprecationError => {
+                &["DEPRECATION_ERROR", "TYPEALIAS_EXPANSION_DEPRECATION_ERROR"]
+            }
             Check::Syntax
             | Check::UnresolvedReference
             | Check::MissingImport

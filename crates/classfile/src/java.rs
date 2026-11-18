@@ -68,9 +68,9 @@ pub(crate) fn read(class: &ClassFile) -> ClassContents {
             is_abstract: flags & access::ABSTRACT != 0 && !is_interface,
             is_open: flags & access::FINAL == 0 && !is_interface,
             is_inner,
-            is_deprecated: class.deprecated,
             ..Modifiers::default()
         },
+        deprecation: class.deprecation.clone().map(Box::new),
         type_parameters,
         supertypes,
         members,
@@ -131,9 +131,9 @@ fn read_field(field: &RawMember, names: &NestedNames) -> Option<Member> {
         visibility,
         modifiers: Modifiers {
             is_static: field.access & access::STATIC != 0,
-            is_deprecated: field.deprecated,
             ..Modifiers::default()
         },
+        deprecation: field.deprecation.clone().map(Box::new),
         type_parameters: Vec::new(),
         receiver: None,
         parameters: Vec::new(),
@@ -218,9 +218,9 @@ fn read_method(
         modifiers: Modifiers {
             is_static: method.access & access::STATIC != 0,
             is_abstract: method.access & access::ABSTRACT != 0,
-            is_deprecated: method.deprecated,
             ..Modifiers::default()
         },
+        deprecation: method.deprecation.clone().map(Box::new),
         type_parameters: signature.type_parameters,
         receiver: None,
         parameters,

@@ -142,7 +142,66 @@ pub struct Modifiers {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_const: bool,
-    pub is_deprecated: bool,
+}
+
+/// What a deprecation says: Kotlin's `@Deprecated`, Java's `@Deprecated`
+/// or a Javadoc `@deprecated` tag.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Deprecation {
+    pub level: DeprecationLevel,
+    pub message: Option<Box<str>>,
+    /// `ReplaceWith("expression")`.
+    pub replace_with: Option<Box<str>>,
+    pub origin: DeprecationOrigin,
+    /// `@DeprecatedSinceKotlin`: the level depends on the API version
+    /// instead of `level`.
+    pub since_kotlin: Option<DeprecatedSinceKotlin>,
+}
+
+impl Deprecation {
+    /// A Java deprecation: always a warning, with no message.
+    pub fn java() -> Deprecation {
+        Deprecation {
+            level: DeprecationLevel::Warning,
+            message: None,
+            replace_with: None,
+            origin: DeprecationOrigin::Java,
+            since_kotlin: None,
+        }
+    }
+
+    /// Whether Kotlin code can't see the declaration at all. A
+    /// `hiddenSince` counts: the code this reads for is past it.
+    pub fn is_hidden(&self) -> bool {
+        let hidden_since = self
+            .since_kotlin
+            .as_ref()
+            .is_some_and(|since| since.hidden_since.is_some());
+        self.level == DeprecationLevel::Hidden || hidden_since
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum DeprecationLevel {
+    Warning,
+    Error,
+    Hidden,
+}
+
+/// Where a deprecation was written: Kotlin's passes to overrides, Java's
+/// doesn't.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DeprecationOrigin {
+    Kotlin,
+    Java,
+}
+
+/// `@DeprecatedSinceKotlin(warningSince, errorSince, hiddenSince)`.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct DeprecatedSinceKotlin {
+    pub warning_since: Option<Box<str>>,
+    pub error_since: Option<Box<str>>,
+    pub hidden_since: Option<Box<str>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -152,6 +211,8 @@ pub struct LibraryClass {
     pub origin: Origin,
     pub visibility: Visibility,
     pub modifiers: Modifiers,
+    /// Rare: boxed, not to grow every member.
+    pub deprecation: Option<Box<Deprecation>>,
     pub type_parameters: Vec<TypeParameter>,
     pub supertypes: Vec<LibraryType>,
     pub members: Vec<Member>,
@@ -193,6 +254,8 @@ pub struct Member {
     pub kind: MemberKind,
     pub visibility: Visibility,
     pub modifiers: Modifiers,
+    /// Rare: boxed, not to grow every member.
+    pub deprecation: Option<Box<Deprecation>>,
     pub type_parameters: Vec<TypeParameter>,
     pub receiver: Option<LibraryType>,
     pub parameters: Vec<ValueParameter>,

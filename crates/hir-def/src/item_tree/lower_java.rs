@@ -5,9 +5,9 @@ use intern::{Name, Path};
 use syntax::{Parse, SyntaxNode, TextRange, named_children};
 
 use super::{
-    ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
-    ItemTreeBuilder, Modifiers, Parameter, Signature, TypeArgument, TypeParameter, TypeRef,
-    TypeSegment, Variance, Visibility,
+    ClassKind, Deprecation, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges,
+    ItemSourceMap, ItemTree, ItemTreeBuilder, Modifiers, Parameter, Signature, TypeArgument,
+    TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
 };
 
 pub(crate) fn lower_java(parse: &Parse) -> (ItemTree, ItemSourceMap) {
@@ -93,7 +93,21 @@ impl<'parse> Lowering<'parse> {
             type_parameters,
             signature,
         };
-        self.builder.push(item, ranges)
+        let id = self.builder.push(item, ranges);
+        if modifiers.contains(Modifiers::DEPRECATED) || self.deprecated_in_javadoc(node) {
+            self.builder.deprecate(id, Deprecation::java());
+        }
+        id
+    }
+
+    /// Whether the Javadoc right before `declaration` has a `@deprecated`
+    /// tag: Kotlin counts it like the annotation.
+    fn deprecated_in_javadoc(&self, declaration: SyntaxNode<'_>) -> bool {
+        let Some(comment) = declaration.prev_sibling() else {
+            return false;
+        };
+        let text = self.text(comment);
+        comment.kind() == "block_comment" && text.starts_with("/**") && text.contains("@deprecated")
     }
 
     /// A class, interface, enum, record or annotation declaration.

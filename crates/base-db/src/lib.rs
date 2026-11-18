@@ -12,8 +12,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 pub use library::{
-    ArchiveKind, ArchiveStamp, Classpaths, IndexedLibrary, IndexedPackage, Library, LibraryPackage,
-    LibrarySource,
+    ArchiveKind, ArchiveStamp, Classpaths, IndexedLibrary, IndexedPackage, JdkRelease, Library,
+    LibraryPackage, LibrarySource,
 };
 pub use parse_cache::ParseCache;
 pub use project_model::{Classpath, Platform, ProjectModel, SourceSetId};

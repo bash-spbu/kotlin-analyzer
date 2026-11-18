@@ -73,5 +73,15 @@ fn annotated_range(parse: &Parse, annotation: SyntaxNode<'_>) -> Option<TextRang
         "modifiers" | "parameter_modifiers" => parent.parent()?,
         _ => parent,
     };
-    Some(TextRange::of(annotated))
+    // A property's accessors on lines of their own are its siblings in the
+    // tree, but it covers them.
+    let mut end = annotated;
+    if annotated.kind() == "property_declaration" {
+        while let Some(accessor) = syntax::next_named_sibling(end)
+            .filter(|sibling| matches!(sibling.kind(), "getter" | "setter"))
+        {
+            end = accessor;
+        }
+    }
+    Some(TextRange::new(annotated.start_byte(), end.end_byte()))
 }
