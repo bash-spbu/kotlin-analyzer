@@ -496,6 +496,12 @@ fn is_fake_override(flags: i32) -> bool {
     (flags >> 6) & 0b11 == 1
 }
 
+/// A member the compiler generated (a data class's `componentN`, `copy`,
+/// …): kind 3.
+fn is_synthesized(flags: i32) -> bool {
+    (flags >> 6) & 0b11 == 3
+}
+
 fn read_class(
     bytes: &[u8],
     names: &NameTable,
@@ -790,6 +796,7 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
             is_inline: bit(flags, 10),
             is_suspend: bit(flags, 13),
             is_expect: bit(flags, 14),
+            is_synthesized: is_synthesized(flags),
             ..Modifiers::default()
         },
         deprecation: None,

@@ -1625,6 +1625,43 @@ fun use(account: Account, store: Store) {
 }
 
 #[test]
+fn member_completion_puts_own_properties_first_and_what_every_value_has_last() {
+    // Declared functions first, an override of `toString` among them and
+    // an inherited property: the order is the likelihood, not the text's.
+    check_completions(
+        r#"
+//- /app/a/Rate.kt
+package a
+open class Quote(val source: String) {
+    fun refresh() {}
+}
+class Rate(source: String) : Quote(source) {
+    override fun toString(): String = "rate"
+    fun convert(amount: Int): Int = amount
+    val amount: Int = 1
+    val currency: String = ""
+}
+//- /app/b/Use.kt
+package b
+import a.Rate
+fun use(rate: Rate) {
+    rate.$0
+}
+"#,
+        8,
+        expect![[r#"
+            amount Field
+            currency Field
+            convert Method
+            source Field
+            refresh Method
+            toString Method
+            hashCode Method
+            also Function"#]],
+    );
+}
+
+#[test]
 fn completion_of_a_name_offers_locals_then_scope_then_imports() {
     check_completions(
         r#"

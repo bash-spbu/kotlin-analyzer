@@ -72,12 +72,38 @@ pub struct Completions {
 /// Where among the levels an item comes from, for ordering.
 #[derive(Clone, Copy)]
 enum Source {
-    Local = 0,
-    Member = 1,
-    /// An extension the qualifier can use: after its own members.
-    Extension = 2,
-    Scope = 3,
-    Import = 5,
+    Local,
+    Member(MemberRank),
+    /// An extension the qualifier can use: after its members.
+    Extension,
+    Scope,
+    Import,
+}
+
+/// How likely a member is the one wanted, the likeliest first: what the
+/// receiver's own class declares, then what it inherits, then what every
+/// value has.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum MemberRank {
+    OwnProperty,
+    OwnFunction,
+    InheritedProperty,
+    InheritedFunction,
+    /// `equals`, `hashCode`, `toString` — `Any`'s, or a class's overrides.
+    Universal,
+}
+
+impl Source {
+    /// Lower sorts first.
+    fn relevance(self) -> u32 {
+        match self {
+            Source::Local => 0,
+            Source::Member(rank) => 10 + rank as u32,
+            Source::Extension => 20,
+            Source::Scope => 30,
+            Source::Import => 50,
+        }
+    }
 }
 
 pub(crate) fn completions(db: &RootDatabase, file: FileId, offset: usize) -> Completions {
@@ -219,7 +245,7 @@ impl<'db> Builder<'db> {
                 replace: self.replace,
                 import,
                 import_edit: None,
-                relevance: source as u32,
+                relevance: source.relevance(),
             },
         ));
     }
@@ -267,21 +293,41 @@ impl<'db> Builder<'db> {
     }
 
     /// A value's members, Java getters as properties, and the extensions
-    /// in scope it can use.
+    /// in scope it can use. A compiled data class's `componentN` is left
+    /// out: it's for destructuring, not for calling.
     fn members(&mut self, receiver: &Ty, with_extensions: bool) {
+        let own_classes: Vec<ItemLocation> = self
+            .types
+            .member_holders(receiver)
+            .into_iter()
+            .map(|holder| holder.class)
+            .collect();
         for member in self.types.all_members(receiver) {
+            let tree = hir::item_tree(self.db, member.location.container);
+            let item = tree.item(member.location.item);
+            if is_data_class_component(item) {
+                continue;
+            }
+            let own = item.parent.is_some_and(|parent| {
+                own_classes.contains(&ItemLocation {
+                    container: member.location.container,
+                    item: parent,
+                })
+            });
             if let Some(property) = self.types.java_property_name(member.location) {
-                let tree = hir::item_tree(self.db, member.location.container);
                 let detail = Some(tree.signature(member.location.item));
+                let rank = member_rank(&property, true, own);
                 self.push(
                     property,
                     CompletionKind::Property,
                     detail,
-                    Source::Member,
+                    Source::Member(rank),
                     None,
                 );
             }
-            self.push_declaration(member.location, Source::Member, None);
+            let is_property = matches!(item.kind, ItemKind::Property { .. });
+            let rank = member_rank(item.name.as_str(), is_property, own);
+            self.push_declaration(member.location, Source::Member(rank), None);
         }
         if with_extensions {
             self.extensions(receiver);
@@ -321,7 +367,7 @@ impl<'db> Builder<'db> {
                         container: class.container,
                         item: *child,
                     },
-                    Source::Member,
+                    Source::Member(MemberRank::OwnProperty),
                     None,
                 );
             }
@@ -470,7 +516,7 @@ impl<'db> Builder<'db> {
                     replace: self.replace,
                     import_edit: Some(self.imports.edit(&qualified)),
                     import: Some(qualified),
-                    relevance: Source::Import as u32,
+                    relevance: Source::Import.relevance(),
                 },
             ));
         }
@@ -511,6 +557,33 @@ impl<'db> Builder<'db> {
             incomplete,
         }
     }
+}
+
+/// Where a member ranks: a name every value has (`toString`) last, else
+/// own before inherited, properties before functions.
+fn member_rank(name: &str, is_property: bool, own: bool) -> MemberRank {
+    let universal = !is_property && matches!(name, "equals" | "hashCode" | "toString");
+    match (universal, own, is_property) {
+        (true, _, _) => MemberRank::Universal,
+        (false, true, true) => MemberRank::OwnProperty,
+        (false, true, false) => MemberRank::OwnFunction,
+        (false, false, true) => MemberRank::InheritedProperty,
+        (false, false, false) => MemberRank::InheritedFunction,
+    }
+}
+
+/// A compiled data class's `componentN()`, which the compiler generates
+/// for destructuring.
+fn is_data_class_component(item: &hir::Item) -> bool {
+    let generated = item.modifiers.contains(hir::Modifiers::SYNTHESIZED);
+    let numbered = item
+        .name
+        .as_str()
+        .strip_prefix("component")
+        .is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    generated && numbered
 }
 
 fn is_extension(db: &RootDatabase, location: ItemLocation) -> bool {

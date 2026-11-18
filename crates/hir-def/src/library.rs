@@ -438,6 +438,7 @@ fn modifiers(modifiers: &classfile::Modifiers) -> Modifiers {
         (modifiers.is_operator, Modifiers::OPERATOR),
         (modifiers.is_infix, Modifiers::INFIX),
         (modifiers.is_const, Modifiers::CONST),
+        (modifiers.is_synthesized, Modifiers::SYNTHESIZED),
     ];
     for (present, modifier) in flags {
         if present {

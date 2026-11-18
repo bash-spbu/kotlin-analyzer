@@ -341,6 +341,18 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         Some(OptInLevel::Warning)
     );
     assert_eq!(marker_level("kotlin.collections.List"), None);
+    // A data class's generated members are marked; what it declares isn't.
+    let pair = class(&contents, "kotlin.Pair");
+    let synthesized = |name: &str| {
+        pair.members
+            .iter()
+            .find(|member| member.name.as_str() == name)
+            .map(|member| member.modifiers.is_synthesized)
+    };
+    assert_eq!(synthesized("component1"), Some(true));
+    assert_eq!(synthesized("copy"), Some(true));
+    assert_eq!(synthesized("first"), Some(false));
+    assert_eq!(synthesized("toList"), None);
     let if_or_null = top_level(&contents, "kotlin", "ifOrNull");
     assert!(
         if_or_null.iter().all(|member| member
