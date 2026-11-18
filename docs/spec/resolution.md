@@ -108,8 +108,13 @@ Smart casts follow the data flow within a body:
   (`when (x?.status) { Status.NEW -> … }`) sees the safe chain's root not
   null;
 - `x?.f(…)` evaluates its arguments with `x` not null (`x?.let { x }`);
-  `x?.y != null` and `x?.y == value` for a value that can't be null say
-  `x` isn't null, and so does `x == value`;
+  `x?.y != null` and `x?.y == value` for a value that can't be null (of
+  a non-null type, or of a type parameter bounded by one: `V : Any`) say
+  `x` isn't null, and so does `x == value`; after `x ?: return` and
+  `x?.y ?: return`, `x` isn't null;
+- a `val` initialized by a condition narrows where it's used as one
+  (`val ready = x != null; if (ready) x.f()`), a `var` in it until the
+  `var` is assigned again;
 - a `val` initialized by a safe chain (`val chain = info?.let { … }`)
   isn't null only when the chain's root (a `val` or parameter) isn't:
   narrowing the one narrows the other.

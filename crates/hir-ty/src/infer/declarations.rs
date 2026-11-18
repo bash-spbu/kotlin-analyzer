@@ -111,6 +111,10 @@ pub(crate) struct Inferrer<'db> {
     pub(super) entry_false: Vec<(LocalId, Ty)>,
     /// `val chain = info?.let { … }`: `chain` not null means `info` isn't.
     not_null_implies: FxHashMap<LocalId, LocalId>,
+    /// The condition inferred last (where it starts), and what it narrows.
+    pub(super) last_condition: Option<(u32, super::narrowing::Narrowing)>,
+    /// `val ready = x != null`: what `ready` being true or false narrows.
+    pub(super) condition_aliases: FxHashMap<LocalId, super::narrowing::Narrowing>,
     /// The type each branch of the branching expression inferred next
     /// (`if`, `when`, `try`, `?:`) must give — taken by it.
     pub(super) branch_requirement: Option<super::type_mismatches::Requirement>,
@@ -160,6 +164,8 @@ impl<'db> Inferrer<'db> {
             last_popped: Vec::new(),
             entry_false: Vec::new(),
             not_null_implies: FxHashMap::default(),
+            last_condition: None,
+            condition_aliases: FxHashMap::default(),
         }
     }
 
@@ -655,7 +661,7 @@ impl<'db> Inferrer<'db> {
         }
         let mut implied: Vec<(LocalId, Ty)> = Vec::new();
         for (local, ty) in narrowings {
-            if !ty.is_never_null() {
+            if !self.excludes_null(ty) {
                 continue;
             }
             let mut current = *local;
@@ -670,6 +676,54 @@ impl<'db> Inferrer<'db> {
         implied
     }
 
+    /// Remembers what `local`, a `val` initialized by a condition, narrows
+    /// where it's used as one (`val ready = x != null; if (ready) x.f()`):
+    /// of a `var`, until it's assigned again (see `forget_aliased`).
+    fn remember_condition_alias(&mut self, local: LocalId, initializer: SyntaxNode<'_>) {
+        let Some((start, narrowing)) = self.last_condition.take() else {
+            return;
+        };
+        if start != initializer.start_byte() as u32 {
+            return;
+        }
+        let stable = |narrowings: Vec<(LocalId, Ty)>, inferrer: &Self| -> Vec<(LocalId, Ty)> {
+            narrowings
+                .into_iter()
+                .filter(|(narrowed, _)| {
+                    inferrer.is_stable_local(*narrowed)
+                        || inferrer.local_kind(*narrowed) == LocalKind::Variable
+                })
+                .collect()
+        };
+        let alias = super::narrowing::Narrowing {
+            when_true: stable(narrowing.when_true, self),
+            when_false: stable(narrowing.when_false, self),
+            receiver_when_true: None,
+        };
+        self.condition_aliases.insert(local, alias);
+    }
+
+    /// `variable` is assigned: what a condition said of its old value no
+    /// longer holds.
+    pub(super) fn forget_aliased(&mut self, variable: LocalId) {
+        for alias in self.condition_aliases.values_mut() {
+            alias
+                .when_true
+                .retain(|(narrowed, _)| *narrowed != variable);
+            alias
+                .when_false
+                .retain(|(narrowed, _)| *narrowed != variable);
+        }
+    }
+
+    /// A local whose value can't change once set: a `val` or a parameter.
+    fn is_stable_local(&self, local: LocalId) -> bool {
+        matches!(
+            self.local_kind(local),
+            LocalKind::Value | LocalKind::Parameter | LocalKind::LambdaParameter
+        )
+    }
+
     /// Remembers that `local`, a `val` whose initializer is a safe chain
     /// from a value that can't change (`val chain = info?.let { … }`), is
     /// not null only when that value isn't.
@@ -677,11 +731,7 @@ impl<'db> Inferrer<'db> {
         let Some((root, _)) = self.asserted_not_null(initializer) else {
             return;
         };
-        let root_is_stable = matches!(
-            self.local_kind(root),
-            LocalKind::Value | LocalKind::Parameter | LocalKind::LambdaParameter
-        );
-        if root_is_stable && root != local {
+        if self.is_stable_local(root) && root != local {
             self.not_null_implies.insert(local, root);
         }
     }
@@ -1332,6 +1382,7 @@ impl<'db> Inferrer<'db> {
                         let initializer = initializer_of(node).filter(|_| kind == LocalKind::Value);
                         if let Some(initializer) = initializer {
                             self.remember_not_null_implication(local, initializer);
+                            self.remember_condition_alias(local, initializer);
                         }
                     }
                 }

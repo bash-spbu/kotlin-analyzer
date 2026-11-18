@@ -55,7 +55,7 @@ impl StablePath {
 }
 
 /// The locals a condition narrows, and to what.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Narrowing {
     pub(super) when_true: Vec<(LocalId, Ty)>,
     pub(super) when_false: Vec<(LocalId, Ty)>,
@@ -134,6 +134,13 @@ impl Inferrer<'_> {
                 self.expression(node, None);
                 self.contract_condition(node)
             }
+            // `val ready = x != null; if (ready) x.f()`.
+            "simple_identifier" => {
+                self.expression(node, None);
+                self.lookup_value_local(self.name(node))
+                    .and_then(|local| self.condition_aliases.get(&local).cloned())
+                    .unwrap_or_default()
+            }
             _ => {
                 self.expression(node, None);
                 Narrowing::default()
@@ -192,12 +199,12 @@ impl Inferrer<'_> {
             // null where they're equal (`direction != INCOMING` false,
             // `order?.status == PROCESSING` true).
             _ => {
-                let compared_with_value = match (types[0].is_never_null(), types[1].is_never_null())
-                {
-                    (_, true) => self.asserted_not_null(left),
-                    (true, false) => self.asserted_not_null(right),
-                    (false, false) => None,
-                };
+                let compared_with_value =
+                    match (self.excludes_null(&types[0]), self.excludes_null(&types[1])) {
+                        (_, true) => self.asserted_not_null(left),
+                        (true, false) => self.asserted_not_null(right),
+                        (false, false) => None,
+                    };
                 let Some(not_null) = compared_with_value else {
                     return Narrowing::default();
                 };
@@ -453,6 +460,16 @@ impl Inferrer<'_> {
     }
 }
 
+/// How whether a value may be null where it's used is known.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum NullKnowledge {
+    /// Its type says it: a local after the data flow's smart casts, a call.
+    Followed,
+    /// Smart casts that would apply to it aren't modelled (a property's),
+    /// or the classpath is partial: only a check nowhere around tells.
+    Unfollowed,
+}
+
 impl Inferrer<'_> {
     /// Records `receiver.member` (with a plain `.`) as unsafe when the
     /// receiver's type is nullable, the member is the class's own (not an
@@ -475,14 +492,56 @@ impl Inferrer<'_> {
         if NULL_SAFE_MEMBERS.contains(&self.text(name)) || !self.is_own_member(member) {
             return;
         }
-        let path = StablePath::of(self.text(receiver));
-        if self.null_guarded(receiver, &path) {
+        let guarded = match self.null_knowledge(receiver) {
+            NullKnowledge::Followed => false,
+            NullKnowledge::Unfollowed => {
+                self.null_guarded(receiver, &StablePath::of(self.text(receiver)))
+            }
+        };
+        if guarded {
             return;
         }
         self.record_unsafe_call(UnsafeCall {
             range: TextRange::of(name),
             receiver: receiver_type.clone(),
         });
+    }
+
+    /// Whether no value of `ty` is null: a non-null class or function type,
+    /// or a type parameter every value of which is (`V : Any`).
+    pub(super) fn excludes_null(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::TypeParameter {
+                parameter,
+                nullability: Nullability::NotNull,
+            } => self
+                .types
+                .type_parameter_bounds(*parameter)
+                .iter()
+                .any(|bound| bound.is_never_null()),
+            _ => ty.is_never_null(),
+        }
+    }
+
+    /// Whether `value`'s type here says for certain whether it may be null:
+    /// a local's, after the smart casts the data flow gives it, or a
+    /// call's, which nothing smart-casts — with the whole classpath (a
+    /// missing library's contract would have narrowed a local).
+    pub(super) fn null_knowledge(&self, value: SyntaxNode<'_>) -> NullKnowledge {
+        let is_local = value.kind() == "simple_identifier"
+            && matches!(
+                self.recorded_at(value).map(|resolved| resolved.reference),
+                Some(super::Reference::Local(_))
+            );
+        let is_call = value.kind() == "call_expression";
+        let followed = (is_local || is_call)
+            && hir_def::def_map::classpath_complete(self.db, self.file)
+            && self.examinable(value);
+        if followed {
+            NullKnowledge::Followed
+        } else {
+            NullKnowledge::Unfollowed
+        }
     }
 
     /// A member of a class (not a top-level or extension declaration).

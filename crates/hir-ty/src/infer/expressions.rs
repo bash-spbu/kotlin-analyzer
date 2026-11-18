@@ -161,7 +161,8 @@ impl Inferrer<'_> {
             | "comparison_expression"
             | "conjunction_expression"
             | "disjunction_expression" => {
-                self.condition(node);
+                let narrowing = self.condition(node);
+                self.last_condition = Some((node.start_byte() as u32, narrowing));
                 self.types.builtin("Boolean")
             }
             "additive_expression" | "multiplicative_expression" | "range_expression" => {
@@ -858,12 +859,9 @@ impl Inferrer<'_> {
             );
         }
         let right_jumps = matches!(right_type, Ty::Nothing { nullable: false });
-        if right_jumps && left.kind() == "simple_identifier" {
-            // `x ?: return`: from here on `x` isn't null.
-            if let Some(local) = self.lookup_value_local(self.name(left)) {
-                let narrowed = self.local_type(local).non_null();
-                self.narrow(&[(local, narrowed)]);
-            }
+        // `x ?: return`, `x?.y ?: return`: from here on `x` isn't null.
+        if let (true, Some(narrowing)) = (right_jumps, self.asserted_not_null(left)) {
+            self.narrow(&[narrowing]);
         }
         self.types.common_type(&[left_type.non_null(), right_type])
     }
@@ -948,6 +946,7 @@ impl Inferrer<'_> {
         if self.local_kind(local) != LocalKind::Variable {
             return;
         }
+        self.forget_aliased(local);
         let declared = self.local_declared_type(local);
         let fits = !assigned.is_unknown()
             && !matches!(assigned, Ty::Nothing { .. })
@@ -1450,7 +1449,7 @@ impl Inferrer<'_> {
                     if subject_type.is_some() {
                         let matched = self.expression(child, subject_type);
                         if let (true, Some(not_null)) =
-                            (matched.is_never_null(), subject.not_null_when_matched)
+                            (self.excludes_null(&matched), subject.not_null_when_matched)
                         {
                             narrowings.push(not_null.clone());
                         }

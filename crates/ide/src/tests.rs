@@ -1103,9 +1103,10 @@ fun fine(flag: Boolean, dog: Dog, car: Car): Animal {
 #[test]
 fn a_nullable_local_is_judged_after_the_smart_casts_the_compiler_makes() {
     // Every way the compiler learns a local isn't null, beside a near
-    // twin where some way to the use still lets it be null.
+    // twin where some way to the use still lets it be null; a call's
+    // value, which nothing smart-casts, is judged as it is.
     let config = || crate::DiagnosticsConfig {
-        only: vec![crate::Check::TypeMismatch],
+        only: vec![crate::Check::TypeMismatch, crate::Check::ReturnTypeMismatch],
         ..crate::DiagnosticsConfig::default()
     };
     check_diagnostics(
@@ -1205,6 +1206,15 @@ fun aliased(info: Dog?) {
     val chain = info?.let { it.name }
     chain?.let { feed(info) }
 }
+class Repo { fun find(): Dog? = null }
+fun find(): Dog? = null
+fun called(repo: Repo) {
+    feed(find())
+    feed(repo.find())
+    feed(repo.find() ?: Dog())
+    val dog: Dog = find()
+}
+fun returned(): Dog = find()
 "#,
         config(),
         expect![[r#"
@@ -1212,7 +1222,11 @@ fun aliased(info: Dog?) {
             [type-mismatch] 24: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 38: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 60: Argument type mismatch: expected `Dog`, actual `Dog?`
-            [type-mismatch] 89: Argument type mismatch: expected `Dog`, actual `Dog?`"#]],
+            [type-mismatch] 89: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 98: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 99: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 101: Initializer type mismatch: expected `Dog`, actual `Dog?`
+            [return-type-mismatch] 103: Return type mismatch: expected `Dog`, actual `Dog?`"#]],
     );
 }
 
@@ -1868,6 +1882,77 @@ fn a_partly_resolved_classpath_calls_nothing_missing() {
         &fixture("//- /app/b/Use.kt classpath=partial"),
         crate::DiagnosticsConfig::default(),
         expect![[""]],
+    );
+}
+
+#[test]
+fn unsafe_calls_follow_the_data_flow() {
+    // A local's or a call's type after the smart casts the compiler makes
+    // decides; a property's (whose smart casts aren't modelled) still goes
+    // by whether it's checked anywhere around.
+    let config = || crate::DiagnosticsConfig {
+        only: vec![crate::Check::UnsafeCall],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+class Dog { val name: String? = null; fun bark() {} }
+class Box<V>(val value: V) { fun get(): V? = value; fun clear() {} }
+class Repo { fun find(): Dog? = null }
+class Holder(val dog: Dog?)
+fun checkedOnOneWay(dog: Dog?) {
+    if (dog != null) dog.bark()
+    dog.bark()
+}
+fun aliased(dog: Dog?) {
+    val ready = dog != null
+    if (ready) dog.bark()
+}
+fun aliasedNegated(dog: Dog?) {
+    val missing = dog == null
+    if (missing) return
+    dog.bark()
+}
+fun aliasedVar(input: Dog?) {
+    var dog = input
+    val ready = dog != null
+    if (ready) dog.bark()
+}
+fun aliasedVarAssigned(input: Dog?) {
+    var dog = input
+    val ready = dog != null
+    dog = input
+    if (ready) dog.bark()
+}
+fun elvisOnChain(dog: Dog?) {
+    val name = dog?.name ?: return
+    dog.bark()
+}
+fun <V : Any> comparedWithNonNull(box: Box<V>?, value: V) {
+    if (box?.get() == value) box.clear()
+}
+fun <V> comparedWithMaybeNull(box: Box<V>?, value: V) {
+    if (box?.get() == value) box.clear()
+}
+fun called(repo: Repo) {
+    repo.find().bark()
+}
+fun calledTwice(repo: Repo) {
+    if (repo.find() != null) repo.find().bark()
+}
+fun property(holder: Holder) {
+    if (holder.dog != null) holder.dog.bark()
+}
+"#,
+        config(),
+        expect![[r#"
+            [unsafe-call] 8: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [unsafe-call] 28: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [unsafe-call] 38: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Box<V>?`
+            [unsafe-call] 41: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [unsafe-call] 44: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`"#]],
     );
 }
 

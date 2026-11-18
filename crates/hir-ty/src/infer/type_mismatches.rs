@@ -9,7 +9,7 @@
 //! on a branching expression (`if`, `when`, `try`, `?:`) passes to the
 //! value each branch ends with, so a mismatch is shown on that innermost
 //! value. A class mismatch with every supertype known is reported, and
-//! one of nullability alone for a local (see `null_mismatch`), not type
+//! one of nullability alone for a local or a call (see `null_mismatch`), not type
 //! arguments — and only for a value whose type inference knows as the
 //! compiler does (see `examinable`: a generic call's may come from what
 //! it's passed to).
@@ -19,6 +19,7 @@ use syntax::{SyntaxNode, TextRange, named_children};
 use super::declarations::Inferrer;
 use super::expressions::Typed;
 use super::fit::Fit;
+use super::narrowing::NullKnowledge;
 use super::{MismatchSite, TypeMismatch};
 use crate::ty::{Nullability, Ty};
 
@@ -239,25 +240,15 @@ impl Inferrer<'_> {
         self.record_type_mismatch(value.start_byte() as u32, finding);
     }
 
-    /// A local that may be null where a value that can't be goes: its
-    /// class fits, its `?` doesn't. Only a local, whose smart casts this
-    /// inference follows as the compiler does (assignments, conditions,
-    /// contracts, jumps), and only with the whole classpath — a contract
-    /// on a library function that's missing would have narrowed it.
+    /// A value that may be null where one that can't goes: its class
+    /// fits, its `?` doesn't. Only a value whose nullability its type says
+    /// for certain (see `null_knowledge`).
     fn null_mismatch(&self, value: SyntaxNode<'_>, actual: &Ty, expected: &Ty) -> bool {
-        let is_local = value.kind() == "simple_identifier"
-            && matches!(
-                self.recorded_at(value).map(|resolved| resolved.reference),
-                Some(super::Reference::Local(_))
-            );
         let only_null_differs = actual.nullability() == Nullability::Nullable
             && expected.nullability() == Nullability::NotNull
             && matches!(expected, Ty::Class(_))
             && self.types.fits(&actual.clone().non_null(), expected) == Fit::Yes;
-        is_local
-            && only_null_differs
-            && hir_def::def_map::classpath_complete(self.db, self.file)
-            && self.examinable(value)
+        only_null_differs && self.null_knowledge(value) == NullKnowledge::Followed
     }
 
     /// Whether no value of `actual`'s class is an `expected`, ignoring

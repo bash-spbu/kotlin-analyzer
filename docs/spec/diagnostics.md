@@ -10,7 +10,7 @@ whenever something it would need is `Unknown`, it stays silent.
 | `unresolved-reference` | error, **experimental** | a name that no visible declaration matches, when every level of the scope tower is known completely (see resolution.md) |
 | `missing-import` | warning | an unresolved name for which importable declarations exist (a class, a function or property, or an extension the receiver can use); offers "Import" actions |
 | `argument-mismatch` | error | a call no candidate accepts: wrong number of arguments, an unknown named argument, a missing argument without a default (argument types aren't judged) |
-| `unsafe-call` | error | `x.f` / `x.f()` with a plain `.` where `x`'s type is nullable, `f` is a member of the class (not an extension, not `equals`/`hashCode`/`toString`), and nothing in the enclosing declaration could have smart-cast `x` (it's never compared with `null`, type-checked, asserted, assigned, or used with `?.`, `!!`, `?:`; `this.x` and `x` count as one) |
+| `unsafe-call` | error | `x.f` / `x.f()` with a plain `.` where `x`'s type is nullable and `f` is a member of the class (not an extension, not `equals`/`hashCode`/`toString`). For a local, after the smart casts the data flow gives it (resolution.md), and for a call's value, the type decides, where the classpath is complete; for anything else (a property, whose smart casts aren't modelled), only when nothing in the enclosing declaration could have smart-cast `x` (it's never compared with `null`, type-checked, asserted, assigned, or used with `?.`, `!!`, `?:`; `this.x` and `x` count as one) |
 | `non-exhaustive-when` | error | a `when` over an enum, sealed type (an enum among its inheritors covered entry by entry) or `Boolean` that misses cases and has no `else` — unless a condition isn't modelled (ranges, `!is`, guards, arbitrary values) or the subject was compared, asserted (`requireNotNull`, `!!`, …) or assigned before it in the same declaration (Kotlin 2.x data flow may already exclude cases) |
 | `unused-import` | hint (unnecessary) | an import whose name appears nowhere else in the file — not in code, not in comments — and isn't an operator or convention function (`plus`, `getValue`, `componentN`, `assign` of the assignment plugin Gradle's `kotlin-dsl` uses, …); offers "Remove" |
 | `missing-package` | warning | a file that declares something but has no `package` line while its directory under the source root implies one; offers "Add package" |
@@ -75,12 +75,12 @@ only when the value's class can't be the required one — no supertype of
 it is, every supertype known; a mutable collection required takes its
 read-only one (a Java `List` parameter is `(Mutable)List!`), and a class
 of the same qualified name counts as the same. Nullability alone is
-reported for a local only (`fun f(dog: Dog?) = feed(dog)`), after the
-smart casts the data flow gives it (resolution.md), and only where the
-source set's classpath is complete — a missing library's contract would
-have narrowed it. Silent:
-- for nullability alone of anything but a local (smart casts of
-  properties aren't modelled), of an argument of a Java method (its
+reported for a local, after the smart casts the data flow gives it
+(resolution.md), and for a call's value, which nothing smart-casts
+(`feed(repo.find())`), only where the source set's classpath is complete
+— a missing library's contract would have narrowed a local. Silent:
+- for nullability alone of anything else (smart casts of properties
+  aren't modelled), of an argument of a Java method (its
   overloads differing in boxing alone, `isGreaterThan(long)` and
   `isGreaterThan(Long)`, aren't all weighed), and for type arguments
   (generic variance isn't modelled); a nullable name going where a
