@@ -4,7 +4,11 @@
 //! `ConversionResult` returned from a function declared to give a
 //! `BigDecimal`, `val count: Int = "x"`. Like rust-analyzer's
 //! `emit_type_mismatch`, one place records them, where a type is required
-//! rather than hinted. Only a class mismatch with every supertype known is
+//! rather than hinted — a [`Requirement`], beside the type inference is
+//! merely told to expect. Like rust-analyzer's `CoerceMany`, a requirement
+//! on a branching expression (`if`, `when`, `try`, `?:`) passes to the
+//! value each branch ends with, so a mismatch is shown on that innermost
+//! value. Only a class mismatch with every supertype known is
 //! reported — not one of nullability alone (smart casts from contracts
 //! such as `checkNotNull` aren't all modelled), not type arguments — and
 //! only for a value whose type inference knows as the compiler does (see
@@ -13,6 +17,7 @@
 use syntax::{SyntaxNode, TextRange, named_children};
 
 use super::declarations::Inferrer;
+use super::expressions::Typed;
 use super::fit::Fit;
 use super::{MismatchSite, TypeMismatch};
 use crate::ty::{Nullability, Ty};
@@ -23,7 +28,166 @@ const NUMBERS: [&str; 10] = [
     "Byte", "Short", "Int", "Long", "Float", "Double", "UByte", "UShort", "UInt", "ULong",
 ];
 
+/// The type a value must have where it goes (rust-analyzer's
+/// `Expectation::HasType`), and what makes it so.
+#[derive(Clone, Debug)]
+pub(crate) struct Requirement {
+    site: MismatchSite,
+    ty: Ty,
+}
+
+impl Requirement {
+    pub(super) fn new(site: MismatchSite, ty: &Ty) -> Requirement {
+        Requirement {
+            site,
+            ty: ty.clone(),
+        }
+    }
+}
+
+/// How an expression meets a requirement.
+enum Meets {
+    /// Its value is checked.
+    Itself,
+    /// Its parenthesized expression does.
+    Inner,
+    /// The value each of its branches ends with does.
+    Branches,
+}
+
+fn meets(node: SyntaxNode<'_>) -> Meets {
+    match node.kind() {
+        "parenthesized_expression" => Meets::Inner,
+        "if_expression" | "when_expression" | "try_expression" | "elvis_expression" => {
+            Meets::Branches
+        }
+        _ => Meets::Itself,
+    }
+}
+
+/// Statements that aren't a value to check: declarations, labels, comments.
+fn is_value_statement(node: SyntaxNode<'_>) -> bool {
+    !matches!(
+        node.kind(),
+        "property_declaration"
+            | "function_declaration"
+            | "class_declaration"
+            | "object_declaration"
+            | "label"
+            | "line_comment"
+            | "multiline_comment"
+            | "statements"
+    )
+}
+
 impl Inferrer<'_> {
+    /// Infers `value` (with `hint` to guide inference), which must meet
+    /// `requirement`.
+    pub(super) fn required(
+        &mut self,
+        value: SyntaxNode<'_>,
+        hint: Option<&Ty>,
+        requirement: Requirement,
+    ) -> Ty {
+        let outer = self.requirement.replace(requirement);
+        let ty = self.expression(value, hint);
+        self.requirement = outer;
+        ty
+    }
+
+    /// `node` inferred where `requirement` holds: checked itself, or
+    /// through what it gives its value from.
+    pub(super) fn typed_required(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Requirement,
+    ) -> Typed {
+        match meets(node) {
+            Meets::Inner => {
+                self.requirement = Some(requirement);
+                let typed = self.typed_inner(node, expected);
+                self.requirement = None;
+                typed
+            }
+            Meets::Branches => {
+                self.branch_requirement = Some(requirement);
+                let typed = self.typed_inner(node, expected);
+                self.branch_requirement = None;
+                typed
+            }
+            Meets::Itself => {
+                let typed = self.typed_inner(node, expected);
+                let ty = self.value_of(typed.clone());
+                self.check_value(requirement.site, node, &ty, &requirement.ty);
+                typed
+            }
+        }
+    }
+
+    /// A branch body whose value must meet `requirement`, when there is one.
+    pub(super) fn body_required(
+        &mut self,
+        body: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
+        let Some(requirement) = requirement else {
+            return self.body(body, expected);
+        };
+        let content: Vec<SyntaxNode<'_>> = named_children(body).collect();
+        match content[..] {
+            [only] if only.kind() == "statements" => self.block_required(only, Some(requirement)),
+            [only] if body.kind() == "control_structure_body" && is_value_statement(only) => {
+                self.push_scope();
+                let ty = self.required(only, expected, requirement);
+                self.pop_scope();
+                ty
+            }
+            _ => self.body(body, expected),
+        }
+    }
+
+    /// A block whose last statement's value must meet `requirement`.
+    pub(super) fn block_required(
+        &mut self,
+        node: SyntaxNode<'_>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
+        self.push_scope();
+        let ty = self.statements_required(node, requirement);
+        self.pop_scope();
+        ty
+    }
+
+    /// Statements whose last one's value must meet `requirement`.
+    pub(super) fn statements_required(
+        &mut self,
+        node: SyntaxNode<'_>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
+        let Some(requirement) = requirement else {
+            return self.statements(node);
+        };
+        if node.kind() != "statements" {
+            return self.statements(node);
+        }
+        let statements: Vec<SyntaxNode<'_>> = named_children(node).collect();
+        let Some((&last, leading)) = statements.split_last() else {
+            return self.types.builtin("Unit");
+        };
+        for statement in leading {
+            self.statement(*statement);
+        }
+        if !is_value_statement(last) {
+            return self.statement(last);
+        }
+        self.requirement = Some(requirement);
+        let ty = self.statement(last);
+        self.requirement = None;
+        ty
+    }
+
     /// Records `value`, of type `actual`, where `site` requires `expected`,
     /// when its class can't be `expected`'s.
     pub(super) fn check_value(
@@ -42,10 +206,12 @@ impl Inferrer<'_> {
             && expected.nullability() == Nullability::Nullable;
         let may_be_null_only =
             both_nullable && matches!(value.kind(), "simple_identifier" | "navigation_expression");
+        // The class comparison first: whether the value is certain asks
+        // receivers for members, and almost every value fits anyway.
         let mismatch = !from_java
             && !may_be_null_only
-            && self.examinable(value)
-            && self.class_mismatch(actual, expected);
+            && self.class_mismatch(actual, expected)
+            && self.examinable(value);
         let finding = mismatch.then(|| TypeMismatch {
             site,
             range: salient_range(value),

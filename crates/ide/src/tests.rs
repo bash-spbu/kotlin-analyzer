@@ -1046,6 +1046,59 @@ class Converter(private val exchange: Exchange, private val settings: Settings<S
 }
 
 #[test]
+fn a_required_type_reaches_every_branch() {
+    // As rust-analyzer's coercion of each branch: the mismatch is shown on
+    // the value a branch ends with, not on the whole `if`.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+open class Animal
+class Dog : Animal()
+class Car
+fun branchy(flag: Boolean, dog: Dog, car: Car): Dog = if (flag) dog else car
+fun whenny(number: Int, dog: Dog, car: Car): Dog = when (number) {
+    1 -> dog
+    else -> car
+}
+fun tried(dog: Dog, car: Car): Dog = try {
+    dog
+} catch (error: Exception) {
+    car
+}
+fun elvised(maybe: Dog?, car: Car): Dog = maybe ?: car
+fun tail(flag: Boolean, dog: Dog, car: Car) {
+    val pet: Dog = if (flag) {
+        val note = "x"
+        car
+    } else {
+        dog
+    }
+}
+fun nested(flag: Boolean, dog: Dog, car: Car): Dog {
+    return if (flag) (if (!flag) car else dog) else dog
+}
+fun fine(flag: Boolean, dog: Dog, car: Car): Animal {
+    if (flag) dog else car
+    val pet: Dog = if (flag) dog else throw IllegalStateException()
+    return if (flag) dog else Animal()
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::ReturnTypeMismatch, crate::Check::TypeMismatch],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [return-type-mismatch] 5: Return type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 8: Return type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 13: Return type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 15: Return type mismatch: expected `Dog`, actual `Car`
+            [type-mismatch] 19: Initializer type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 25: Return type mismatch: expected `Dog`, actual `Car`"#]],
+    );
+}
+
+#[test]
 fn type_mismatches_stay_silent_where_inference_is_unsure() {
     // Each value here is right for the compiler; a resolution that misses
     // a rule of its would make it look wrong.

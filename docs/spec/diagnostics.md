@@ -62,8 +62,14 @@ them (`-nowarn`, `-Xsuppress-warning=NAME`). IntelliJ-only checks
 ### Type mismatches
 
 Like rust-analyzer's, inference records a mismatch in one place, where a
-type is required rather than hinted, and the range shown is the salient
-part: the member name of a call or property chain (`getOrThrow` of
+type is required rather than hinted — a requirement apart from the
+expected type that guides inference (`Expectation::HasType` there). A
+requirement on a branching value passes to the value each branch ends
+with, as rust-analyzer's coercion of each branch: `if`/`else`, every
+`when` branch, `try` and each `catch`, the right side of `?:`, the last
+statement of a block, through parentheses — `fun f(): Dog = if (c) dog
+else car` is reported on `car`. The range shown is the salient part: the
+member name of a call or property chain (`getOrThrow` of
 `client.convert(…).getOrThrow()`), not the whole expression. Reported
 only when the value's class can't be the required one — no supertype of
 it is, every supertype known; a mutable collection required takes its
@@ -77,7 +83,8 @@ of the same qualified name counts as the same. Silent:
   cast checks require, below):
   - anything but a name, property, `this`, literal or call of a function
     without type parameters — a generic call may take its type from where
-    it goes; branches (`if`, `when`, `try`, `?:`), lambdas, references;
+    it goes; lambdas and references (a lambda's result isn't required
+    yet); the left side of `?:`;
   - a local whose type is neither written nor that of such a value
     (`val charset = a ?: b`: a common supertype isn't followed);
   - a name both a local (visible or not) and a receiver's member have —

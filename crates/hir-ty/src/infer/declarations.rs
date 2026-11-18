@@ -9,6 +9,8 @@ use hir_def::resolver::top_level_levels;
 use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use super::type_mismatches::Requirement;
 use syntax::ast::AstNode;
 use syntax::ast::kotlin::{
     ClassParameter, FunctionDeclaration, ParameterBinding, PropertyDeclaration,
@@ -100,6 +102,11 @@ pub(crate) struct Inferrer<'db> {
     /// Where a call was resolved without every argument known to fit, or
     /// chosen among several: by the start of its name.
     pub(super) uncertain_calls: FxHashSet<u32>,
+    /// The type the value inferred next must have — taken by it.
+    pub(super) requirement: Option<super::type_mismatches::Requirement>,
+    /// The type each branch of the branching expression inferred next
+    /// (`if`, `when`, `try`, `?:`) must give — taken by it.
+    pub(super) branch_requirement: Option<super::type_mismatches::Requirement>,
 }
 
 /// What a plain `return` (no label) inside it returns from.
@@ -141,6 +148,8 @@ impl<'db> Inferrer<'db> {
             return_targets: Vec::new(),
             certain_locals: FxHashSet::default(),
             uncertain_calls: FxHashSet::default(),
+            requirement: None,
+            branch_requirement: None,
         }
     }
 
@@ -951,8 +960,8 @@ impl<'db> Inferrer<'db> {
             }
         }
         for (default, expected) in defaults {
-            let ty = self.expression(default, Some(&expected));
-            self.check_value(super::MismatchSite::Initializer, default, &ty, &expected);
+            let requirement = Requirement::new(super::MismatchSite::Initializer, &expected);
+            self.required(default, Some(&expected), requirement);
         }
     }
 
@@ -1036,13 +1045,14 @@ impl<'db> Inferrer<'db> {
             return self.types.builtin("Unit");
         }
         match content {
-            Some(expression) => {
-                let ty = self.expression(expression, expected);
-                if let Some(expected) = expected {
-                    self.check_value(super::MismatchSite::Return, expression, &ty, expected);
-                }
-                ty
-            }
+            Some(expression) => match expected {
+                Some(expected) => self.required(
+                    expression,
+                    Some(expected),
+                    Requirement::new(super::MismatchSite::Return, expected),
+                ),
+                None => self.expression(expression, None),
+            },
             None => Ty::Unknown,
         }
     }
@@ -1144,10 +1154,14 @@ impl<'db> Inferrer<'db> {
                 "getter" | "setter" | "modifiers" | "type_constraints" | "binding_pattern_kind" => {
                 }
                 _ if after_variable => {
-                    let ty = self.expression(child, written);
-                    if let Some(written) = written {
-                        self.check_value(super::MismatchSite::Initializer, child, &ty, written);
-                    }
+                    let ty = match written {
+                        Some(written) => self.required(
+                            child,
+                            Some(written),
+                            Requirement::new(super::MismatchSite::Initializer, written),
+                        ),
+                        None => self.expression(child, None),
+                    };
                     return Some(ty);
                 }
                 _ => {}

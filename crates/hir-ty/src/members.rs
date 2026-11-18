@@ -315,7 +315,7 @@ impl<'db> Types<'db> {
                         container: class_type.class.container,
                         item: *child,
                     };
-                    if item.modifiers.contains(Modifiers::STATIC) || !self.may_see(location) {
+                    if item.modifiers.contains(Modifiers::STATIC) || !self.may_see(location, item) {
                         continue;
                     }
                     let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
@@ -386,9 +386,7 @@ impl<'db> Types<'db> {
     /// narrows it to the class body; within one file that isn't followed).
     /// A private property stays: Java's private field stands in for its
     /// getter's property where that synthesis isn't followed.
-    fn may_see(&self, member: ItemLocation) -> bool {
-        let tree = item_tree(self.db, member.container);
-        let item = tree.item(member.item);
+    fn may_see(&self, member: ItemLocation, item: &hir_def::item_tree::Item) -> bool {
         let private_function = item.kind == ItemKind::Function
             && item.visibility == hir_def::item_tree::Visibility::Private;
         !private_function || member.container == ItemContainer::File(self.from)

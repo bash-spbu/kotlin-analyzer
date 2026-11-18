@@ -60,13 +60,17 @@ impl Inferrer<'_> {
         if self.depth >= super::declarations::MAX_DEPTH {
             return Typed::Value(Ty::Unknown);
         }
+        let requirement = self.requirement.take();
         self.depth += 1;
-        let typed = self.typed_inner(node, expected);
+        let typed = match requirement {
+            Some(requirement) => self.typed_required(node, expected, requirement),
+            None => self.typed_inner(node, expected),
+        };
         self.depth -= 1;
         typed
     }
 
-    fn typed_inner(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
+    pub(super) fn typed_inner(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
         if let Some(chain) = reassociation::misparsed_chain(node) {
             return Typed::Value(self.reassociated(node, chain, expected));
         }
@@ -824,13 +828,17 @@ impl Inferrer<'_> {
     }
 
     fn elvis(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
+        let requirement = self.branch_requirement.take();
         let mut children = named_children(node);
         let (Some(left), Some(right)) = (children.next(), children.next()) else {
             return Ty::Unknown;
         };
         let nullable_expected = expected.map(|expected| expected.clone().nullable());
         let left_type = self.expression(left, nullable_expected.as_ref());
-        let right_type = self.expression(right, expected);
+        let right_type = match requirement {
+            Some(requirement) => self.required(right, expected, requirement),
+            None => self.expression(right, expected),
+        };
         if let Some(operator) = syntax::token(node, "?:") {
             let removable = TextRange::new(left.end_byte(), node.end_byte());
             self.check_null_check(
@@ -899,10 +907,18 @@ impl Inferrer<'_> {
         let target_type = self.assignable(target);
         let is_plain = has_token(node, "=");
         let expected = if is_plain { Some(&target_type) } else { None };
-        let ty = self.expression(value, expected);
         let required = is_plain.then(|| self.written_target_type(target)).flatten();
-        if let Some(required) = required {
-            self.check_value(super::MismatchSite::Assignment, value, &ty, &required);
+        match required {
+            Some(required) => {
+                let requirement = super::type_mismatches::Requirement::new(
+                    super::MismatchSite::Assignment,
+                    &required,
+                );
+                self.required(value, expected, requirement);
+            }
+            None => {
+                self.expression(value, expected);
+            }
         }
     }
 
@@ -1045,6 +1061,7 @@ impl Inferrer<'_> {
         let Some((&condition, branches)) = children.split_first() else {
             return Ty::Unknown;
         };
+        let requirement = self.branch_requirement.take();
         let narrowing = self.condition(condition);
         let then_branch = branches.first().copied();
         let else_branch = branches.get(1).copied();
@@ -1055,7 +1072,7 @@ impl Inferrer<'_> {
             self.push_receiver(receiver.clone(), None);
         }
         let then_type = match then_branch {
-            Some(branch) => self.body(branch, expected),
+            Some(branch) => self.body_required(branch, expected, requirement.clone()),
             None => self.types.builtin("Unit"),
         };
         if receiver_narrowed.is_some() {
@@ -1064,7 +1081,8 @@ impl Inferrer<'_> {
         self.pop_scope();
         self.push_scope();
         self.narrow(&narrowing.when_false);
-        let else_type = else_branch.map(|branch| self.body(branch, expected));
+        let else_type =
+            else_branch.map(|branch| self.body_required(branch, expected, requirement.clone()));
         self.pop_scope();
         let then_jumps = matches!(then_type, Ty::Nothing { nullable: false });
         if else_branch.is_none() && then_jumps {
@@ -1084,6 +1102,7 @@ impl Inferrer<'_> {
     }
 
     fn when_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
+        let requirement = self.branch_requirement.take();
         self.push_scope();
         let mut subject_local = None;
         let mut subject_type = None;
@@ -1118,7 +1137,8 @@ impl Inferrer<'_> {
                         is_this: subject_is_this,
                         examinable: subject_examinable,
                     };
-                    let (ty, is_else) = self.when_entry(child, subject, expected);
+                    let (ty, is_else) =
+                        self.when_entry(child, subject, expected, requirement.clone());
                     has_else |= is_else;
                     branches.push(ty);
                     // Later branches run only when this one's condition
@@ -1186,6 +1206,7 @@ impl Inferrer<'_> {
         node: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
         expected: Option<&Ty>,
+        requirement: Option<super::type_mismatches::Requirement>,
     ) -> (Ty, bool) {
         let mut each_condition = Vec::new();
         let mut receivers = Vec::new();
@@ -1211,7 +1232,7 @@ impl Inferrer<'_> {
             self.push_receiver(receiver.clone(), None);
         }
         let ty = match body {
-            Some(body) => self.body(body, expected),
+            Some(body) => self.body_required(body, expected, requirement),
             None => self.types.builtin("Unit"),
         };
         if narrowed_receiver.is_some() {
@@ -1311,11 +1332,14 @@ impl Inferrer<'_> {
     }
 
     fn try_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
+        let requirement = self.branch_requirement.take();
         let mut branches = Vec::new();
         for child in named_children(node) {
             match child.kind() {
-                "statements" | "block" => branches.push(self.block(child)),
-                "catch_block" => branches.push(self.catch_block(child)),
+                "statements" | "block" => {
+                    branches.push(self.block_required(child, requirement.clone()));
+                }
+                "catch_block" => branches.push(self.catch_block(child, requirement.clone())),
                 "finally_block" => {
                     for part in named_children(child) {
                         self.block(part);
@@ -1332,7 +1356,11 @@ impl Inferrer<'_> {
         self.types.common_type(&branches)
     }
 
-    fn catch_block(&mut self, node: SyntaxNode<'_>) -> Ty {
+    fn catch_block(
+        &mut self,
+        node: SyntaxNode<'_>,
+        requirement: Option<super::type_mismatches::Requirement>,
+    ) -> Ty {
         self.push_scope();
         let exception = self
             .type_child(node)
@@ -1345,7 +1373,7 @@ impl Inferrer<'_> {
         let mut ty = self.types.builtin("Unit");
         for child in named_children(node) {
             if child.kind() == "statements" {
-                ty = self.statements(child);
+                ty = self.statements_required(child, requirement.clone());
             }
         }
         self.pop_scope();
@@ -1606,12 +1634,20 @@ impl Inferrer<'_> {
             if child.kind() == "label" {
                 continue;
             }
-            // Inferred as before, without the declared type: generic
+            // Inferred without the declared type as a hint: generic
             // inference here would bind from it alone (`fold(…)` to a
             // `Set` where Kotlin weighs the initial `mutableSetOf()` too).
-            let ty = self.expression(child, None);
-            if let Some(expected) = &expected {
-                self.check_value(super::MismatchSite::Return, child, &ty, expected);
+            match &expected {
+                Some(expected) => {
+                    let requirement = super::type_mismatches::Requirement::new(
+                        super::MismatchSite::Return,
+                        expected,
+                    );
+                    self.required(child, None, requirement);
+                }
+                None => {
+                    self.expression(child, None);
+                }
             }
         }
     }
