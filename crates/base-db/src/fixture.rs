@@ -317,8 +317,25 @@ annotation class RequiresOptIn(val message: String = "", val level: Level = Leve
 }
 annotation class OptIn(vararg val markerClass: Any)
 fun <T, R> with(receiver: T, block: T.() -> R): R = TODO()
-fun <T : Any> requireNotNull(value: T?): T = TODO()
-fun require(value: Boolean) {}
+fun <T : Any> requireNotNull(value: T?): T {
+    contract { returns() implies (value != null) }
+    return TODO()
+}
+fun <T : Any> checkNotNull(value: T?): T {
+    contract { returns() implies (value != null) }
+    return TODO()
+}
+fun require(value: Boolean) {
+    contract { returns() implies value }
+}
+fun check(value: Boolean) {
+    contract { returns() implies value }
+}
+fun assert(value: Boolean) {}
+fun CharSequence?.isNullOrEmpty(): Boolean {
+    contract { returns(false) implies (this@isNullOrEmpty != null) }
+    return TODO()
+}
 fun println(message: Any?) {}
 fun println(message: Int) {}
 data class Pair<out A, out B>(val first: A, val second: B)

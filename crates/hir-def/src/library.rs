@@ -349,6 +349,10 @@ impl Builder {
         let mut kept = modifiers(&member.modifiers);
         let deprecation = member.deprecation.clone();
         let annotations = annotation_paths(&member.annotations);
+        let contract = member
+            .contract
+            .as_deref()
+            .map(|contract| contract.map(&type_ref));
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
         }
@@ -397,6 +401,9 @@ impl Builder {
             self.tree.deprecate(id, *deprecation);
         }
         self.tree.annotate(id, annotations);
+        if let Some(contract) = contract {
+            self.tree.add_contract(id, contract);
+        }
         id
     }
 }

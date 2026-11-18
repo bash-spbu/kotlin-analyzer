@@ -75,9 +75,9 @@ only when the value's class can't be the required one — no supertype of
 it is, every supertype known; a mutable collection required takes its
 read-only one (a Java `List` parameter is `(Mutable)List!`), and a class
 of the same qualified name counts as the same. Silent:
-- for nullability alone and for type arguments: smart casts from
-  contracts (`checkNotNull`, `require`) and generic variance aren't all
-  modelled; a nullable name going where a nullable value goes may be
+- for nullability alone and for type arguments: smart casts of
+  properties and of a `var` after an assignment, and generic variance,
+  aren't modelled; a nullable name going where a nullable value goes may be
   smart-cast to `Nothing?` (`if (x == null) f(x)`);
 - for a value whose type isn't the compiler's for certain (also what
   cast checks require, below):
@@ -240,7 +240,7 @@ Status (2026-11-17), stable checks:
 | corpus | files | errors and warnings | which |
 |---|---|---|---|
 | backend A | 3677 | 14 | `argument-mismatch` against a stale generated client (one method, its 14 calls) |
-| backend B | 8364 | 3 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none; **false** `unsafe-call` after JUnit's `assertNotNull(x)`, whose contract (`x != null` once it returns) isn't read: only the `kotlin` package's contracts are known |
+| backend B | 8364 | 3 | `argument-mismatch` against a stale generated DTO; `missing-package` on a file that really has none; a `unsafe-call` after JUnit's `assertNotNull(x)` was false while only the `kotlin` package's contracts were known; with contracts read from metadata it's gone |
 | backend C | 4416 | 0 | |
 | backend D | 3819 | 0 | |
 | backend E | 1332 | 1 | `missing-package` on a file that really has none |

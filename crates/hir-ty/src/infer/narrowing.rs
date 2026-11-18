@@ -3,13 +3,13 @@
 //! `!`).
 
 use hir_def::ItemLocation;
-use hir_def::item_tree::Signature;
+use hir_def::item_tree::{Returns, Signature};
 use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
 use super::member_scope::data_flow_scope;
-use super::{LocalId, NullCheckKind, Reference, UnsafeCall};
+use super::{LocalId, NullCheckKind, UnsafeCall};
 use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
 
 /// Members every value has, which Kotlin also offers on a nullable
@@ -26,13 +26,6 @@ const ASSERTIONS: &[&str] = &[
     "assertNotNull",
     "assertThat",
 ];
-
-/// Standard-library functions that throw unless their condition holds:
-/// after `require(x != null)` the code sees `x` as not null.
-const CONDITION_CONTRACTS: &[&str] = &["require", "check", "assert"];
-
-/// Standard-library functions that throw when their argument is null.
-const NOT_NULL_CONTRACTS: &[&str] = &["requireNotNull", "checkNotNull"];
 
 /// An expression as data flow compares it: its text without whitespace,
 /// without a leading `this.`, and with `?.` and `!!.` read as `.` —
@@ -137,10 +130,32 @@ impl Inferrer<'_> {
                 }
                 Narrowing::default()
             }
+            "call_expression" => {
+                self.expression(node, None);
+                self.contract_condition(node)
+            }
             _ => {
                 self.expression(node, None);
                 Narrowing::default()
             }
+        }
+    }
+
+    /// What a call's contract says where it gave `true` and where `false`
+    /// (`!s.isNullOrEmpty()`): `returns(true)`'s, `returns(false)`'s, and
+    /// `returns()`'s in both.
+    fn contract_condition(&self, call: SyntaxNode<'_>) -> Narrowing {
+        let Some(called) = self.called_contract(call) else {
+            return Narrowing::default();
+        };
+        Narrowing {
+            when_true: self.contract_narrowings(&called, |returns| {
+                matches!(returns, Returns::Normally | Returns::Value(true))
+            }),
+            when_false: self.contract_narrowings(&called, |returns| {
+                matches!(returns, Returns::Normally | Returns::Value(false))
+            }),
+            receiver_when_true: None,
         }
     }
 
@@ -330,50 +345,20 @@ impl Inferrer<'_> {
     /// After a statement `require(x != null)`, `check(x is T)` or
     /// `requireNotNull(x)` — a standard-library call that throws otherwise —
     /// what follows sees its condition hold.
-    pub(super) fn narrow_after_contract(&mut self, statement: SyntaxNode<'_>) {
-        if statement.kind() != "call_expression" {
-            return;
-        }
-        let mut children = named_children(statement);
-        let (Some(callee), Some(suffix)) = (children.next(), children.next()) else {
+    /// What a call's contract says holds once it returned: `x` after
+    /// `requireNotNull(x)` or `require(x is T)`.
+    pub(super) fn narrow_after_contract(&mut self, value: SyntaxNode<'_>) {
+        let Some(called) = self.called_contract(value) else {
             return;
         };
-        if callee.kind() != "simple_identifier" || !self.resolves_into_kotlin(callee) {
-            return;
-        }
-        let Some(argument) = first_argument(suffix) else {
-            return;
-        };
-        let callee = self.text(callee);
-        let narrowings = if CONDITION_CONTRACTS.contains(&callee) {
-            self.asserted(argument)
-        } else if NOT_NULL_CONTRACTS.contains(&callee) {
-            self.asserted_not_null(argument).into_iter().collect()
-        } else {
-            Vec::new()
-        };
+        let narrowings = self.contract_narrowings(&called, |returns| returns == Returns::Normally);
         self.narrow(&narrowings);
-    }
-
-    /// Whether the name resolved to the `kotlin` package's declaration —
-    /// not a namesake that may not throw.
-    fn resolves_into_kotlin(&self, name: SyntaxNode<'_>) -> bool {
-        let Some(resolved) = self.recorded_at(name) else {
-            return false;
-        };
-        let Reference::Declaration(location) = resolved.reference else {
-            return false;
-        };
-        hir_def::item_tree(self.db, location.container)
-            .package
-            .to_string()
-            == "kotlin"
     }
 
     /// What a condition known to hold says, read without inferring it again
     /// (it already was, as an argument): `x != null`, `x is T`, joined by
     /// `&&`.
-    fn asserted(&self, condition: SyntaxNode<'_>) -> Vec<(LocalId, Ty)> {
+    pub(super) fn asserted(&self, condition: SyntaxNode<'_>) -> Vec<(LocalId, Ty)> {
         match condition.kind() {
             "parenthesized_expression" => named_children(condition)
                 .next()
@@ -420,13 +405,6 @@ impl Inferrer<'_> {
         let local = self.lookup_value_local(self.name(node))?;
         Some((local, self.local_type(local).non_null()))
     }
-}
-
-/// A call suffix's first value argument's expression.
-fn first_argument(suffix: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
-    let arguments = named_children(suffix).find(|part| part.kind() == "value_arguments")?;
-    let argument = named_children(arguments).find(|child| child.kind() == "value_argument")?;
-    named_children(argument).last()
 }
 
 impl Inferrer<'_> {

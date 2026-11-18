@@ -9,6 +9,7 @@ mod lower_java;
 mod lower_kotlin;
 mod pretty;
 mod written_annotations;
+mod written_contract;
 
 use intern::{Name, Path};
 use std::hash::{Hash, Hasher};
@@ -17,9 +18,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
 pub use classfile::{
-    DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin, OptInLevel,
-    OptInMarker,
+    ContractCondition, ContractEffect, ContractSubject, DeprecatedSinceKotlin, Deprecation,
+    DeprecationLevel, DeprecationOrigin, OptInLevel, OptInMarker, Returns,
 };
+
+/// A function's contract, its types as written (see [`classfile::Contract`]).
+pub type Contract = classfile::Contract<TypeRef>;
 pub(crate) use lower_java::lower_java;
 pub use lower_kotlin::kotlin_type_ref;
 pub(crate) use lower_kotlin::lower_kotlin;
@@ -84,9 +88,16 @@ pub struct ItemTree {
     annotations: FxHashMap<ItemId, Box<[Path]>>,
     /// The annotation classes that are opt-in markers (`@RequiresOptIn`).
     opt_in_markers: FxHashMap<ItemId, OptInMarker>,
+    /// What each function with a contract promises (`contract { … }`).
+    contracts: FxHashMap<ItemId, Contract>,
 }
 
 impl ItemTree {
+    /// The function's contract, if it has one.
+    pub fn contract(&self, id: ItemId) -> Option<&Contract> {
+        self.contracts.get(&id)
+    }
+
     /// What `@Deprecated` on the item says, if it's deprecated.
     pub fn deprecation(&self, id: ItemId) -> Option<&Deprecation> {
         self.deprecations.get(&id)
@@ -487,6 +498,7 @@ pub(crate) struct ItemTreeBuilder {
     deprecations: FxHashMap<ItemId, Deprecation>,
     annotations: FxHashMap<ItemId, Box<[Path]>>,
     opt_in_markers: FxHashMap<ItemId, OptInMarker>,
+    contracts: FxHashMap<ItemId, Contract>,
 }
 
 impl ItemTreeBuilder {
@@ -495,6 +507,11 @@ impl ItemTreeBuilder {
         if !annotations.is_empty() {
             self.annotations.insert(id, annotations);
         }
+    }
+
+    /// Gives the pushed function `id` its contract.
+    pub(crate) fn add_contract(&mut self, id: ItemId, contract: Contract) {
+        self.contracts.insert(id, contract);
     }
 
     /// Marks the pushed annotation class `id` as an opt-in marker.
@@ -574,6 +591,7 @@ impl ItemTreeBuilder {
             deprecations: self.deprecations,
             annotations: self.annotations,
             opt_in_markers: self.opt_in_markers,
+            contracts: self.contracts,
         };
         let source_map = ItemSourceMap {
             items: self.ranges,

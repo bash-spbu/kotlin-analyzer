@@ -13,9 +13,10 @@ use crate::class_file::{ClassFile, KotlinMetadata, latin1_bytes};
 use crate::protobuf::Reader;
 use crate::signature::NestedNames;
 use crate::{
-    ClassContents, ClassKind, ClassName, Deprecation, DeprecationOrigin, LibraryClass, LibraryType,
-    Member, MemberKind, Modifiers, Origin, PackageMembers, TypeArgument, TypeParameter,
-    ValueParameter, Variance, Visibility,
+    ClassContents, ClassKind, ClassName, Contract, ContractCondition, ContractEffect,
+    ContractSubject, Deprecation, DeprecationOrigin, LibraryClass, LibraryType, Member, MemberKind,
+    Modifiers, Origin, PackageMembers, Returns, TypeArgument, TypeParameter, ValueParameter,
+    Variance, Visibility,
 };
 
 /// `kind` of `@kotlin.Metadata`.
@@ -714,6 +715,7 @@ fn read_constructor(bytes: &[u8], context: &TypeContext<'_>, class_name: Name) -
         }
     }
     let mut member = Member {
+        contract: None,
         name: class_name,
         kind: MemberKind::Constructor,
         visibility: visibility_of(flags)?,
@@ -747,10 +749,12 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     let mut parameters = Vec::new();
     let mut own_table = None;
     let mut jvm_signature = None;
+    let mut contract = None;
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
         match number {
             100 => jvm_signature = value.as_bytes(),
+            32 => contract = value.as_bytes(),
             9 => flags = value.as_i32().unwrap_or(6),
             2 => name = value.as_i32(),
             3 => return_type = value.as_bytes().map(RawType::read),
@@ -785,6 +789,7 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     let (parameters_declared, scope) = read_type_parameters(&type_parameters, &context);
     let context = context.with_scope(scope);
     let mut member = Member {
+        contract: None,
         name: context.names.name(name?)?,
         kind: MemberKind::Function,
         visibility,
@@ -827,7 +832,151 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     }
     member.deprecation = facts.deprecation.map(Box::new);
     member.annotations = facts.annotations;
+    member.contract = contract
+        .and_then(|bytes| read_contract(bytes, &context))
+        .map(Box::new);
     Some(member)
+}
+
+/// A `Contract` message: its `returns…` effects (1). Effects of other
+/// kinds (`callsInPlace`, newer conditional forms) aren't kept.
+fn read_contract(bytes: &[u8], context: &TypeContext<'_>) -> Option<Contract<LibraryType>> {
+    let mut effects = Vec::new();
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        if number == 1
+            && let Some(effect) = value
+                .as_bytes()
+                .and_then(|bytes| read_effect(bytes, context))
+        {
+            effects.push(effect);
+        }
+    }
+    (!effects.is_empty()).then(|| Contract {
+        effects: effects.into(),
+    })
+}
+
+/// An `Effect` message: its type (1: 0 returns a constant, 2 returns not
+/// null), the constant (2), the condition it implies (3); one whose
+/// condition kind (5) isn't the plain conclusion isn't read.
+fn read_effect(bytes: &[u8], context: &TypeContext<'_>) -> Option<ContractEffect<LibraryType>> {
+    let mut effect_type = 0;
+    let mut constant = None;
+    let mut implies = None;
+    let mut condition_kind = 0;
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        match number {
+            1 => effect_type = value.as_i32().unwrap_or(0),
+            2 => constant = value.as_bytes().and_then(constant_of),
+            3 => implies = value.as_bytes(),
+            5 => condition_kind = value.as_i32().unwrap_or(0),
+            _ => {}
+        }
+    }
+    if condition_kind != 0 {
+        return None;
+    }
+    let returns = match (effect_type, constant) {
+        (0, None) => Returns::Normally,
+        (0, Some(ContractConstant::True)) => Returns::Value(true),
+        (0, Some(ContractConstant::False)) => Returns::Value(false),
+        (0, Some(ContractConstant::Null)) => Returns::Null,
+        (2, _) => Returns::NotNull,
+        _ => return None,
+    };
+    let implies = read_condition(implies?, context)?;
+    Some(ContractEffect { returns, implies })
+}
+
+/// The constants an `Expression` may be (3: true, false, null).
+enum ContractConstant {
+    True,
+    False,
+    Null,
+}
+
+fn constant_of(bytes: &[u8]) -> Option<ContractConstant> {
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        if number == 3 {
+            return match value.as_i32()? {
+                0 => Some(ContractConstant::True),
+                1 => Some(ContractConstant::False),
+                2 => Some(ContractConstant::Null),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// An `Expression` message as a condition: a predicate on a parameter (2,
+/// 0 the receiver) — is null (flags bit 1), is an instance of a type (4,
+/// or 5 in the type table), or the parameter itself — negated by flags bit
+/// 0; and-ed with its and-arguments (6), or-ed with its or-arguments (7).
+fn read_condition(
+    bytes: &[u8],
+    context: &TypeContext<'_>,
+) -> Option<ContractCondition<LibraryType>> {
+    let mut flags = 0;
+    let mut parameter = None;
+    let mut instance = None;
+    let mut and = Vec::new();
+    let mut or = Vec::new();
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        match number {
+            1 => flags = value.as_i32().unwrap_or(0),
+            2 => parameter = value.as_i32(),
+            4 => {
+                instance = value
+                    .as_bytes()
+                    .map(|bytes| context.library_type(&RawType::read(bytes)))
+            }
+            5 => instance = value.as_i32().map(|id| context.table_type(id)),
+            6 => and.extend(
+                value
+                    .as_bytes()
+                    .and_then(|bytes| read_condition(bytes, context)),
+            ),
+            7 => or.extend(
+                value
+                    .as_bytes()
+                    .and_then(|bytes| read_condition(bytes, context)),
+            ),
+            _ => {}
+        }
+    }
+    let negated = flags & 1 != 0;
+    let is_null = flags & 2 != 0;
+    let primitive = parameter.map(|index| {
+        let subject = match index {
+            0 => ContractSubject::Receiver,
+            index => ContractSubject::Parameter(index as u32 - 1),
+        };
+        match (is_null, instance) {
+            (true, _) => ContractCondition::IsNull { subject, negated },
+            (false, Some(ty)) => ContractCondition::IsInstance {
+                subject,
+                ty,
+                negated,
+            },
+            (false, None) => ContractCondition::Holds { subject, negated },
+        }
+    });
+    let combined = match (primitive, and.is_empty(), or.is_empty()) {
+        (Some(primitive), true, true) => primitive,
+        (primitive, false, true) => {
+            ContractCondition::All(primitive.into_iter().chain(and).collect())
+        }
+        (primitive, true, false) => {
+            ContractCondition::Any(primitive.into_iter().chain(or).collect())
+        }
+        _ => return None,
+    };
+    Some(combined)
 }
 
 fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
@@ -862,6 +1011,7 @@ fn read_property(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
     let (parameters_declared, scope) = read_type_parameters(&type_parameters, context);
     let context = context.with_scope(scope);
     Some(Member {
+        contract: None,
         name: context.names.name(name?)?,
         kind: MemberKind::Property {
             mutable: bit(flags, 8),

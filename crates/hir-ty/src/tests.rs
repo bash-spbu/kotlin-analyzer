@@ -1278,6 +1278,84 @@ class Consumer {
 }
 
 #[test]
+fn contracts_smart_cast_what_they_promise_and_nothing_else() {
+    // Each line after a call reads `.length` of a `String?` local: it
+    // resolves only where the call's own contract makes the local a
+    // `String`.
+    check_inference(
+        r#"
+//- /app/Checks.kt
+package app
+fun isPresent(value: String?): Boolean {
+    contract { returns(true) implies (value != null) }
+    return value != null
+}
+fun looksPresent(value: String?): Boolean = value != null
+fun <T> assertOf(value: Any?) {
+    contract { returns() implies (value is T) }
+}
+//- /app/Use.kt
+package app
+fun use(a: String?, b: String?, c: String?, d: String?, e: String?, f: String?, g: String?, h: String?, i: Any) {
+    if (!a.isNullOrEmpty()) a.length
+    checkNotNull(b)
+    b.length
+    val copy = requireNotNull(value = c)
+    c.length
+    assert(d != null)
+    d.length
+    if (isPresent(e)) e.length
+    if (looksPresent(f)) f.length
+    if (isPresent(g) || h != null) g.length
+    require(h is String)
+    h.length
+    assertOf<String>(i)
+    i.length
+}
+"#,
+        expect![[r#"
+            a@3 -> local a@2: String?
+            isNullOrEmpty@3 -> kotlin.isNullOrEmpty: Boolean
+            a@3 -> local a@2: String
+            length@3 -> kotlin.String.length: Int
+            checkNotNull@4 -> kotlin.checkNotNull: String
+            b@4 -> local b@2: String?
+            b@5 -> local b@2: String
+            length@5 -> kotlin.String.length: Int
+            requireNotNull@6 -> kotlin.requireNotNull: String
+            value@6 -> kotlin.requireNotNull: T?
+            c@6 -> local c@2: String?
+            c@7 -> local c@2: String
+            length@7 -> kotlin.String.length: Int
+            assert@8 -> kotlin.assert: Unit
+            d@8 -> local d@2: String?
+            d@9 -> local d@2: String?
+            length@9 -> kotlin.String.length: Int
+            isPresent@10 -> app.isPresent: Boolean
+            e@10 -> local e@2: String?
+            e@10 -> local e@2: String
+            length@10 -> kotlin.String.length: Int
+            looksPresent@11 -> app.looksPresent: Boolean
+            f@11 -> local f@2: String?
+            f@11 -> local f@2: String?
+            length@11 -> kotlin.String.length: Int
+            isPresent@12 -> app.isPresent: Boolean
+            g@12 -> local g@2: String?
+            h@12 -> local h@2: String?
+            g@12 -> local g@2: String?
+            length@12 -> kotlin.String.length: Int
+            require@13 -> kotlin.require: Unit
+            h@13 -> local h@2: String?
+            h@14 -> local h@2: String
+            length@14 -> kotlin.String.length: Int
+            assertOf@15 -> app.assertOf: Unit
+            i@15 -> local i@2: Any
+            i@16 -> local i@2: String
+            length@16 -> kotlin.String.length: Int"#]],
+    );
+}
+
+#[test]
 fn smart_casts_keep_the_more_specific_type_and_follow_casts_and_contracts() {
     check_inference(
         r#"

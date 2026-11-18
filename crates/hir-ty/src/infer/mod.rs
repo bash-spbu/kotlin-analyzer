@@ -17,6 +17,7 @@
 
 mod call;
 mod completion;
+mod contracts;
 mod declarations;
 mod exhaustiveness;
 mod expressions;

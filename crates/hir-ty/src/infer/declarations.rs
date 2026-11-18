@@ -1208,6 +1208,10 @@ impl<'db> Inferrer<'db> {
         match node.kind() {
             "property_declaration" => {
                 self.local_property(node);
+                // `val y = requireNotNull(x)`: `x` isn't null after it.
+                if let Some(initializer) = initializer_of(node) {
+                    self.narrow_after_contract(initializer);
+                }
                 self.types.builtin("Unit")
             }
             "function_declaration" => {
@@ -1227,7 +1231,14 @@ impl<'db> Inferrer<'db> {
             "statements" => self.block(node),
             _ => {
                 let ty = self.expression(node, None);
-                self.narrow_after_contract(node);
+                // `y = checkNotNull(x)` as well as `require(x != null)`.
+                let called = match node.kind() {
+                    "assignment" => named_children(node).nth(1),
+                    _ => Some(node),
+                };
+                if let Some(called) = called {
+                    self.narrow_after_contract(called);
+                }
                 ty
             }
         }

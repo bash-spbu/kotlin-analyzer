@@ -126,6 +126,7 @@ impl<'parse> Lowering<'parse> {
         };
         let deprecated = new.modifiers.contains(Modifiers::DEPRECATED);
         let is_annotation_class = new.kind == ItemKind::Class(ClassKind::Annotation);
+        let is_function = new.kind == ItemKind::Function;
         let id = self.builder.push(new, ranges);
         let Some(declaration) = self.node_spanning(item.range) else {
             return id;
@@ -144,6 +145,12 @@ impl<'parse> Lowering<'parse> {
                 super::written_annotations::written_opt_in_marker(self.parse, declaration)
         {
             self.builder.mark_opt_in(id, marker);
+        }
+        if is_function
+            && let Some(contract) =
+                super::written_contract::written_contract(self.parse, declaration)
+        {
+            self.builder.add_contract(id, contract);
         }
         id
     }

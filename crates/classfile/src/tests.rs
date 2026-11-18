@@ -341,6 +341,35 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         Some(OptInLevel::Warning)
     );
     assert_eq!(marker_level("kotlin.collections.List"), None);
+    // Contracts: what holds of the arguments when a function returns.
+    let contract = |package: &str, name: &str| {
+        top_level(&contents, package, name)
+            .iter()
+            .find_map(|member| member.contract.as_deref().cloned())
+    };
+    let render = |contract: Option<crate::Contract<LibraryType>>| {
+        contract.map(|contract| {
+            contract
+                .effects
+                .iter()
+                .map(|effect| format!("{:?} => {:?}", effect.returns, effect.implies.map(&|_| ())))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    };
+    assert_eq!(
+        render(contract("kotlin", "requireNotNull")).as_deref(),
+        Some("Normally => IsNull { subject: Parameter(0), negated: true }")
+    );
+    assert_eq!(
+        render(contract("kotlin", "require")).as_deref(),
+        Some("Normally => Holds { subject: Parameter(0), negated: false }")
+    );
+    assert_eq!(
+        render(contract("kotlin.text", "isNullOrEmpty")).as_deref(),
+        Some("Value(false) => IsNull { subject: Receiver, negated: true }")
+    );
+    assert_eq!(render(contract("kotlin", "assert")), None);
     // A data class's generated members are marked; what it declares isn't.
     let pair = class(&contents, "kotlin.Pair");
     let synthesized = |name: &str| {

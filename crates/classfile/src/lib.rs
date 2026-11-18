@@ -286,6 +286,114 @@ pub struct Member {
     /// The function's result or the property's type; `None` for a
     /// constructor.
     pub return_type: Option<LibraryType>,
+    /// What a function's `contract { … }` says about its arguments when it
+    /// returns. Rare: boxed.
+    pub contract: Option<Box<Contract<LibraryType>>>,
+}
+
+/// A function's contract: what holds of its arguments, given how it
+/// returned (Kotlin's `returns() implies …` and the like). `callsInPlace`
+/// says nothing about types and isn't kept.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Contract<T> {
+    pub effects: Box<[ContractEffect<T>]>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ContractEffect<T> {
+    pub returns: Returns,
+    pub implies: ContractCondition<T>,
+}
+
+/// How a function returned, for a contract's effect to hold.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Returns {
+    /// `returns()`: at all.
+    Normally,
+    /// `returns(true)`, `returns(false)`.
+    Value(bool),
+    /// `returns(null)`.
+    Null,
+    /// `returnsNotNull()`.
+    NotNull,
+}
+
+/// What a contract's effect says about an argument.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ContractCondition<T> {
+    /// `x == null` (`x != null` when negated).
+    IsNull {
+        subject: ContractSubject,
+        negated: bool,
+    },
+    /// `x is T` (`x !is T` when negated).
+    IsInstance {
+        subject: ContractSubject,
+        ty: T,
+        negated: bool,
+    },
+    /// A `Boolean` argument is `true` (`false` when negated).
+    Holds {
+        subject: ContractSubject,
+        negated: bool,
+    },
+    All(Box<[ContractCondition<T>]>),
+    Any(Box<[ContractCondition<T>]>),
+}
+
+/// What a contract's condition is about.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ContractSubject {
+    /// The extension receiver.
+    Receiver,
+    /// A value parameter, by its position (from 0).
+    Parameter(u32),
+}
+
+impl<T> Contract<T> {
+    /// The same contract with its types mapped.
+    pub fn map<U>(&self, map: &impl Fn(&T) -> U) -> Contract<U> {
+        Contract {
+            effects: self
+                .effects
+                .iter()
+                .map(|effect| ContractEffect {
+                    returns: effect.returns,
+                    implies: effect.implies.map(map),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<T> ContractCondition<T> {
+    pub fn map<U>(&self, map: &impl Fn(&T) -> U) -> ContractCondition<U> {
+        match self {
+            ContractCondition::IsNull { subject, negated } => ContractCondition::IsNull {
+                subject: *subject,
+                negated: *negated,
+            },
+            ContractCondition::IsInstance {
+                subject,
+                ty,
+                negated,
+            } => ContractCondition::IsInstance {
+                subject: *subject,
+                ty: map(ty),
+                negated: *negated,
+            },
+            ContractCondition::Holds { subject, negated } => ContractCondition::Holds {
+                subject: *subject,
+                negated: *negated,
+            },
+            ContractCondition::All(parts) => {
+                ContractCondition::All(parts.iter().map(|part| part.map(map)).collect())
+            }
+            ContractCondition::Any(parts) => {
+                ContractCondition::Any(parts.iter().map(|part| part.map(map)).collect())
+            }
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

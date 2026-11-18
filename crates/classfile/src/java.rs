@@ -126,6 +126,7 @@ fn read_field(field: &RawMember, names: &NestedNames) -> Option<Member> {
         .field_signature()
         .unwrap_or(LibraryType::Unreadable);
     Some(Member {
+        contract: None,
         name: Name::new(&field.name),
         kind: MemberKind::Property {
             mutable: field.access & access::FINAL == 0,
@@ -207,6 +208,7 @@ fn read_method(
         })
         .collect();
     Some(Member {
+        contract: None,
         name: if is_constructor {
             class_name
         } else {

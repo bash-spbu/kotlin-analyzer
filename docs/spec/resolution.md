@@ -78,8 +78,18 @@ before the use in an enclosing block, `for` variables, destructured
 components, `when (val x = …)` subjects, the implicit `it` of a lambda
 without parameters. A later declaration in the same block does not bind an
 earlier use. Smart casts narrow a stable value's type after a check
-(`is`, `!= null`, `!!`, contracts like `requireNotNull`), along the paths
-where the check holds.
+(`is`, `!= null`, `!!`), along the paths where the check holds, and as a
+called function's contract says. The contract is the function's own —
+read from its class file's Kotlin metadata or its written `contract { … }`,
+never assumed from a name: after it returns (`returns()`: `requireNotNull`,
+`checkNotNull`, `require`, `check`, kotlin.test's `assertNotNull`,
+`assertIs<T>` with `T` written), where it gave `true` or `false`
+(`returns(true)`/`returns(false)`: `!s.isNullOrEmpty()`), for the receiver
+or any argument, positional or named, whether the call is a statement, an
+initializer or an assigned value. `assert(x != null)` has no contract
+(assertions may be off) and casts nothing. Not followed: `returnsNotNull()`,
+a condition of two alternatives (`||`), a negated one, a type the call
+infers rather than writes.
 
 ## Types in bodies
 
@@ -148,8 +158,8 @@ its class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
 
 ### Not modelled yet (stays `Unknown`, never reported)
 
-- contracts (`require(x is T)`, `requireNotNull(x)`, `checkNotNull`) and
-  smart casts after `!!`;
+- smart casts of properties (`a.b` after `a.b != null`), of a `var`
+  after it's assigned a non-null value, and to `Nothing?` after `== null`;
 - members of anonymous objects (`object { val x = 1 }`);
 - declarations compiler plugins generate (`serializer()` of
   `@Serializable` classes);
