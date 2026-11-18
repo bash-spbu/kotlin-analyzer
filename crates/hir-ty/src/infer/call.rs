@@ -3,7 +3,7 @@
 //! callee's type parameters; typing lambda arguments from the parameter
 //! they're passed to.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use hir_def::ItemLocation;
 use hir_def::item_tree::{ItemKind, Modifiers, Signature};
@@ -63,7 +63,7 @@ impl Argument<'_> {
 #[derive(Clone)]
 struct Candidate {
     callable: Callable,
-    signature: Rc<CallableSignature>,
+    signature: Arc<CallableSignature>,
     /// What the receiver binds: a member's class's type parameters.
     substitution: Substitution,
     /// The value an extension is called on (explicit or implicit).
@@ -712,7 +712,7 @@ impl<'db> Inferrer<'db> {
             for (parameter, inherited) in with_defaults.parameters.iter_mut().zip(inherited) {
                 parameter.has_default |= inherited;
             }
-            signature = Rc::new(with_defaults);
+            signature = Arc::new(with_defaults);
         }
         Some(Candidate {
             callable: Callable::Function(member.location),

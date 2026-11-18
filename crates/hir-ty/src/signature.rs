@@ -1,7 +1,9 @@
 //! What calling a declaration takes and gives: its parameters' types, its
 //! result, the type parameters a call infers.
 
-use std::rc::Rc;
+use std::sync::Arc;
+
+use base_db::{SourceDatabase, SourceSet};
 
 use hir_def::expect_actual::{self, Side};
 use hir_def::item_tree::{ItemKind, Parameter, Signature};
@@ -97,26 +99,81 @@ pub struct ParameterSignature {
     pub vararg: bool,
 }
 
+/// What a signature's result is when the declaration doesn't write it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnwrittenResult {
+    /// Inferred from the body (`declaration_type`).
+    Inferred,
+    /// Left `Unknown` for the caller to infer: a shared signature mustn't
+    /// depend on bodies, whose inference asks for signatures in turn.
+    Deferred,
+}
+
+/// What calling `callable` takes and gives, as the files of `source_set`
+/// see it — computed once for all of them (see `source_set_hierarchy`). A
+/// workspace function's result it doesn't write is left to each file
+/// (`UnwrittenResult::Deferred`).
+#[salsa::tracked(returns(clone), lru = 16384)]
+pub(crate) fn source_set_signature(
+    db: &dyn SourceDatabase,
+    source_set: SourceSet,
+    callable: Callable,
+) -> Option<Arc<CallableSignature>> {
+    let file = *source_set.files(db).first()?;
+    Types::new(db, file).compute_signature(callable, UnwrittenResult::Deferred)
+}
+
 impl Types<'_> {
     /// What calling `callable` takes and gives (remembered: a call site
     /// often weighs the same overloads as the last one).
-    pub fn signature(&self, callable: Callable) -> Option<Rc<CallableSignature>> {
+    pub fn signature(&self, callable: Callable) -> Option<Arc<CallableSignature>> {
         if let Some(known) = self.signatures.borrow().get(&callable) {
             return known.clone();
         }
-        let signature = match callable {
-            Callable::Function(location) => self.function_signature(location),
+        let signature = match self.shared_by() {
+            Some(source_set) => source_set_signature(self.db, source_set, callable)
+                .map(|shared| self.with_inferred_result(callable, shared)),
+            None => self.compute_signature(callable, UnwrittenResult::Inferred),
+        };
+        self.signatures
+            .borrow_mut()
+            .insert(callable, signature.clone());
+        signature
+    }
+
+    /// A shared signature with the result its workspace function doesn't
+    /// write, inferred.
+    fn with_inferred_result(
+        &self,
+        callable: Callable,
+        shared: Arc<CallableSignature>,
+    ) -> Arc<CallableSignature> {
+        let Callable::Function(location) = callable else {
+            return shared;
+        };
+        if !result_is_inferred(self.db, location) {
+            return shared;
+        }
+        Arc::new(CallableSignature {
+            result: self.unwritten_type(location),
+            ..(*shared).clone()
+        })
+    }
+
+    fn compute_signature(
+        &self,
+        callable: Callable,
+        unwritten: UnwrittenResult,
+    ) -> Option<Arc<CallableSignature>> {
+        match callable {
+            Callable::Function(location) => self.function_signature(location, unwritten),
             Callable::Constructor { class, declaration } => {
                 self.constructor_signature(class, declaration)
             }
             Callable::Generated { class, function } => self.generated_signature(class, function),
         }
         .map(|signature| self.with_expect_defaults(callable, signature))
-        .map(Rc::new);
-        self.signatures
-            .borrow_mut()
-            .insert(callable, signature.clone());
-        signature
+        .map(Arc::new)
     }
 
     /// An `actual` function or constructor takes its parameters' default
@@ -178,7 +235,11 @@ impl Types<'_> {
         signature
     }
 
-    fn function_signature(&self, location: ItemLocation) -> Option<CallableSignature> {
+    fn function_signature(
+        &self,
+        location: ItemLocation,
+        unwritten: UnwrittenResult,
+    ) -> Option<CallableSignature> {
         let tree = item_tree(self.db, location.container);
         let item = tree.item(location.item);
         let Signature::Function {
@@ -190,8 +251,11 @@ impl Types<'_> {
             return None;
         };
         let scope = TypeScope::of_declaration(self.db, self.from, location);
+        let deferred =
+            unwritten == UnwrittenResult::Deferred && result_is_inferred(self.db, location);
         let result = match return_type {
             Some(written) => lower_type(self.db, scope, written),
+            None if deferred => Ty::Unknown,
             None => self.unwritten_type(location),
         };
         Some(CallableSignature {
@@ -474,4 +538,21 @@ fn own_type_parameters(owner: ItemLocation, count: usize) -> Vec<TypeParameterId
             index: index as u32,
         })
         .collect()
+}
+
+/// A workspace function that doesn't write its result type: it's inferred
+/// from the body.
+fn result_is_inferred(db: &dyn SourceDatabase, location: ItemLocation) -> bool {
+    if !matches!(location.container, ItemContainer::File(_)) {
+        return false;
+    }
+    matches!(
+        &item_tree(db, location.container)
+            .item(location.item)
+            .signature,
+        Signature::Function {
+            return_type: None,
+            ..
+        }
+    )
 }

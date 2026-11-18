@@ -2,9 +2,9 @@
 //! arguments (`List<String>.get` returns `String`).
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use base_db::{SourceDatabase, SourceFile};
+use base_db::{SourceDatabase, SourceFile, SourceSet};
 use hir_def::item_tree::{ClassKind, ItemKind, Modifiers, Signature};
 use hir_def::{ItemContainer, ItemLocation, item_tree};
 use intern::Name;
@@ -25,16 +25,35 @@ pub struct Member {
     pub substitution: Substitution,
 }
 
+/// `class`'s supertypes as the files of `source_set` see them — what
+/// [`Types`] would compute for each of them, computed once. Library types
+/// resolve through the source set's classpath; the file that stands for
+/// it is its first, whose `private` classes could in principle stand in
+/// for a library's supertype of the same qualified name.
+#[salsa::tracked(returns(clone), lru = 8192)]
+pub(crate) fn source_set_hierarchy(
+    db: &dyn SourceDatabase,
+    source_set: SourceSet,
+    class: ItemLocation,
+) -> Arc<[ClassType]> {
+    match source_set.files(db).first() {
+        Some(file) => Types::new(db, *file).compute_hierarchy(class),
+        None => Arc::new([]),
+    }
+}
+
 /// Type questions asked from one file — whose classpath library types
 /// resolve through — remembering class hierarchies between questions.
+/// What depends only on the file's source set (a hierarchy, a callable's
+/// signature) is also shared between its files.
 pub struct Types<'db> {
     pub db: &'db dyn SourceDatabase,
     pub from: SourceFile,
     /// Each class's supertypes in terms of its own type parameters.
-    hierarchies: RefCell<FxHashMap<ItemLocation, Rc<[ClassType]>>>,
+    hierarchies: RefCell<FxHashMap<ItemLocation, Arc<[ClassType]>>>,
     complete_hierarchies: RefCell<FxHashMap<ItemLocation, bool>>,
     pub(crate) signatures: RefCell<
-        FxHashMap<crate::signature::Callable, Option<Rc<crate::signature::CallableSignature>>>,
+        FxHashMap<crate::signature::Callable, Option<Arc<crate::signature::CallableSignature>>>,
     >,
     /// `kotlin.<name>` types by name: asked for on every fit check.
     builtins: RefCell<FxHashMap<Box<str>, Ty>>,
@@ -147,10 +166,27 @@ impl<'db> Types<'db> {
 
     /// The supertypes of `class` (not itself) in terms of its own type
     /// parameters, breadth first.
-    fn hierarchy(&self, class: ItemLocation) -> Rc<[ClassType]> {
+    fn hierarchy(&self, class: ItemLocation) -> Arc<[ClassType]> {
         if let Some(known) = self.hierarchies.borrow().get(&class) {
             return known.clone();
         }
+        let hierarchy = match self.shared_by() {
+            Some(source_set) => source_set_hierarchy(self.db, source_set, class),
+            None => self.compute_hierarchy(class),
+        };
+        self.hierarchies
+            .borrow_mut()
+            .insert(class, hierarchy.clone());
+        hierarchy
+    }
+
+    /// The source set whose files share what this file computes; none for
+    /// a file outside every source set.
+    pub(crate) fn shared_by(&self) -> Option<SourceSet> {
+        hir_def::def_map::source_set_input(self.db, self.from)
+    }
+
+    fn compute_hierarchy(&self, class: ItemLocation) -> Arc<[ClassType]> {
         let mut seen = FxHashSet::default();
         seen.insert(class);
         let mut all = vec![self.self_type(class)];
@@ -164,11 +200,7 @@ impl<'db> Types<'db> {
                 }
             }
         }
-        let hierarchy: Rc<[ClassType]> = all.into_iter().skip(1).collect();
-        self.hierarchies
-            .borrow_mut()
-            .insert(class, hierarchy.clone());
-        hierarchy
+        all.into_iter().skip(1).collect()
     }
 
     /// Whether every supertype written in `class`'s hierarchy resolves —
