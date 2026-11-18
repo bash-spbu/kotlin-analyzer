@@ -33,9 +33,10 @@ pub enum Check {
 pub enum Severity {
     Error,
     Warning,
-    /// A warning the Kotlin compiler gives too: code that compiles may
-    /// have it, so the corpus gate can't call it false.
-    CompilerWarning,
+    /// A warning Kotlin's tools give too — the compiler, or IntelliJ's
+    /// extended checks: code that compiles may have it, so the corpus gate
+    /// can't call it false.
+    Lint,
     /// Shown faded, as code that can go (`unused-import`).
     Unnecessary,
 }
@@ -102,7 +103,7 @@ impl Check {
             | Check::UnnecessarySafeCall
             | Check::UselessElvis
             | Check::SenselessComparison
-            | Check::CanBeVal => Severity::CompilerWarning,
+            | Check::CanBeVal => Severity::Lint,
             Check::UnusedImport | Check::UnusedVariable => Severity::Unnecessary,
         }
     }

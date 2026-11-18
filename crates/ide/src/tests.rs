@@ -566,7 +566,7 @@ fun suppressed() {
     );
 }
 
-/// The compiler warnings about null checks and locals, alone.
+/// The Kotlin warnings about null checks and locals, alone.
 fn new_warnings() -> crate::DiagnosticsConfig {
     use crate::Check;
     crate::DiagnosticsConfig {
