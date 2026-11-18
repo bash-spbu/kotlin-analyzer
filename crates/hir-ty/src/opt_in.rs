@@ -19,7 +19,8 @@ use hir_def::resolver::{
 };
 use hir_def::{ItemContainer, ItemLocation, item_tree};
 use intern::{Name, Path};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::rc::Rc;
 use syntax::{Language, Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use crate::infer::{Reference, infer_file};
@@ -50,6 +51,7 @@ pub fn opt_in_uses(db: &dyn SourceDatabase, file: SourceFile) -> Vec<OptInUse> {
         file,
         parse: &parse,
         opted_in_module,
+        markers: FxHashMap::default(),
         seen: FxHashSet::default(),
         found: Vec::new(),
     };
@@ -154,6 +156,9 @@ struct Uses<'db, 'parse> {
     parse: &'parse Parse,
     /// The markers the module opts into (`-opt-in`), by qualified name.
     opted_in_module: FxHashSet<String>,
+    /// Each declaration's markers, resolved once: a file uses the same
+    /// declarations again and again.
+    markers: FxHashMap<ItemLocation, Rc<[RequiredMarker]>>,
     seen: FxHashSet<u32>,
     found: Vec<OptInUse>,
 }
@@ -164,12 +169,12 @@ impl Uses<'_, '_> {
         if !self.seen.insert(range.start) {
             return;
         }
-        let required = required_markers(self.db, self.file, declaration);
+        let required = self.required(declaration);
         if required.is_empty() || !self.choice_is_certain(declaration, &required) {
             return;
         }
-        for marker in required {
-            if self.accepted(name, &marker) {
+        for marker in required.iter() {
+            if self.accepted(name, marker) {
                 continue;
             }
             self.found.push(OptInUse {
@@ -181,9 +186,22 @@ impl Uses<'_, '_> {
         }
     }
 
+    fn required(&mut self, declaration: ItemLocation) -> Rc<[RequiredMarker]> {
+        if let Some(known) = self.markers.get(&declaration) {
+            return known.clone();
+        }
+        let found: Rc<[RequiredMarker]> = required_markers(self.db, self.file, declaration).into();
+        self.markers.insert(declaration, found.clone());
+        found
+    }
+
     /// Overloads are chosen without every argument type judged: when one
     /// needs other markers, resolving to `declaration` says nothing.
-    fn choice_is_certain(&self, declaration: ItemLocation, required: &[RequiredMarker]) -> bool {
+    fn choice_is_certain(
+        &mut self,
+        declaration: ItemLocation,
+        required: &[RequiredMarker],
+    ) -> bool {
         let tree = item_tree(self.db, declaration.container);
         let item = tree.item(declaration.item);
         let is_callable = matches!(item.kind, ItemKind::Function | ItemKind::Constructor);
@@ -223,7 +241,7 @@ impl Uses<'_, '_> {
         let chosen = classes(required);
         overloads
             .into_iter()
-            .all(|overload| classes(&required_markers(self.db, self.file, overload)) == chosen)
+            .all(|overload| classes(&self.required(overload)) == chosen)
     }
 
     /// Whether the module, or an annotation around `use_site`, opts in to
@@ -355,6 +373,11 @@ impl Uses<'_, '_> {
             .collect();
         resolved.sort_by_key(|(start, _)| *start);
         for (start, location) in resolved {
+            // The syntax is only looked at for what needs an opt-in:
+            // finding a name's node and its parents walks the tree.
+            if self.required(location).is_empty() {
+                continue;
+            }
             let start = start as usize;
             let Some(name) = self
                 .parse
@@ -374,26 +397,23 @@ impl Uses<'_, '_> {
     /// Each segment of every written type that names a class — not an
     /// annotation's own class (`@Beta` is how one opts in).
     fn in_types(&mut self) {
-        let user_types: Vec<SyntaxNode<'_>> = syntax::descendants(self.parse.root())
-            .filter(|node| node.kind() == "user_type")
-            .filter(|user_type| !is_annotation_name(*user_type))
-            .collect();
-        for user_type in user_types {
-            let mut path: Vec<Name> = Vec::new();
-            for segment in
-                named_children(user_type).filter(|child| child.kind() == "type_identifier")
-            {
-                path.push(Name::new(self.parse.text_of(segment).trim_matches('`')));
-                let resolution = resolve_type_path(
-                    self.db,
-                    self.file,
-                    &Path::new(path.clone()),
-                    segment.start_byte(),
-                );
-                if let Resolution::Declaration(location) = resolution {
-                    self.add(segment, location);
-                }
+        let references = crate::type_references::type_references(self.db, self.file);
+        for reference in references
+            .iter()
+            .filter(|reference| !reference.annotation_class)
+        {
+            if self.required(reference.declaration).is_empty() {
+                continue;
             }
+            let start = reference.range.start as usize;
+            let Some(segment) = self
+                .parse
+                .root()
+                .named_descendant_for_byte_range(start, start + 1)
+            else {
+                continue;
+            };
+            self.add(segment, reference.declaration);
         }
     }
 }
@@ -413,19 +433,6 @@ fn accessed_property(accessor: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
         }
     }
     None
-}
-
-/// Whether `user_type` names an annotation where it annotates.
-fn is_annotation_name(user_type: SyntaxNode<'_>) -> bool {
-    let is_annotation =
-        |node: SyntaxNode<'_>| matches!(node.kind(), "annotation" | "file_annotation");
-    let Some(parent) = user_type.parent() else {
-        return false;
-    };
-    if is_annotation(parent) {
-        return true;
-    }
-    parent.kind() == "constructor_invocation" && parent.parent().is_some_and(is_annotation)
 }
 
 /// Whether `name` is the label of a named argument (`name = value`).

@@ -70,9 +70,6 @@ impl Inferrer<'_> {
         if let Some(chain) = reassociation::misparsed_chain(node) {
             return Typed::Value(self.reassociated(node, chain, expected));
         }
-        if let Some(operand) = reassociation::chain_operand(node) {
-            return self.typed(operand, None);
-        }
         self.typed_by_kind(node, expected)
     }
 

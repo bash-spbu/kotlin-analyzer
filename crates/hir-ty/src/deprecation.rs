@@ -11,12 +11,12 @@
 
 use base_db::{ArchiveKind, JdkRelease, KotlinVersion, SourceDatabase, SourceFile};
 use hir_def::item_tree::{
-    Deprecation, DeprecationLevel, DeprecationOrigin, ItemKind, Signature, TypeRef,
+    Deprecation, DeprecationLevel, DeprecationOrigin, ItemKind, Modifiers, Signature, TypeRef,
 };
-use hir_def::resolver::{Resolution, resolve_import_path, resolve_type_path};
+use hir_def::resolver::{Resolution, resolve_import_path};
 use hir_def::{ItemContainer, ItemLocation, item_tree};
 use intern::{Name, Path};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::{Language, Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use crate::infer::{Reference, infer_file};
@@ -46,6 +46,7 @@ pub fn deprecated_uses(db: &dyn SourceDatabase, file: SourceFile) -> Vec<Depreca
         db,
         file,
         parse: &parse,
+        deprecations: Deprecations::new(db, file),
         seen: FxHashSet::default(),
         found: Vec::new(),
     };
@@ -64,83 +65,119 @@ pub fn effective_deprecation(
     from: SourceFile,
     location: ItemLocation,
 ) -> Option<(Deprecation, DeprecationLevel)> {
-    let deprecation = applying_deprecation(db, from, location)?;
-    let level = level(&deprecation, api_version(db, from))?;
-    Some((deprecation, level))
+    Deprecations::new(db, from).of(location)
 }
 
-/// The worst deprecation among the declaration's own and those it
-/// inherits.
-fn applying_deprecation(
-    db: &dyn SourceDatabase,
-    from: SourceFile,
-    location: ItemLocation,
-) -> Option<Deprecation> {
-    let tree = item_tree(db, location.container);
-    let item = tree.item(location.item);
-    let own = tree
-        .deprecation(location.item)
-        .filter(|_| !from_assumed_jdk(db, location))
-        .cloned();
-    let inherited = match item.kind {
-        ItemKind::Function | ItemKind::Property { .. } if own.is_none() => {
-            overridden_deprecation(db, from, location)
+/// Deprecations as one file sees them, each declaration's looked up once:
+/// a file uses the same declarations again and again, and finding what a
+/// member overrides walks its class's hierarchy.
+struct Deprecations<'db> {
+    db: &'db dyn SourceDatabase,
+    types: Types<'db>,
+    api_version: Option<KotlinVersion>,
+    known: FxHashMap<ItemLocation, Option<(Deprecation, DeprecationLevel)>>,
+}
+
+impl<'db> Deprecations<'db> {
+    fn new(db: &'db dyn SourceDatabase, from: SourceFile) -> Deprecations<'db> {
+        Deprecations {
+            db,
+            types: Types::new(db, from),
+            api_version: api_version(db, from),
+            known: FxHashMap::default(),
         }
-        ItemKind::Constructor => item.parent.and_then(|class| {
-            let class = ItemLocation {
-                container: location.container,
-                item: class,
-            };
-            applying_deprecation(db, from, class)
-        }),
-        ItemKind::TypeAlias => match &item.signature {
-            Signature::TypeAlias { target } => expansion_deprecation(db, from, location, target),
-            _ => None,
-        },
-        _ => None,
-    };
-    worst(own, inherited)
-}
-
-/// A Kotlin deprecation of a member `location` overrides: it passes to
-/// overrides (Java's doesn't).
-fn overridden_deprecation(
-    db: &dyn SourceDatabase,
-    from: SourceFile,
-    location: ItemLocation,
-) -> Option<Deprecation> {
-    let mut found = None;
-    for overridden in Types::new(db, from).overridden(location) {
-        let tree = item_tree(db, overridden.container);
-        let passes = tree
-            .deprecation(overridden.item)
-            .filter(|deprecation| deprecation.origin == DeprecationOrigin::Kotlin)
-            .cloned();
-        found = worst(found, passes);
     }
-    found
+
+    fn of(&mut self, location: ItemLocation) -> Option<(Deprecation, DeprecationLevel)> {
+        if let Some(known) = self.known.get(&location) {
+            return known.clone();
+        }
+        let found = self.applying(location).and_then(|deprecation| {
+            let level = level(&deprecation, self.api_version)?;
+            Some((deprecation, level))
+        });
+        self.known.insert(location, found.clone());
+        found
+    }
+
+    /// The worst deprecation among the declaration's own and those it
+    /// inherits.
+    fn applying(&self, location: ItemLocation) -> Option<Deprecation> {
+        let tree = item_tree(self.db, location.container);
+        let item = tree.item(location.item);
+        let own = tree
+            .deprecation(location.item)
+            .filter(|_| !from_assumed_jdk(self.db, location))
+            .cloned();
+        let inherited = match item.kind {
+            ItemKind::Function | ItemKind::Property { .. } if own.is_none() => {
+                self.overridden(location)
+            }
+            ItemKind::Constructor => item.parent.and_then(|class| {
+                self.applying(ItemLocation {
+                    container: location.container,
+                    item: class,
+                })
+            }),
+            ItemKind::TypeAlias => match &item.signature {
+                Signature::TypeAlias { target } => self.expansion(location, target),
+                _ => None,
+            },
+            _ => None,
+        };
+        worst(own, inherited)
+    }
+
+    /// A Kotlin deprecation of a member `location` overrides: it passes to
+    /// overrides (Java's doesn't). A Kotlin member written without
+    /// `override` overrides nothing.
+    fn overridden(&self, location: ItemLocation) -> Option<Deprecation> {
+        if !may_override(self.db, location) {
+            return None;
+        }
+        let mut found = None;
+        for overridden in self.types.overridden(location) {
+            let tree = item_tree(self.db, overridden.container);
+            let passes = tree
+                .deprecation(overridden.item)
+                .filter(|deprecation| deprecation.origin == DeprecationOrigin::Kotlin)
+                .cloned();
+            found = worst(found, passes);
+        }
+        found
+    }
+
+    /// The deprecation of the class a type alias expands to.
+    fn expansion(&self, alias: ItemLocation, target: &TypeRef) -> Option<Deprecation> {
+        let TypeRef::Named { segments, .. } = target else {
+            return None;
+        };
+        let path = Path::new(segments.iter().map(|segment| segment.name));
+        let hir_def::ItemContainer::File(alias_file) = alias.container else {
+            return None;
+        };
+        let Resolution::Declaration(expanded) = hir_def::resolver::resolve_type_path_in_declaration(
+            self.db, alias_file, &path, alias.item,
+        ) else {
+            return None;
+        };
+        self.applying(expanded)
+    }
 }
 
-/// The deprecation of the class a type alias expands to.
-fn expansion_deprecation(
-    db: &dyn SourceDatabase,
-    from: SourceFile,
-    alias: ItemLocation,
-    target: &TypeRef,
-) -> Option<Deprecation> {
-    let TypeRef::Named { segments, .. } = target else {
-        return None;
+/// Whether `member` may override another: anything but a Kotlin source
+/// member written without `override` (compiled code doesn't say).
+fn may_override(db: &dyn SourceDatabase, member: ItemLocation) -> bool {
+    let ItemContainer::File(file) = member.container else {
+        return true;
     };
-    let path = Path::new(segments.iter().map(|segment| segment.name));
-    let hir_def::ItemContainer::File(alias_file) = alias.container else {
-        return None;
-    };
-    let Resolution::Declaration(expanded) =
-        hir_def::resolver::resolve_type_path_in_declaration(db, alias_file, &path, alias.item)
-    else {
-        return None;
-    };
-    applying_deprecation(db, from, expanded)
+    if file.language(db) != Language::Kotlin {
+        return true;
+    }
+    item_tree(db, member.container)
+        .item(member.item)
+        .modifiers
+        .contains(Modifiers::OVERRIDE)
 }
 
 /// Whether `location` is the JDK's, read for the release the build runs
@@ -209,6 +246,7 @@ struct Uses<'db, 'parse> {
     db: &'db dyn SourceDatabase,
     file: SourceFile,
     parse: &'parse Parse,
+    deprecations: Deprecations<'db>,
     /// Where a use was already found: a constructor call's name may be both
     /// a resolved name and a type.
     seen: FxHashSet<u32>,
@@ -220,8 +258,7 @@ impl Uses<'_, '_> {
         if !self.seen.insert(range.start) {
             return;
         }
-        let Some((deprecation, level)) = effective_deprecation(self.db, self.file, declaration)
-        else {
+        let Some((deprecation, level)) = self.deprecations.of(declaration) else {
             return;
         };
         // Code can't reach a hidden declaration: resolving to one is our
@@ -246,7 +283,7 @@ impl Uses<'_, '_> {
     /// every argument type judged, so when one with another deprecation
     /// exists (an old `ERROR` constructor beside the new one), the choice
     /// says nothing.
-    fn choice_is_certain(&self, declaration: ItemLocation) -> bool {
+    fn choice_is_certain(&mut self, declaration: ItemLocation) -> bool {
         let tree = item_tree(self.db, declaration.container);
         let item = tree.item(declaration.item);
         let is_callable = matches!(item.kind, ItemKind::Function | ItemKind::Constructor);
@@ -280,13 +317,10 @@ impl Uses<'_, '_> {
                     .collect()
             }
         };
-        let level_of = |location: ItemLocation| {
-            effective_deprecation(self.db, self.file, location).map(|(_, level)| level)
-        };
-        let chosen = level_of(declaration);
+        let chosen = self.deprecations.of(declaration).map(|(_, level)| level);
         overloads
             .into_iter()
-            .all(|overload| level_of(overload) == chosen)
+            .all(|overload| self.deprecations.of(overload).map(|(_, level)| level) == chosen)
     }
 
     /// Names inference resolved to one declaration.
@@ -301,6 +335,11 @@ impl Uses<'_, '_> {
             .collect();
         resolved.sort_by_key(|(start, _)| *start);
         for (start, location) in resolved {
+            // The syntax is only looked at for what is deprecated: finding
+            // a name's node and its parents walks the tree.
+            if self.deprecations.of(location).is_none() {
+                continue;
+            }
             let Some(name) = self.identifier_at(start) else {
                 continue;
             };
@@ -313,25 +352,8 @@ impl Uses<'_, '_> {
 
     /// Each segment of every written type that names a class or alias.
     fn in_types(&mut self) {
-        let user_types: Vec<SyntaxNode<'_>> = syntax::descendants(self.parse.root())
-            .filter(|node| node.kind() == "user_type")
-            .collect();
-        for user_type in user_types {
-            let mut path: Vec<Name> = Vec::new();
-            for segment in
-                named_children(user_type).filter(|child| child.kind() == "type_identifier")
-            {
-                path.push(Name::new(self.parse.text_of(segment).trim_matches('`')));
-                let resolution = resolve_type_path(
-                    self.db,
-                    self.file,
-                    &Path::new(path.clone()),
-                    segment.start_byte(),
-                );
-                if let Resolution::Declaration(location) = resolution {
-                    self.add(TextRange::of(segment), location);
-                }
-            }
+        for reference in crate::type_references::type_references(self.db, self.file).iter() {
+            self.add(reference.range, reference.declaration);
         }
     }
 
@@ -363,9 +385,9 @@ impl Uses<'_, '_> {
             );
             let declarations = resolve_import_path(self.db, self.file, &path).declarations();
             let all_deprecated = !declarations.is_empty()
-                && declarations.iter().all(|declaration| {
-                    effective_deprecation(self.db, self.file, *declaration).is_some()
-                });
+                && declarations
+                    .iter()
+                    .all(|declaration| self.deprecations.of(*declaration).is_some());
             if all_deprecated {
                 self.add(TextRange::of(last), declarations[0]);
             }

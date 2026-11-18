@@ -12,6 +12,7 @@ pub mod opt_in;
 pub mod overrides;
 pub mod signature;
 pub mod ty;
+pub mod type_references;
 
 pub use display::display;
 pub use lower::{TypeScope, lower_type};

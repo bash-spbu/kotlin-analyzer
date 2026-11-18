@@ -72,7 +72,7 @@ pub(super) fn continues_chain(node: SyntaxNode<'_>) -> bool {
 /// When `node` is the top of a postfix chain based on an operation, that
 /// operation's leading operand and kind.
 pub(super) fn misparsed_chain(node: SyntaxNode<'_>) -> Option<MisparsedChain<'_>> {
-    if !is_postfix(node) || continues_chain(node) {
+    if !is_postfix(node) {
         return None;
     }
     let mut base = node;
@@ -80,16 +80,17 @@ pub(super) fn misparsed_chain(node: SyntaxNode<'_>) -> Option<MisparsedChain<'_>
         base = named_children(base).next()?;
     }
     let operation = Operation::of(base)?;
+    // Asked last: a node's parent is found by walking down from the root.
+    if continues_chain(node) {
+        return None;
+    }
     let leading = named_children(base).next()?;
     Some(MisparsedChain { operation, leading })
 }
 
-/// The operand that really starts the chain, when `node` is an operation
-/// the grammar put at a chain's base.
-pub(super) fn chain_operand(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
-    if !continues_chain(node) {
-        return None;
-    }
-    Operation::of(node)?;
-    named_children(node).nth(1)
+/// The operand that really starts the chain whose receiver or callee is
+/// `base`, when the grammar put a whole operation there.
+pub(super) fn chain_operand(base: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    Operation::of(base)?;
+    named_children(base).nth(1)
 }

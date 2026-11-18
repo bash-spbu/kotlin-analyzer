@@ -193,6 +193,9 @@ fn whole_lines(text: &str, range: TextRange) -> TextRange {
 /// them: `This declaration needs opt-in. Its usage should be marked with
 /// '@Marker' or '@OptIn(Marker::class)'` — or the marker's own message.
 fn opt_ins(db: &RootDatabase, file: SourceFile, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+    if !config.runs(Check::OptInUsage) && !config.runs(Check::OptInUsageError) {
+        return Vec::new();
+    }
     let mut found = Vec::new();
     for opt_in in hir::opt_in_uses(db, file) {
         let (check, verb) = match opt_in.level() {
@@ -227,6 +230,9 @@ fn deprecations(
     file: SourceFile,
     config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
+    if !config.runs(Check::Deprecation) && !config.runs(Check::DeprecationError) {
+        return Vec::new();
+    }
     let mut found = Vec::new();
     for deprecated in hir::deprecated_uses(db, file) {
         let check = match deprecated.level {
@@ -313,6 +319,9 @@ fn local_findings(
     file: SourceFile,
     config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
+    if !config.runs(Check::UnusedVariable) && !config.runs(Check::CanBeVal) {
+        return Vec::new();
+    }
     let text = file.text(db);
     let mut found = Vec::new();
     for finding in hir::local_findings(db, file) {

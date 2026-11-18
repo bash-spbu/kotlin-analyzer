@@ -68,11 +68,11 @@ impl Inferrer<'_> {
         let safe = self.text_of_token(operator) == "as?";
         let as_type = TextRange::new(operator.start_byte(), node.end_byte());
         let misparsed = super::reassociation::continues_chain(node);
-        let kind = match (self.examinable(operand), self.written_target(target)) {
-            _ if misparsed => None,
-            (true, Some(written)) => self.cast_verdict(operand_type, &written, safe, operand, node),
-            _ => None,
-        };
+        let examined = !misparsed && self.examinable(operand);
+        let kind = examined
+            .then(|| self.written_target(target))
+            .flatten()
+            .and_then(|written| self.cast_verdict(operand_type, &written, safe, operand, node));
         let range = match &kind {
             Some(TypeOperationKind::CastNeverSucceeds) => TextRange::of(operator),
             _ => as_type,

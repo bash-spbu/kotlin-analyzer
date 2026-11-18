@@ -722,9 +722,10 @@ fn read_constructor(bytes: &[u8], context: &TypeContext<'_>, class_name: Name) -
             .collect(),
         return_type: None,
     };
-    let descriptor = crate::jvm_descriptor::of_constructor(&member);
     let facts = context
-        .method_facts(jvm_signature, "<init>", descriptor)
+        .method_facts(jvm_signature, "<init>", || {
+            crate::jvm_descriptor::of_constructor(&member)
+        })
         .unwrap_or_default();
     member.deprecation = facts.deprecation.map(Box::new);
     member.annotations = facts.annotations;
@@ -805,9 +806,10 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
                 .unwrap_or(LibraryType::Unreadable),
         ),
     };
-    let descriptor = crate::jvm_descriptor::of_function(&member);
     let facts = context
-        .method_facts(jvm_signature, &kotlin_name, descriptor)
+        .method_facts(jvm_signature, &kotlin_name, || {
+            crate::jvm_descriptor::of_function(&member)
+        })
         .unwrap_or_default();
     if facts
         .deprecation
@@ -1127,7 +1129,16 @@ enum NameFacts {
 }
 
 impl JvmMethods {
+    /// The methods' facts; none at all when no method says anything —
+    /// most classes, which then skip every lookup.
     fn of(methods: &[crate::class_file::Member], nested: &NestedNames) -> JvmMethods {
+        let says_something = methods.iter().any(|method| {
+            !method.annotations.is_empty()
+                || kotlin_deprecation(method.deprecation.as_ref()).is_some()
+        });
+        if !says_something {
+            return JvmMethods::default();
+        }
         let mut found = JvmMethods::default();
         for method in methods {
             let facts = MethodFacts {
@@ -1149,6 +1160,10 @@ impl JvmMethods {
             }
         }
         found
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_signature.is_empty()
     }
 }
 
@@ -1238,18 +1253,21 @@ impl<'table> TypeContext<'table> {
         &self,
         jvm_signature: Option<&[u8]>,
         kotlin_name: &str,
-        computed_descriptor: Option<String>,
+        computed_descriptor: impl FnOnce() -> Option<String>,
     ) -> Option<MethodFacts> {
+        if self.methods.is_empty() {
+            return None;
+        }
         let (name, descriptor) = jvm_signature
             .map(|bytes| jvm_method_signature(bytes, self.names))
             .unwrap_or_default();
         let name = name.unwrap_or_else(|| kotlin_name.to_owned());
-        let computed = computed_descriptor
-            .map(|descriptor| format!("{name}{descriptor}"))
-            .filter(|signature| self.methods.by_signature.contains_key(signature));
-        let signature = descriptor
-            .map(|descriptor| format!("{name}{descriptor}"))
-            .or(computed);
+        let signature = match descriptor {
+            Some(descriptor) => Some(format!("{name}{descriptor}")),
+            None => computed_descriptor()
+                .map(|descriptor| format!("{name}{descriptor}"))
+                .filter(|signature| self.methods.by_signature.contains_key(signature)),
+        };
         if let Some(signature) = signature {
             return self.methods.by_signature.get(&signature).cloned();
         }
@@ -1281,7 +1299,7 @@ impl<'table> TypeContext<'table> {
                 }
             }
         }
-        if self.overloaded.contains(kotlin_name) {
+        if self.overloaded.contains(kotlin_name) || self.methods.is_empty() {
             return None;
         }
         // The synthetic method is named after the property, whatever
