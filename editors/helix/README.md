@@ -63,8 +63,10 @@ config = { diagnostics = { disabled = ["unused-import"], experimental = false },
 
 - `diagnostics.disabled`: checks that don't run. The checks are `syntax`,
   `unresolved-reference`, `missing-import`, `argument-mismatch`,
-  `unsafe-call`, `non-exhaustive-when`, `unused-import` and
-  `missing-package`.
+  `unsafe-call`, `non-exhaustive-when`, `unused-import`,
+  `missing-package`, `unnecessary-not-null-assertion`,
+  `unnecessary-safe-call`, `useless-elvis`, `senseless-comparison`,
+  `unused-variable` and `can-be-val`.
 - `diagnostics.experimental`: also run checks that are still experimental.
 - `gradleExport`: export the Gradle model on start.
 - `projectJson`: a model exported beforehand.

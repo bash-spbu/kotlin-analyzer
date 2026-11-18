@@ -14,6 +14,23 @@ whenever something it would need is `Unknown`, it stays silent.
 | `non-exhaustive-when` | error | a `when` over an enum, sealed type (an enum among its inheritors covered entry by entry) or `Boolean` that misses cases and has no `else` — unless a condition isn't modelled (ranges, `!is`, guards, arbitrary values) or the subject was compared, asserted (`requireNotNull`, `!!`, …) or assigned before it in the same declaration (Kotlin 2.x data flow may already exclude cases) |
 | `unused-import` | hint (unnecessary) | an import whose name appears nowhere else in the file — not in code, not in comments — and isn't an operator or convention function (`plus`, `getValue`, `componentN`, `assign` of the assignment plugin Gradle's `kotlin-dsl` uses, …); offers "Remove" |
 | `missing-package` | warning | a file that declares something but has no `package` line while its directory under the source root implies one; offers "Add package" |
+| `unnecessary-not-null-assertion` | compiler warning | `x!!` where `x` can't be null (below); offers "Remove `!!`" |
+| `unnecessary-safe-call` | compiler warning | `x?.f` where `x` can't be null; offers "Replace `?.` with `.`" |
+| `useless-elvis` | compiler warning | `x ?: y` where `x` can't be null; offers "Remove the elvis operator" |
+| `senseless-comparison` | compiler warning | `x == null`, `x != null` (or `===`, `!==`, `null` on either side) where `x` can't be null: always `false` or always `true` |
+| `unused-variable` | hint (unnecessary) | a local `val`/`var` (one name, not destructured, not delegated, not `_`) never read: inference recorded no use and the name appears nowhere else in the enclosing declaration — not in a string template, not as a namesake |
+| `can-be-val` | compiler warning | a local `var` with an initializer that the enclosing declaration never assigns again — no `name = …`, `name += …`, `name++`, `--name` of any local of the name; offers "Change to `val`" |
+
+A value *can't be null* when its type is a class or function type without
+`?` — as declared, not through a smart cast: Kotlin doesn't smart-cast
+every value our data flow narrows (a `var` a lambda writes), so a local
+counts with the type it was declared or initialized with. A Java type
+(`String!`, also through a generic: `Row.get(name, Class<T>): T` is `T!`),
+a type parameter and anything unknown may be null. These are the
+warnings the Kotlin compiler gives under the names `@Suppress` takes
+(`UNNECESSARY_NOT_NULL_ASSERTION`, `UNNECESSARY_SAFE_CALL`, `USELESS_ELVIS`,
+`SENSELESS_COMPARISON`, `UNUSED_VARIABLE` or `unused`, `CAN_BE_VAL`); where
+we're not sure we report less than it does, never more.
 
 ### What "known completely" means
 
@@ -31,9 +48,11 @@ and `Result` may be `kotlin.Result`. In a file built with the Android SDK,
 plugin generates them in the module's namespace before compiling. A file with syntax errors gets only
 `syntax` diagnostics.
 
-`@file:Suppress("…")` turns a check off for the file under the name the
+`@Suppress("…")` turns a check off where it applies — the file
+(`@file:Suppress`), a declaration or an expression — under the name the
 Kotlin tools give the same finding: `PackageDirectoryMismatch`
-(`missing-package`), `UnusedImport` (`unused-import`).
+(`missing-package`), `UnusedImport` (`unused-import`), and the compiler's
+names above.
 
 ## Pipeline
 
@@ -53,7 +72,9 @@ Kotlin tools give the same finding: `PackageDirectoryMismatch`
 ## Corpus gate
 
 On projects that compile, every error or warning a check reports is a false
-positive by definition. `kotlin-analyzer diagnostics <root>` runs all checks
+positive by definition — except compiler warnings and hints, which code
+that compiles may have: their findings are reviewed by hand against what
+the compiler would say. `kotlin-analyzer diagnostics <root>` runs all checks
 over every workspace file and exits non-zero on any finding; the gate is zero
 findings on eight private Spring/Kotlin backend monorepos (260 to 8,400
 files each). Known exceptions are

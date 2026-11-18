@@ -17,7 +17,8 @@ use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use super::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
-    NonExhaustiveWhen, Reference, ResolvedName, UnresolvedName, UnsafeCall,
+    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName,
+    UnsafeCall,
 };
 use crate::lower::{TypeScope, lower_type};
 use crate::members::Types;
@@ -224,6 +225,42 @@ impl<'db> Inferrer<'db> {
         self.result.argument_mismatches.push(mismatch);
     }
 
+    /// Records `check` when `value`'s type, before smart casts, can't be
+    /// null.
+    pub(super) fn check_null_check(
+        &mut self,
+        value: SyntaxNode<'_>,
+        inferred: &Ty,
+        kind: NullCheckKind,
+        range: TextRange,
+    ) {
+        let declared = self.type_before_smart_casts(value, inferred);
+        if declared.is_never_null() {
+            self.result.redundant_null_checks.push(RedundantNullCheck {
+                kind,
+                range,
+                ty: declared,
+            });
+        }
+    }
+
+    /// `value`'s type as declared: a local's own, not one a smart cast gave
+    /// it; anything else's as inferred.
+    fn type_before_smart_casts(&self, value: SyntaxNode<'_>, inferred: &Ty) -> Ty {
+        match value.kind() {
+            "parenthesized_expression" => match named_children(value).next() {
+                Some(inner) => self.type_before_smart_casts(inner, inferred),
+                None => Ty::Unknown,
+            },
+            "simple_identifier" => match self.recorded_at(value).map(|name| name.reference) {
+                Some(Reference::Local(local)) => self.result.locals[local.0 as usize].ty.clone(),
+                Some(_) => inferred.clone(),
+                None => Ty::Unknown,
+            },
+            _ => inferred.clone(),
+        }
+    }
+
     pub(super) fn record_unsafe_call(&mut self, call: UnsafeCall) {
         self.result.unsafe_calls.push(call);
     }
@@ -347,7 +384,23 @@ impl<'db> Inferrer<'db> {
     /// (`channel` in `val receiver = produce { channel.send(x) }` is the
     /// `ProducerScope`'s, not the constructor parameter's).
     pub(super) fn lookup_local(&self, name: Name) -> Option<LocalId> {
-        let (local, depth, kind) = self.innermost_local(name)?;
+        self.lookup_local_where(name, |_| true)
+    }
+
+    /// The local a name means as a value: a local function is called or
+    /// referenced (`::name`), never read as a value, so a variable of the
+    /// name in an outer scope is the one (`var cookie` beside `fun
+    /// Builder.cookie()`).
+    pub(super) fn lookup_value_local(&self, name: Name) -> Option<LocalId> {
+        self.lookup_local_where(name, |kind| kind != LocalKind::Function)
+    }
+
+    fn lookup_local_where(
+        &self,
+        name: Name,
+        accepts: impl Fn(LocalKind) -> bool,
+    ) -> Option<LocalId> {
+        let (local, depth, kind) = self.innermost_local(name, &accepts)?;
         if kind != ScopeKind::ConstructorParameters {
             return Some(local);
         }
@@ -364,16 +417,18 @@ impl<'db> Inferrer<'db> {
 
     /// The innermost local named `name`, the depth of its scope and the
     /// scope's kind.
-    fn innermost_local(&self, name: Name) -> Option<(LocalId, usize, ScopeKind)> {
+    fn innermost_local(
+        &self,
+        name: Name,
+        accepts: &impl Fn(LocalKind) -> bool,
+    ) -> Option<(LocalId, usize, ScopeKind)> {
         let mut inside_function = false;
         for (depth, scope) in self.scopes.iter().enumerate().rev() {
             let hidden = inside_function && scope.kind == ScopeKind::ConstructorParameters;
             if !hidden
-                && let Some((_, id)) = scope
-                    .names
-                    .iter()
-                    .rev()
-                    .find(|(declared, _)| *declared == name)
+                && let Some((_, id)) = scope.names.iter().rev().find(|(declared, id)| {
+                    *declared == name && accepts(self.result.locals[id.0 as usize].kind)
+                })
             {
                 return Some((*id, depth, scope.kind));
             }
@@ -1144,7 +1199,7 @@ impl<'db> Inferrer<'db> {
 
 /// A script (`.kts`): statements at the top level, which a regular file
 /// can't have.
-fn is_script(parse: &Parse) -> bool {
+pub(super) fn is_script(parse: &Parse) -> bool {
     named_children(parse.root()).any(|child| {
         !matches!(
             child.kind(),

@@ -9,7 +9,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
 use super::member_scope::data_flow_scope;
-use super::{LocalId, Reference, UnsafeCall};
+use super::{LocalId, NullCheckKind, Reference, UnsafeCall};
 use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
 
 /// Members every value has, which Kotlin also offers on a nullable
@@ -147,22 +147,39 @@ impl Inferrer<'_> {
     /// `x != null` / `x == null`.
     fn null_check(&mut self, node: SyntaxNode<'_>) -> Narrowing {
         let operands: Vec<SyntaxNode<'_>> = named_children(node).collect();
-        for operand in &operands {
-            self.expression(*operand, None);
-        }
+        let types: Vec<Ty> = operands
+            .iter()
+            .map(|operand| self.expression(*operand, None))
+            .collect();
         let [left, right] = operands[..] else {
             return Narrowing::default();
         };
+        let is_not_equal = has_token(node, "!=") || has_token(node, "!==");
+        let compared = match (left.kind(), right.kind()) {
+            (_, "null_literal") => Some((left, &types[0])),
+            ("null_literal", _) => Some((right, &types[1])),
+            _ => None,
+        };
+        if let Some((value, value_type)) = compared {
+            self.check_null_check(
+                value,
+                value_type,
+                NullCheckKind::Comparison {
+                    always: is_not_equal,
+                },
+                TextRange::of(node),
+            );
+        }
         let checked = match (left.kind(), right.kind()) {
             ("simple_identifier", "null_literal") => left,
             ("null_literal", "simple_identifier") => right,
             _ => return Narrowing::default(),
         };
-        let Some(local) = self.lookup_local(self.name(checked)) else {
+        let Some(local) = self.lookup_value_local(self.name(checked)) else {
             return Narrowing::default();
         };
         let not_null = vec![(local, self.local_type(local).non_null())];
-        if has_token(node, "!=") || has_token(node, "!==") {
+        if is_not_equal {
             Narrowing {
                 when_true: not_null,
                 ..Narrowing::default()
@@ -204,7 +221,7 @@ impl Inferrer<'_> {
             };
         }
         let local = if operand.kind() == "simple_identifier" {
-            self.lookup_local(self.name(operand))
+            self.lookup_value_local(self.name(operand))
         } else {
             None
         };
@@ -379,7 +396,7 @@ impl Inferrer<'_> {
                 };
                 let target = children.find(|child| syntax::ast::kotlin::is_type(*child));
                 let local = (operand.kind() == "simple_identifier")
-                    .then(|| self.lookup_local(self.name(operand)))
+                    .then(|| self.lookup_value_local(self.name(operand)))
                     .flatten();
                 match (local, target) {
                     (Some(local), Some(target)) => {
@@ -398,7 +415,7 @@ impl Inferrer<'_> {
         if node.kind() != "simple_identifier" {
             return None;
         }
-        let local = self.lookup_local(self.name(node))?;
+        let local = self.lookup_value_local(self.name(node))?;
         Some((local, self.local_type(local).non_null()))
     }
 }

@@ -21,6 +21,7 @@ mod declarations;
 mod exhaustiveness;
 mod expressions;
 mod fit;
+mod local_usage;
 mod member_scope;
 mod narrowing;
 
@@ -36,6 +37,7 @@ use crate::ty::Ty;
 
 pub use completion::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use fit::Fit;
+pub use local_usage::{LocalFinding, local_findings};
 
 /// A local declaration: a `val`/`var` in a body, a parameter, a lambda's
 /// parameter (`it` included), a local function.
@@ -156,6 +158,30 @@ pub struct UnsafeCall {
     pub receiver: Ty,
 }
 
+/// A null check on a value whose type isn't nullable — as declared, not
+/// through a smart cast (Kotlin doesn't smart-cast every value our data
+/// flow narrows).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RedundantNullCheck {
+    pub kind: NullCheckKind,
+    /// The operator (`!!`, `?.`, `?:`), or the whole comparison.
+    pub range: TextRange,
+    /// The value's type.
+    pub ty: Ty,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NullCheckKind {
+    /// `x!!`.
+    NotNullAssertion,
+    /// `x?.f`.
+    SafeCall,
+    /// `x ?: y`; `removable` spans ` ?: y`.
+    Elvis { removable: TextRange },
+    /// `x == null` (always `false`) or `x != null` (always `true`).
+    Comparison { always: bool },
+}
+
 /// A `when` over an enum, a sealed type or a `Boolean` without `else` that
 /// misses cases.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -179,6 +205,7 @@ pub struct InferenceResult {
     argument_mismatches: Vec<ArgumentMismatch>,
     unsafe_calls: Vec<UnsafeCall>,
     non_exhaustive_whens: Vec<NonExhaustiveWhen>,
+    redundant_null_checks: Vec<RedundantNullCheck>,
 }
 
 impl InferenceResult {
@@ -222,6 +249,10 @@ impl InferenceResult {
 
     pub fn non_exhaustive_whens(&self) -> &[NonExhaustiveWhen] {
         &self.non_exhaustive_whens
+    }
+
+    pub fn redundant_null_checks(&self) -> &[RedundantNullCheck] {
+        &self.redundant_null_checks
     }
 }
 

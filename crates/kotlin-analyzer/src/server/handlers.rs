@@ -296,7 +296,9 @@ pub(super) fn diagnostics(
 fn to_lsp(index: &LineIndex, text: &str, diagnostic: &ide::Diagnostic) -> Diagnostic {
     let (severity, tags) = match diagnostic.check.severity() {
         ide::Severity::Error => (DiagnosticSeverity::ERROR, None),
-        ide::Severity::Warning => (DiagnosticSeverity::WARNING, None),
+        ide::Severity::Warning | ide::Severity::CompilerWarning => {
+            (DiagnosticSeverity::WARNING, None)
+        }
         ide::Severity::Unnecessary => (
             DiagnosticSeverity::HINT,
             Some(vec![lsp_types::DiagnosticTag::UNNECESSARY]),

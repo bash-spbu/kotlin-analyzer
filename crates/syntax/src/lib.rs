@@ -354,7 +354,12 @@ enum ChildPosition {
 /// Whether `node` has an anonymous child token spelled `token`
 /// (`class`, `interface`, `enum`, …).
 pub fn has_token(node: SyntaxNode<'_>, token: &str) -> bool {
-    children(node).any(|child| !child.is_named() && child.kind() == token)
+    self::token(node, token).is_some()
+}
+
+/// The anonymous child `token` of `node` (`!!`, `?.`, `?:`).
+pub fn token<'tree>(node: SyntaxNode<'tree>, token: &str) -> Option<SyntaxNode<'tree>> {
+    children(node).find(|child| !child.is_named() && child.kind() == token)
 }
 
 #[cfg(test)]

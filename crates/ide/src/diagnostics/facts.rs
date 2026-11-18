@@ -1,7 +1,9 @@
 //! Checks that render facts inference recorded: calls no candidate takes,
-//! unsafe calls on nullable receivers, non-exhaustive `when`s.
+//! unsafe calls on nullable receivers, non-exhaustive `when`s, null checks
+//! on values that can't be null, unused locals and `var`s that could be
+//! `val`s.
 
-use hir::{NonExhaustiveWhen, RootDatabase, SourceFile};
+use hir::{LocalFinding, NonExhaustiveWhen, NullCheckKind, RootDatabase, SourceFile};
 use syntax::{Parse, TextRange, has_token};
 
 use super::{Check, Diagnostic, DiagnosticsConfig, Fix, TextEdit};
@@ -57,7 +59,99 @@ pub(super) fn diagnostics(
             });
         }
     }
+    found.extend(null_checks(db, file, config));
+    found.extend(local_findings(db, file, config));
     found
+}
+
+/// `x!!`, `x?.f`, `x ?: y`, `x == null` where `x` can't be null.
+fn null_checks(db: &RootDatabase, file: SourceFile, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+    let inference = hir::infer_file(db, file);
+    let text = file.text(db);
+    let mut found = Vec::new();
+    for check in inference.redundant_null_checks() {
+        let ty = hir::display_type(db, &check.ty);
+        let (kind, message, fix) = match &check.kind {
+            NullCheckKind::NotNullAssertion => (
+                Check::UnnecessaryNotNullAssertion,
+                format!("Unnecessary non-null assertion (`!!`) on a value of non-null type `{ty}`"),
+                Some(replace("Remove `!!`", check.range, "")),
+            ),
+            NullCheckKind::SafeCall => (
+                Check::UnnecessarySafeCall,
+                format!("Unnecessary safe call on a receiver of non-null type `{ty}`"),
+                Some(replace("Replace `?.` with `.`", check.range, ".")),
+            ),
+            NullCheckKind::Elvis { removable } => (
+                Check::UselessElvis,
+                format!(
+                    "Elvis operator (`?:`) always returns the left operand of non-null type `{ty}`"
+                ),
+                Some(replace("Remove the elvis operator", *removable, "")),
+            ),
+            NullCheckKind::Comparison { always } => {
+                let condition = &text[check.range.start as usize..check.range.end as usize];
+                (
+                    Check::SenselessComparison,
+                    format!("Condition `{condition}` is always `{always}`: `{ty}` isn't nullable"),
+                    None,
+                )
+            }
+        };
+        if config.runs(kind) {
+            found.push(Diagnostic {
+                check: kind,
+                range: check.range,
+                message,
+                fixes: fix.into_iter().collect(),
+            });
+        }
+    }
+    found
+}
+
+/// Locals never read; `var`s never assigned again.
+fn local_findings(
+    db: &RootDatabase,
+    file: SourceFile,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let text = file.text(db);
+    let mut found = Vec::new();
+    for finding in hir::local_findings(db, file) {
+        match finding {
+            LocalFinding::Unused { name } if config.runs(Check::UnusedVariable) => {
+                let written = &text[name.start as usize..name.end as usize];
+                found.push(Diagnostic {
+                    check: Check::UnusedVariable,
+                    range: name,
+                    message: format!("Variable `{written}` is never used"),
+                    fixes: Vec::new(),
+                });
+            }
+            LocalFinding::NeverReassigned { keyword } if config.runs(Check::CanBeVal) => {
+                found.push(Diagnostic {
+                    check: Check::CanBeVal,
+                    range: keyword,
+                    message: "Variable is never assigned again: it can be a `val`".to_owned(),
+                    fixes: vec![replace("Change to `val`", keyword, "val")],
+                });
+            }
+            LocalFinding::Unused { .. } | LocalFinding::NeverReassigned { .. } => {}
+        }
+    }
+    found
+}
+
+/// A fix that puts `new_text` in place of `range`.
+fn replace(label: &str, range: TextRange, new_text: &str) -> Fix {
+    Fix {
+        label: label.to_owned(),
+        edits: vec![TextEdit {
+            range,
+            new_text: new_text.to_owned(),
+        }],
+    }
 }
 
 /// Adds the missing branches, each `case -> TODO()`, before the `when`'s

@@ -9,7 +9,7 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
-use super::{LocalId, LocalKind, NameSite, Reference};
+use super::{LocalId, LocalKind, NameSite, NullCheckKind, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
 
@@ -196,7 +196,7 @@ impl Inferrer<'_> {
             self.capture(None);
         }
         let name = self.name(node);
-        if let Some(local) = self.lookup_local(name) {
+        if let Some(local) = self.lookup_value_local(name) {
             let ty = self.local_type(local);
             self.record(node, Reference::Local(local), ty.clone());
             return Typed::Value(ty);
@@ -385,6 +385,7 @@ impl Inferrer<'_> {
         let member = name_node.map(|name| self.name(name));
         let receiver = self.member_receiver(receiver_node, member);
         let safe = has_token(suffix, "?.");
+        self.check_safe_call(receiver_node, &receiver, suffix);
         let Some(name_node) = name_node else {
             // `Foo::class` and the like.
             return Typed::Value(Ty::Unknown);
@@ -693,7 +694,13 @@ impl Inferrer<'_> {
             return Ty::Unknown;
         };
         let operand_type = self.expression(operand, None);
-        if has_token(node, "!!") {
+        if let Some(assertion) = syntax::token(node, "!!") {
+            self.check_null_check(
+                operand,
+                &operand_type,
+                NullCheckKind::NotNullAssertion,
+                TextRange::of(assertion),
+            );
             // `x!!` throws on null: from here on `x` isn't null.
             if let Some(narrowing) = self.asserted_not_null(operand) {
                 self.narrow(&[narrowing]);
@@ -715,7 +722,7 @@ impl Inferrer<'_> {
         }
         // `x as T` throws unless `x` is a `T`: from here on it is one.
         let local = (operand.kind() == "simple_identifier")
-            .then(|| self.lookup_local(self.name(operand)))
+            .then(|| self.lookup_value_local(self.name(operand)))
             .flatten();
         if let Some(local) = local {
             let narrowed = self.smart_cast(&self.local_type(local), target_type.clone());
@@ -773,15 +780,43 @@ impl Inferrer<'_> {
         let nullable_expected = expected.map(|expected| expected.clone().nullable());
         let left_type = self.expression(left, nullable_expected.as_ref());
         let right_type = self.expression(right, expected);
+        if let Some(operator) = syntax::token(node, "?:") {
+            let removable = TextRange::new(left.end_byte(), node.end_byte());
+            self.check_null_check(
+                left,
+                &left_type,
+                NullCheckKind::Elvis { removable },
+                TextRange::of(operator),
+            );
+        }
         let right_jumps = matches!(right_type, Ty::Nothing { nullable: false });
         if right_jumps && left.kind() == "simple_identifier" {
             // `x ?: return`: from here on `x` isn't null.
-            if let Some(local) = self.lookup_local(self.name(left)) {
+            if let Some(local) = self.lookup_value_local(self.name(left)) {
                 let narrowed = self.local_type(local).non_null();
                 self.narrow(&[(local, narrowed)]);
             }
         }
         self.types.common_type(&[left_type.non_null(), right_type])
+    }
+
+    /// `receiver?.member`: records it when the receiver can't be null.
+    pub(super) fn check_safe_call(
+        &mut self,
+        receiver_node: SyntaxNode<'_>,
+        receiver: &Typed,
+        suffix: SyntaxNode<'_>,
+    ) {
+        let (Typed::Value(receiver_type), Some(operator)) = (receiver, syntax::token(suffix, "?."))
+        else {
+            return;
+        };
+        self.check_null_check(
+            receiver_node,
+            receiver_type,
+            NullCheckKind::SafeCall,
+            TextRange::of(operator),
+        );
     }
 
     fn indexing(&mut self, node: SyntaxNode<'_>) -> Ty {
@@ -793,8 +828,16 @@ impl Inferrer<'_> {
         let indices: Vec<Ty> = named_children(suffix)
             .map(|index| self.expression(index, None))
             .collect();
-        self.operator_result(&receiver_type, "get", indices)
-            .unwrap_or(Ty::Unknown)
+        let element = self
+            .operator_result(&receiver_type, "get", indices)
+            .unwrap_or(Ty::Unknown);
+        // `holder?.tags[0]` is in the safe call's chain: null when `holder`
+        // is.
+        if receiver_type.nullability() == Nullability::Nullable {
+            element.nullable()
+        } else {
+            element
+        }
     }
 
     fn assignment(&mut self, node: SyntaxNode<'_>) {
@@ -1011,7 +1054,7 @@ impl Inferrer<'_> {
         };
         let ty = self.expression(*subject, None);
         let local = if subject.kind() == "simple_identifier" {
-            self.lookup_local(self.name(*subject))
+            self.lookup_value_local(self.name(*subject))
         } else {
             None
         };
@@ -1361,7 +1404,9 @@ impl Inferrer<'_> {
         }))
     }
 
-    /// A lambda's statements; the last one's value is the lambda's.
+    /// A lambda's statements; the last one's value is the lambda's — unless
+    /// a labelled `return@…` gives it another, whose type isn't followed:
+    /// then unknown.
     fn lambda_body(&mut self, node: SyntaxNode<'_>, expected_result: Option<&Ty>) -> Ty {
         let statements: Vec<SyntaxNode<'_>> = named_children(node).collect();
         let Some((&last, leading)) = statements.split_last() else {
@@ -1370,6 +1415,21 @@ impl Inferrer<'_> {
         for statement in leading {
             self.statement(*statement);
         }
+        let last_type = self.last_statement(last, expected_result);
+        if self.has_labelled_return(node) {
+            return Ty::Unknown;
+        }
+        last_type
+    }
+
+    /// Whether a `return@label` is anywhere in `node`.
+    fn has_labelled_return(&self, node: SyntaxNode<'_>) -> bool {
+        syntax::descendants(node).any(|descendant| {
+            descendant.kind() == "jump_expression" && self.text(descendant).starts_with("return@")
+        })
+    }
+
+    fn last_statement(&mut self, last: SyntaxNode<'_>, expected_result: Option<&Ty>) -> Ty {
         match last.kind() {
             "property_declaration"
             | "function_declaration"

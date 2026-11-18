@@ -21,12 +21,21 @@ pub enum Check {
     NonExhaustiveWhen,
     UnusedImport,
     MissingPackage,
+    UnnecessaryNotNullAssertion,
+    UnnecessarySafeCall,
+    UselessElvis,
+    SenselessComparison,
+    UnusedVariable,
+    CanBeVal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
     Error,
     Warning,
+    /// A warning the Kotlin compiler gives too: code that compiles may
+    /// have it, so the corpus gate can't call it false.
+    CompilerWarning,
     /// Shown faded, as code that can go (`unused-import`).
     Unnecessary,
 }
@@ -41,7 +50,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 8] = [
+    pub const ALL: [Check; 14] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -50,6 +59,12 @@ impl Check {
         Check::NonExhaustiveWhen,
         Check::UnusedImport,
         Check::MissingPackage,
+        Check::UnnecessaryNotNullAssertion,
+        Check::UnnecessarySafeCall,
+        Check::UselessElvis,
+        Check::SenselessComparison,
+        Check::UnusedVariable,
+        Check::CanBeVal,
     ];
 
     pub fn name(self) -> &'static str {
@@ -62,6 +77,12 @@ impl Check {
             Check::NonExhaustiveWhen => "non-exhaustive-when",
             Check::UnusedImport => "unused-import",
             Check::MissingPackage => "missing-package",
+            Check::UnnecessaryNotNullAssertion => "unnecessary-not-null-assertion",
+            Check::UnnecessarySafeCall => "unnecessary-safe-call",
+            Check::UselessElvis => "useless-elvis",
+            Check::SenselessComparison => "senseless-comparison",
+            Check::UnusedVariable => "unused-variable",
+            Check::CanBeVal => "can-be-val",
         }
     }
 
@@ -77,16 +98,27 @@ impl Check {
             | Check::UnsafeCall
             | Check::NonExhaustiveWhen => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
-            Check::UnusedImport => Severity::Unnecessary,
+            Check::UnnecessaryNotNullAssertion
+            | Check::UnnecessarySafeCall
+            | Check::UselessElvis
+            | Check::SenselessComparison
+            | Check::CanBeVal => Severity::CompilerWarning,
+            Check::UnusedImport | Check::UnusedVariable => Severity::Unnecessary,
         }
     }
 
-    /// The names that turn the check off in `@file:Suppress(…)`: the ones
-    /// the Kotlin tools give the same finding.
+    /// The names that turn the check off in `@Suppress(…)`: the ones the
+    /// Kotlin compiler or IntelliJ give the same finding.
     pub fn suppressed_by(self) -> &'static [&'static str] {
         match self {
             Check::MissingPackage => &["PackageDirectoryMismatch"],
             Check::UnusedImport => &["UnusedImport"],
+            Check::UnnecessaryNotNullAssertion => &["UNNECESSARY_NOT_NULL_ASSERTION"],
+            Check::UnnecessarySafeCall => &["UNNECESSARY_SAFE_CALL"],
+            Check::UselessElvis => &["USELESS_ELVIS"],
+            Check::SenselessComparison => &["SENSELESS_COMPARISON"],
+            Check::UnusedVariable => &["UNUSED_VARIABLE", "unused"],
+            Check::CanBeVal => &["CAN_BE_VAL", "CanBeVal"],
             Check::Syntax
             | Check::UnresolvedReference
             | Check::MissingImport
@@ -172,14 +204,8 @@ pub(crate) fn diagnostics(
             found.extend(package::missing_package(db, source, &parse));
         }
     }
-    let suppressed = suppression::file_suppressions(&parse);
-    found.retain(|diagnostic| {
-        !diagnostic
-            .check
-            .suppressed_by()
-            .iter()
-            .any(|name| suppressed.contains(*name))
-    });
+    let suppressions = suppression::suppressions(&parse);
+    found.retain(|diagnostic| !suppressions.suppress(diagnostic));
     found.sort_by_key(|diagnostic| (diagnostic.range.start, diagnostic.check));
     found
 }

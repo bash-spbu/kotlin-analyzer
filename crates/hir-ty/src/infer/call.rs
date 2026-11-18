@@ -234,6 +234,7 @@ impl<'db> Inferrer<'db> {
         let member = name_node.map(|name| self.name(name));
         let receiver = self.member_receiver(receiver_node, member);
         let safe = has_token(suffix, "?.");
+        self.check_safe_call(receiver_node, &receiver, suffix);
         let Some(name_node) = name_node else {
             self.type_remaining(arguments);
             return Ty::Unknown;
@@ -259,7 +260,13 @@ impl<'db> Inferrer<'db> {
                 if !safe && receiver_type.nullability() == Nullability::Nullable {
                     levels.push(Level::NullableReceiverExtensions(receiver_type.clone()));
                 }
-                levels.extend(self.receiver_levels(receiver_type));
+                // `x?.f()` calls `f` on `x` when it isn't null.
+                let called_on = if safe {
+                    receiver_type.clone().without_question_mark()
+                } else {
+                    receiver_type.clone()
+                };
+                levels.extend(self.receiver_levels(&called_on));
                 levels
             }
             Typed::Class(class) => self.static_levels(*class),
@@ -720,12 +727,14 @@ impl<'db> Inferrer<'db> {
         }
         let signature = self.types.signature(Callable::Function(location))?;
         let declared = signature.receiver.as_ref()?;
-        let receiver_value = receiver.clone().non_null();
-        let declared_takes_nullable = declared.nullability() == crate::Nullability::Nullable;
+        // An extension on a type parameter (`T.let`, `A.to`) takes the
+        // receiver as it is: `T` is `X?` for an `X?`.
+        let declared_takes_nullable = declared.nullability() == crate::Nullability::Nullable
+            || matches!(declared, Ty::TypeParameter { .. });
         let value = if declared_takes_nullable {
             receiver.clone()
         } else {
-            receiver_value
+            receiver.clone().without_question_mark()
         };
         if self.types.fits(&value, declared) == Fit::No {
             return None;
@@ -979,12 +988,29 @@ impl<'db> Inferrer<'db> {
             let declared = parameter.ty.substitute(&substitution);
             let expected_lambda = erase(&declared, parameters);
             let ty = self.function_value(node, Some(&expected_lambda), label);
+            // Against the declared `() -> T`, not `() -> X` with `T` already
+            // bound: a lambda giving `X?` makes `T` nullable.
             self.types
-                .unify(&declared, &ty, parameters, &mut substitution);
+                .unify(&parameter.ty, &ty, parameters, &mut substitution);
             argument.value = ArgumentValue::Typed {
                 ty,
                 integer_literal: false,
             };
+        }
+        // `<R, T : R> Result<T>.getOrElse(…): R`: `R` is at least `T` too,
+        // which binding it from the arguments doesn't see — unknown.
+        for parameter in parameters {
+            let bounds_another = parameters.iter().any(|other| {
+                other != parameter
+                    && self
+                        .types
+                        .type_parameter_bounds(*other)
+                        .iter()
+                        .any(|bound| bound.mentions(*parameter))
+            });
+            if bounds_another {
+                substitution.forget(*parameter);
+            }
         }
         Some(erase(
             &candidate.signature.result.substitute(&substitution),
@@ -1045,11 +1071,20 @@ impl<'db> Inferrer<'db> {
                 )
             })
             .collect();
+        // Erasing type parameters loses `T` vs `T?`: compare that apart.
+        let nullabilities: Vec<Nullability> = best
+            .iter()
+            .map(|shaped| shaped.candidate.signature.result.nullability())
+            .collect();
         let first = self
             .complete(&best[0], arguments, type_arguments, expected, Some(name))
             .unwrap_or(Ty::Unknown);
         self.type_remaining(arguments);
-        if results.iter().all(|result| *result == results[0]) {
+        let results_agree = results.iter().all(|result| *result == results[0]);
+        let nullabilities_agree = nullabilities
+            .iter()
+            .all(|nullability| *nullability == nullabilities[0]);
+        if results_agree && nullabilities_agree {
             first
         } else {
             Ty::Unknown

@@ -433,7 +433,7 @@ import kotlin.collections.List
 
 /** Formats with [format]. */
 fun use(money: Money, gone: Gone): Price {
-    val sum = money + money
+    println(money + money)
     return TODO()
 }
 "#,
@@ -442,6 +442,144 @@ fun use(money: Money, gone: Gone): Price {
             [unused-import] 7: Unused import `List` | Remove the unused import: ""
             [missing-import] 10: `Price` isn't imported: `import c.Price` | Import `c.Price`: "import c.Price\n""#]],
     );
+}
+
+#[test]
+fn null_checks_on_values_that_cannot_be_null() {
+    check_diagnostics(
+        r#"
+//- /app/a/Clock.java
+package a;
+public class Clock {
+    public String zone() { return null; }
+    public <T> T same(T value) { return value; }
+}
+//- /app/b/Use.kt
+package b
+import a.Clock
+class Account(val owner: String, val nickname: String?)
+fun <T> pick(value: T): T = value
+fun use(account: Account, clock: Clock, maybe: String?, items: List<String?>) {
+    account.owner!!.length
+    account.owner?.length
+    val name = account.owner ?: "anonymous"
+    if (account.owner == null) return
+    if (null != name) println(name)
+    account.nickname!!.length
+    account.nickname?.length ?: 0
+    if (account.nickname != null) println(account.nickname)
+    clock.zone()!!.length
+    clock.zone()?.length ?: 0
+    clock.same(account.owner)!!.length
+    clock.zone().let { zone -> zone!!.length }
+    pick(maybe)!!.length
+    items.first()!!.length
+    if (maybe != null) {
+        maybe!!.length
+        maybe?.length
+    }
+    (account.owner)!!
+    val fallback = account.owner
+    val picked = safeCall(fallback) { account.nickname } ?: fallback
+    val early = run {
+        if (maybe == null) return@run null
+        account.owner
+    } ?: fallback
+    println(picked + early)
+    maybe.let { value -> if (value == null) println("none") }
+    maybe?.let { value -> value!!.length }
+    val (left, right) = maybe to account.owner
+    if (left == null || right == null) println("none")
+    val polled = try { clock.zone() } catch (failure: Exception) { return }
+    if (polled == null) println("none")
+    val recovered = attempt { account.nickname }.orElse { account.owner }
+    if (recovered == null) println("none")
+    val required = maybe ?: fail()
+    required!!.length
+    var cookie: String? = null
+    fun String.cookie() {
+        cookie?.length
+    }
+    cookie = "set"
+    val holder: Tags? = null
+    holder?.tags[0]?.length
+}
+class Tags(val tags: List<String>)
+fun fail(): Nothing = TODO()
+class Outcome<out T>
+fun <T> attempt(block: () -> T): Outcome<T> = TODO()
+fun <R, T : R> Outcome<T>.orElse(onFailure: () -> R): R = TODO()
+fun <T> safeCall(default: T, call: () -> T): T = call()
+fun <R> run(block: () -> R): R = block()
+"#,
+        new_warnings(),
+        expect![[r#"
+            [unnecessary-not-null-assertion] 6: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [unnecessary-safe-call] 7: Unnecessary safe call on a receiver of non-null type `String` | Replace `?.` with `.`: "."
+            [useless-elvis] 8: Elvis operator (`?:`) always returns the left operand of non-null type `String` | Remove the elvis operator: ""
+            [senseless-comparison] 9: Condition `account.owner == null` is always `false`: `String` isn't nullable
+            [senseless-comparison] 10: Condition `null != name` is always `true`: `String` isn't nullable
+            [unnecessary-not-null-assertion] 24: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [unnecessary-not-null-assertion] 33: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [senseless-comparison] 35: Condition `right == null` is always `false`: `String` isn't nullable
+            [unnecessary-not-null-assertion] 41: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: """#]],
+    );
+}
+
+#[test]
+fn unused_locals_and_vars_never_assigned_again() {
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+fun use(items: List<String>) {
+    val unused = items.first()
+    val inTemplate = 1
+    println("$inTemplate")
+    var counter = 0
+    counter += 1
+    var stepped = 0
+    stepped++
+    var once = items.first()
+    println(once)
+    var inLambda = 0
+    items.forEach { inLambda = 1 }
+    println(inLambda)
+    var declaredLater: Int
+    declaredLater = 1
+    println(declaredLater)
+    val (first, second) = items.first() to items.first()
+    val _ = items.first()
+    @Suppress("UNUSED_VARIABLE") val quiet = 1
+    @Suppress("CAN_BE_VAL") var quietVar = 1
+    println(quietVar)
+}
+@Suppress("unused")
+fun suppressed() {
+    val ignored = 1
+}
+"#,
+        new_warnings(),
+        expect![[r#"
+            [unused-variable] 3: Variable `unused` is never used
+            [can-be-val] 10: Variable is never assigned again: it can be a `val` | Change to `val`: "val""#]],
+    );
+}
+
+/// The compiler warnings about null checks and locals, alone.
+fn new_warnings() -> crate::DiagnosticsConfig {
+    use crate::Check;
+    crate::DiagnosticsConfig {
+        only: vec![
+            Check::UnnecessaryNotNullAssertion,
+            Check::UnnecessarySafeCall,
+            Check::UselessElvis,
+            Check::SenselessComparison,
+            Check::UnusedVariable,
+            Check::CanBeVal,
+        ],
+        ..crate::DiagnosticsConfig::default()
+    }
 }
 
 #[test]
@@ -691,6 +829,7 @@ suspend fun use(server: Server, builder: Builder, scope: Scope) {
     let common = fixture.file("/shared/common/a/Sockets.kt");
     let config = crate::DiagnosticsConfig {
         experimental: true,
+        disabled: vec![crate::Check::UnusedVariable],
         ..crate::DiagnosticsConfig::default()
     };
     let render = |file| {
@@ -833,6 +972,7 @@ fun cases(): Int {
 "#,
         crate::DiagnosticsConfig {
             experimental: true,
+            disabled: vec![crate::Check::UnusedVariable],
             ..crate::DiagnosticsConfig::default()
         },
         expect![[""]],

@@ -68,6 +68,56 @@ impl Ty {
         matches!(self, Ty::Unknown)
     }
 
+    /// Whether `parameter` appears anywhere in the type.
+    pub fn mentions(&self, parameter: TypeParameterId) -> bool {
+        match self {
+            Ty::TypeParameter { parameter: own, .. } => *own == parameter,
+            Ty::Class(class) => class
+                .arguments
+                .iter()
+                .any(|argument| argument.mentions(parameter)),
+            Ty::Function(function) => {
+                let in_receiver = function
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.mentions(parameter));
+                in_receiver
+                    || function
+                        .parameters
+                        .iter()
+                        .any(|value| value.mentions(parameter))
+                    || function.result.mentions(parameter)
+            }
+            Ty::Nothing { .. } | Ty::Unknown => false,
+        }
+    }
+
+    /// Whether any part of the type is unknown (`Pair<String, *>`).
+    pub fn has_unknown_part(&self) -> bool {
+        match self {
+            Ty::Unknown => true,
+            Ty::Class(class) => class.arguments.iter().any(Ty::has_unknown_part),
+            Ty::Function(function) => {
+                let receiver_unknown = function.receiver.as_ref().is_some_and(Ty::has_unknown_part);
+                receiver_unknown
+                    || function.parameters.iter().any(Ty::has_unknown_part)
+                    || function.result.has_unknown_part()
+            }
+            Ty::TypeParameter { .. } | Ty::Nothing { .. } => false,
+        }
+    }
+
+    /// Whether a value of this type can't be null: a class or function
+    /// type without `?`. A type parameter may stand for a nullable type, a
+    /// Java type's nullability isn't known, nor is an unknown type's.
+    pub fn is_never_null(&self) -> bool {
+        match self {
+            Ty::Class(class) => class.nullability == Nullability::NotNull,
+            Ty::Function(function) => function.nullability == Nullability::NotNull,
+            Ty::TypeParameter { .. } | Ty::Nothing { .. } | Ty::Unknown => false,
+        }
+    }
+
     pub fn nullability(&self) -> Nullability {
         match self {
             Ty::Class(class) => class.nullability,
@@ -105,6 +155,14 @@ impl Ty {
         self.with_nullability(Nullability::NotNull)
     }
 
+    /// `X?` as `X`; a Java `X!` stays `X!` — nothing says it isn't null.
+    pub fn without_question_mark(self) -> Ty {
+        match self.nullability() {
+            Nullability::Nullable => self.non_null(),
+            Nullability::NotNull | Nullability::Platform => self,
+        }
+    }
+
     /// `T?` — unless already nullable or unknown.
     pub fn nullable(self) -> Ty {
         match self.nullability() {
@@ -134,8 +192,13 @@ impl Ty {
             } => match substitution.get(*parameter) {
                 Some(replacement) => {
                     let replaced = replacement.clone();
+                    // A Java `T` is `T!`: with `T = String` it's `String!`,
+                    // whose nullability Kotlin doesn't know either.
+                    let keeps_platform = *nullability == Nullability::Platform
+                        && replaced.nullability() == Nullability::NotNull;
                     match nullability {
                         Nullability::Nullable => replaced.nullable(),
+                        _ if keeps_platform => replaced.with_nullability(Nullability::Platform),
                         _ => replaced,
                     }
                 }
@@ -190,11 +253,32 @@ impl Substitution {
 
     /// Records `parameter` = `ty` unless already known (first evidence
     /// wins); unknown evidence is no evidence.
+    /// Binds `parameter` to `ty` unless it's bound already; a later binding
+    /// can still make it nullable (`safeCall(fallback) { maybeNull }`
+    /// binds `T` to `X` and `X?`: `T` is `X?`) or a Java type (`X!`).
     pub fn bind(&mut self, parameter: TypeParameterId, ty: Ty) {
         if ty.is_unknown() {
             return;
         }
-        self.map.entry(parameter).or_insert(ty);
+        let Some(bound) = self.map.get_mut(&parameter) else {
+            self.map.insert(parameter, ty);
+            return;
+        };
+        let weaker = match (bound.nullability(), ty.nullability()) {
+            (Nullability::NotNull | Nullability::Platform, Nullability::Nullable) => {
+                Some(Nullability::Nullable)
+            }
+            (Nullability::NotNull, Nullability::Platform) => Some(Nullability::Platform),
+            _ => None,
+        };
+        if let Some(nullability) = weaker {
+            *bound = bound.clone().with_nullability(nullability);
+        }
+    }
+
+    /// Leaves `parameter` unbound.
+    pub fn forget(&mut self, parameter: TypeParameterId) {
+        self.map.remove(&parameter);
     }
 
     /// Adds `other`'s bindings for parameters this one doesn't bind.

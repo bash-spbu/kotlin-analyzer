@@ -410,6 +410,77 @@ fun <T> same(value: T, other: Any?) {
 }
 
 #[test]
+fn overloads_told_apart_by_a_type_argument_keep_a_nullable_result_unknown() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+interface Required
+interface Optional
+class Field<T, K>
+class Request {
+    operator fun <T> get(field: Field<T, Required>): T = TODO()
+    operator fun <T> get(field: Field<T, Optional>): T? = TODO()
+}
+object Schema {
+    val name: Field<String, Required> = TODO()
+    val nickname: Field<String, Optional> = TODO()
+}
+fun use(request: Request) {
+    val name = request[Schema.name]
+    val nickname = request[Schema.nickname]
+    name
+    nickname
+}
+"#,
+        expect![[r#"
+            TODO@6 -> kotlin.TODO: Nothing
+            TODO@7 -> kotlin.TODO: Nothing
+            TODO@10 -> kotlin.TODO: Nothing
+            TODO@11 -> kotlin.TODO: Nothing
+            request@14 -> local request@13: Request
+            Schema@14 -> app.Schema: Schema
+            name@14 -> app.Schema.name: Field<String, Required>
+            request@15 -> local request@13: Request
+            Schema@15 -> app.Schema: Schema
+            nickname@15 -> app.Schema.nickname: Field<String, Optional>
+            name@16 -> local name@14: {unknown}
+            nickname@17 -> local nickname@15: {unknown}"#]],
+    );
+}
+
+#[test]
+fn branches_with_unknown_parts_have_a_common_type_unknown_where_they_differ() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Failure
+fun <T> attempt(block: () -> T) {
+    val pair = try {
+        block() to null
+    } catch (e: Failure) {
+        null to e
+    }
+    val (result, failure) = pair
+    pair
+    result
+    failure
+}
+"#,
+        expect![[r#"
+            block@5 -> local block@3: T
+            to@5 -> kotlin.to: Pair<T, *>
+            to@7 -> kotlin.to: Pair<*, Failure>
+            e@7 -> local e@6: Failure
+            pair@9 -> local pair@4: Pair<*, *>
+            pair@10 -> local pair@4: Pair<*, *>
+            result@11 -> local result@9: {unknown}
+            failure@12 -> local failure@9: {unknown}"#]],
+    );
+}
+
+#[test]
 fn overloads_are_chosen_by_argument_types_and_levels() {
     check_inference(
         r#"
@@ -846,7 +917,7 @@ fun use(query: Query, names: List<String>) {
             TODO@2 -> kotlin.TODO: Nothing
             TODO@3 -> kotlin.TODO: Nothing
             query@5 -> local query@4: Query
-            query@5 -> app.Query.query: MutableList<Int>!
+            query@5 -> app.Query.query: MutableList<Int!>!
             row@5 -> local row@5: String!
             length@5 -> kotlin.String.length: Int
             names@6 -> local names@4: List<String>

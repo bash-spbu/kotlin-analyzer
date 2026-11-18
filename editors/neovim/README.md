@@ -80,7 +80,8 @@ require("kotlin_analyzer").setup({
 
 Diagnostics checks: `syntax`, `unresolved-reference`, `missing-import`,
 `argument-mismatch`, `unsafe-call`, `non-exhaustive-when`, `unused-import`,
-`missing-package`.
+`missing-package`, `unnecessary-not-null-assertion`, `unnecessary-safe-call`,
+`useless-elvis`, `senseless-comparison`, `unused-variable`, `can-be-val`.
 
 Inlay hints are off by default in Neovim; turn them on with
 `vim.lsp.inlay_hint.enable()`.

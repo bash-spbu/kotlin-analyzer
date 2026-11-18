@@ -113,7 +113,13 @@
               "unsafe-call",
               "non-exhaustive-when",
               "unused-import",
-              "missing-package"
+              "missing-package",
+              "unnecessary-not-null-assertion",
+              "unnecessary-safe-call",
+              "useless-elvis",
+              "senseless-comparison",
+              "unused-variable",
+              "can-be-val"
             ]
           },
           "markdownDescription": "Checks that don't run."

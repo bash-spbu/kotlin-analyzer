@@ -30,10 +30,11 @@ pub use hir_def::{
 };
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
-    NonExhaustiveWhen, Reference, ResolvedName, UnresolvedName, UnsafeCall, declaration_type,
-    infer_file,
+    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName,
+    UnsafeCall, declaration_type, infer_file,
 };
 pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
+pub use hir_ty::infer::{LocalFinding, local_findings};
 pub use hir_ty::members::{Member, Types};
 pub use hir_ty::overrides::override_family;
 pub use hir_ty::{Nullability, Ty, display as display_type};

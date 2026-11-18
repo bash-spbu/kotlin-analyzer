@@ -328,6 +328,16 @@ fn class_type(
     let class = kotlin_view(db, scope.from, class);
     let tree = item_tree(db, class.container);
     let item = tree.item(class.item);
+    // `kotlin.Nothing` written in a signature (`fun fail(): Nothing`):
+    // the type of what never completes.
+    let is_nothing = item.parent.is_none()
+        && item.name.as_str() == "Nothing"
+        && tree.package.to_string() == "kotlin";
+    if is_nothing {
+        return Ty::Nothing {
+            nullable: nullability == Nullability::Nullable,
+        };
+    }
     if item.kind == ItemKind::TypeAlias {
         if depth >= MAX_ALIAS_DEPTH {
             return Ty::Unknown;
