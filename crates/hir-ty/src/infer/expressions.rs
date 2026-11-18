@@ -9,6 +9,7 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
+use super::reassociation::{self, Operation};
 use super::{LocalId, LocalKind, NameSite, NullCheckKind, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
@@ -63,6 +64,47 @@ impl Inferrer<'_> {
     }
 
     fn typed_inner(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
+        if let Some(chain) = reassociation::misparsed_chain(node) {
+            return Typed::Value(self.reassociated(node, chain, expected));
+        }
+        if let Some(operand) = reassociation::chain_operand(node) {
+            return self.typed(operand, None);
+        }
+        self.typed_by_kind(node, expected)
+    }
+
+    /// `leading <operation> chain`, for a chain the grammar based on the
+    /// whole operation.
+    fn reassociated(
+        &mut self,
+        node: SyntaxNode<'_>,
+        chain: reassociation::MisparsedChain<'_>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let leading = self.expression(chain.leading, None);
+        match chain.operation {
+            Operation::Operator(function) => {
+                let right = self.value_of_kind(node, None);
+                self.operator_result(&leading, function, vec![right])
+                    .unwrap_or(Ty::Unknown)
+            }
+            Operation::Comparison => {
+                self.value_of_kind(node, None);
+                self.types.builtin("Boolean")
+            }
+            Operation::Elvis => {
+                let right = self.value_of_kind(node, expected);
+                self.types.common_type(&[leading.non_null(), right])
+            }
+        }
+    }
+
+    fn value_of_kind(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
+        let typed = self.typed_by_kind(node, expected);
+        self.value_of(typed)
+    }
+
+    fn typed_by_kind(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
         let value = match node.kind() {
             "simple_identifier" => return self.identifier(node),
             "navigation_expression" => return self.navigation(node),
@@ -381,6 +423,7 @@ impl Inferrer<'_> {
         let (Some(receiver_node), Some(suffix)) = (children.next(), children.next()) else {
             return Typed::Value(Ty::Unknown);
         };
+        let receiver_node = reassociation::chain_operand(receiver_node).unwrap_or(receiver_node);
         let name_node = named_children(suffix).find(|child| child.kind() == "simple_identifier");
         let member = name_node.map(|name| self.name(name));
         let receiver = self.member_receiver(receiver_node, member);
@@ -739,19 +782,7 @@ impl Inferrer<'_> {
         };
         let left_type = self.expression(left, None);
         let right_type = self.expression(right, None);
-        let operator = [
-            ("+", "plus"),
-            ("-", "minus"),
-            ("*", "times"),
-            ("/", "div"),
-            ("%", "rem"),
-            ("..<", "rangeUntil"),
-            ("..", "rangeTo"),
-        ]
-        .into_iter()
-        .find(|(token, _)| has_token(node, token))
-        .map(|(_, function)| function);
-        match operator {
+        match reassociation::operator_function(node) {
             Some(function) => self
                 .operator_result(&left_type, function, vec![right_type])
                 .unwrap_or(Ty::Unknown),

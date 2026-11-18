@@ -24,6 +24,7 @@ mod fit;
 mod local_usage;
 mod member_scope;
 mod narrowing;
+mod reassociation;
 
 use std::sync::Arc;
 

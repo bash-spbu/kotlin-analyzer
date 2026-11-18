@@ -481,6 +481,53 @@ fun <T> attempt(block: () -> T) {
 }
 
 #[test]
+fn a_chain_after_an_operator_belongs_to_the_last_operand() {
+    // The grammar reads `a + b.f<T>()?.g` as `(a + b.f)<T>()?.g`; the
+    // context property `principal` would win if `b.f` were read alone.
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+class Call
+class Context<P>
+inline fun <reified P : Any> Call.principal(): P? = TODO()
+context(context: Context<P>)
+val <P : Any> Call.principal: P get() = TODO()
+class First(val name: String)
+class Second(val size: Int)
+fun use(call: Call, flag: Boolean?) {
+    val text = call.principal<First>()?.name + " " + call.principal<Second>()?.size
+    val same = text == call.principal<First>()?.name
+    val fallback = flag ?: call.principal<Second>()?.size
+    text.length
+    same.not()
+}
+"#,
+        expect![[r#"
+            TODO@4 -> kotlin.TODO: Nothing
+            TODO@6 -> kotlin.TODO: Nothing
+            call@10 -> local call@9: Call
+            principal@10 -> app.principal: First?
+            name@10 -> app.First.name: String?
+            call@10 -> local call@9: Call
+            principal@10 -> app.principal: Second?
+            size@10 -> app.Second.size: Int?
+            text@11 -> local text@10: String
+            call@11 -> local call@9: Call
+            principal@11 -> app.principal: First?
+            name@11 -> app.First.name: String?
+            flag@12 -> local flag@9: Boolean?
+            call@12 -> local call@9: Call
+            principal@12 -> app.principal: Second?
+            size@12 -> app.Second.size: Int?
+            text@13 -> local text@10: String
+            length@13 -> kotlin.String.length: Int
+            same@14 -> local same@11: Boolean
+            not@14 -> ?"#]],
+    );
+}
+
+#[test]
 fn overloads_are_chosen_by_argument_types_and_levels() {
     check_inference(
         r#"

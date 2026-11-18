@@ -55,6 +55,12 @@ argument types.
 For diagnostics, a call is wrong only if **no candidate on any level** is
 applicable — which requires every level's candidates to be known completely.
 
+A call, navigation or index always binds tighter than a binary operator:
+`a + b.f<T>()?.g` is `a + (b.f<T>()?.g)`, and `b.f` there is the call of
+`f`, never a property `f` followed by an `invoke`. The parser sometimes
+attaches such a chain to the whole operation; it is read as above for `+ - *
+/ % .. ..<`, comparisons, `==`/`!=` and `?:`.
+
 ## Members of a type
 
 Members of a class are its own declarations plus those of its supertypes, with

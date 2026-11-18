@@ -115,6 +115,7 @@ impl<'db> Inferrer<'db> {
         let (Some(callee), Some(suffix)) = (children.next(), children.next()) else {
             return Ty::Unknown;
         };
+        let callee = super::reassociation::chain_operand(callee).unwrap_or(callee);
         let (mut arguments, type_arguments) = self.arguments_of(suffix);
         match callee.kind() {
             "simple_identifier" => {
