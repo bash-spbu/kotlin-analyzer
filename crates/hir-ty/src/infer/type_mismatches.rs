@@ -36,8 +36,16 @@ impl Inferrer<'_> {
         // A Java value's type (`T!`) may come through generics this
         // inference doesn't follow (a builder's `build(): T`).
         let from_java = actual.nullability() == Nullability::Platform;
-        let mismatch =
-            !from_java && self.examinable(value) && self.class_mismatch(actual, expected);
+        // A nullable name where a nullable value goes may be smart-cast to
+        // `Nothing?` (`if (token == null) copy(token = token)`).
+        let both_nullable = actual.nullability() == Nullability::Nullable
+            && expected.nullability() == Nullability::Nullable;
+        let may_be_null_only =
+            both_nullable && matches!(value.kind(), "simple_identifier" | "navigation_expression");
+        let mismatch = !from_java
+            && !may_be_null_only
+            && self.examinable(value)
+            && self.class_mismatch(actual, expected);
         let finding = mismatch.then(|| TypeMismatch {
             site,
             range: salient_range(value),

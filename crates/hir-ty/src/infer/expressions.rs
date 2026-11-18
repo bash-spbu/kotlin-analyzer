@@ -329,15 +329,19 @@ impl Inferrer<'_> {
     /// Java getter, or an extension property — and its type there.
     pub(super) fn property_of(&mut self, receiver: &Ty, name: Name) -> Option<(ItemLocation, Ty)> {
         let members = self.types.members_named(receiver, name);
-        if let Some(member) = members
+        let properties: Vec<(ItemLocation, Ty)> = members
             .iter()
-            .find(|member| matches!(self.item_kind(member.location), ItemKind::Property { .. }))
-        {
-            let ty = self
-                .types
-                .property_type(member.location)
-                .substitute(&member.substitution);
-            return Some((member.location, ty));
+            .filter(|member| matches!(self.item_kind(member.location), ItemKind::Property { .. }))
+            .map(|member| {
+                let ty = self
+                    .types
+                    .property_type(member.location)
+                    .substitute(&member.substitution);
+                (member.location, ty)
+            })
+            .collect();
+        if let Some((location, _)) = properties.first() {
+            return Some((*location, self.intersection_override_type(&properties)));
         }
         if let Some(getter) = self.types.java_getters(receiver, name).into_iter().next() {
             let ty = self
@@ -348,6 +352,25 @@ impl Inferrer<'_> {
             return Some((getter.location, ty));
         }
         self.extension_property(receiver, name)
+    }
+
+    /// The type of a property several supertypes declare (none overriding
+    /// another): the most specific of theirs, as Kotlin's intersection
+    /// override has — `IrSimpleFunctionSymbol.owner` is an
+    /// `IrSimpleFunction`, not the `IrFunction` of `IrFunctionSymbol`.
+    /// Unknown when none is a subtype of all the others.
+    fn intersection_override_type(&self, properties: &[(ItemLocation, Ty)]) -> Ty {
+        let types: Vec<&Ty> = properties.iter().map(|(_, ty)| ty).collect();
+        let most_specific = types.iter().find(|candidate| {
+            types
+                .iter()
+                .all(|other| self.types.fits(candidate, other) == super::Fit::Yes)
+        });
+        match (types.as_slice(), most_specific) {
+            ([only], _) => (*only).clone(),
+            (_, Some(most_specific)) => (**most_specific).clone(),
+            (_, None) => Ty::Unknown,
+        }
     }
 
     fn extension_property(&mut self, receiver: &Ty, name: Name) -> Option<(ItemLocation, Ty)> {
@@ -890,8 +913,23 @@ impl Inferrer<'_> {
     fn written_target_type(&self, target: SyntaxNode<'_>) -> Option<Ty> {
         let children: Vec<SyntaxNode<'_>> = named_children(target).collect();
         let name = match children[..] {
-            [only] if only.kind() == "simple_identifier" => only,
-            [_, suffix] if suffix.kind() == "navigation_suffix" => {
+            // An unqualified member of an unknown receiver may be meant.
+            [only] if only.kind() == "simple_identifier" => {
+                let ambiguous = !self.receivers_known() || self.in_uncertain_scope();
+                if ambiguous
+                    && matches!(
+                        self.recorded_at(only).map(|resolved| resolved.reference),
+                        Some(Reference::Declaration(_))
+                    )
+                {
+                    return None;
+                }
+                only
+            }
+            [receiver, suffix] if suffix.kind() == "navigation_suffix" => {
+                if !self.examinable(receiver) {
+                    return None;
+                }
                 named_children(suffix).find(|child| child.kind() == "simple_identifier")?
             }
             _ => return None,
@@ -1301,7 +1339,8 @@ impl Inferrer<'_> {
             .map(|written| self.written_type(written))
             .unwrap_or(Ty::Unknown);
         if let Some(name) = named_children(node).find(|child| child.kind() == "simple_identifier") {
-            self.declare_node(name, exception, LocalKind::Parameter);
+            let local = self.declare_node(name, exception.clone(), LocalKind::Parameter);
+            self.mark_certain_if_known(local, &exception);
         }
         let mut ty = self.types.builtin("Unit");
         for child in named_children(node) {

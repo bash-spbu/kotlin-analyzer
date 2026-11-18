@@ -70,7 +70,7 @@ config = { diagnostics = { disabled = ["unused-import"], experimental = false },
   `opt-in-usage`, `opt-in-usage-error`, `useless-cast`,
   `cast-never-succeeds`, `unchecked-cast`, `useless-is-check`,
   `redundant-else-in-when`, `duplicate-branch-condition`,
-  `return-type-mismatch` and `type-mismatch` (experimental).
+  `return-type-mismatch` and `type-mismatch`.
 - `diagnostics.experimental`: also run checks that are still experimental.
 - `gradleExport`: export the Gradle model on start.
 - `projectJson`: a model exported beforehand.

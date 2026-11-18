@@ -218,11 +218,7 @@ impl Check {
 
     pub fn stability(self) -> Stability {
         match self {
-            // Initializers, assignments and arguments: inference doesn't
-            // yet resolve every implicit receiver and generic as the
-            // compiler does (rust-analyzer kept its own type mismatches
-            // experimental for the same reason).
-            Check::UnresolvedReference | Check::TypeMismatch => Stability::Experimental,
+            Check::UnresolvedReference => Stability::Experimental,
             _ => Stability::Stable,
         }
     }

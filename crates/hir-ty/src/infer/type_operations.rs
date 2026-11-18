@@ -407,16 +407,27 @@ impl Inferrer<'_> {
     /// a name, a property, `this`, a plain string, or a call of a function
     /// without type parameters (a generic one may take its type from the
     /// cast itself).
+    /// Inside a lambda of unknown shape nothing is: a name there may be its
+    /// unknown receiver's. A local counts when its type is certain and no
+    /// receiver has a member of its name; a receiver's member, when no
+    /// local of its name is in scope (which one wins varies with nesting).
     pub(super) fn examinable(&self, operand: SyntaxNode<'_>) -> bool {
+        if self.in_uncertain_scope() {
+            return false;
+        }
         match operand.kind() {
             "parenthesized_expression" => named_children(operand)
                 .next()
                 .is_some_and(|inner| self.examinable(inner)),
             "this_expression" => true,
-            "simple_identifier" => self.recorded_at(operand).is_some(),
+            "simple_identifier" => self.is_certain_name(operand),
             "navigation_expression" => {
                 let is_reference = syntax::has_token(operand, "::");
+                let receiver_certain = named_children(operand)
+                    .next()
+                    .is_some_and(|receiver| self.examinable(receiver));
                 !is_reference
+                    && receiver_certain
                     && last_name(operand).is_some_and(|name| self.recorded_at(name).is_some())
             }
             "boolean_literal" | "character_literal" => true,
@@ -431,8 +442,30 @@ impl Inferrer<'_> {
         }
     }
 
+    /// A name whose meaning and type are certain (see `examinable`).
+    fn is_certain_name(&self, name: SyntaxNode<'_>) -> bool {
+        let Some(resolved) = self.recorded_at(name) else {
+            return false;
+        };
+        let spelled = self.name(name);
+        match resolved.reference {
+            Reference::Local(local) => {
+                // A constructor's `val` parameter is its class's property:
+                // the member of its name is itself.
+                let is_property = self.local_kind(local) == super::LocalKind::PropertyParameter;
+                let shadowing_member = !is_property
+                    && self.receivers.iter().any(|receiver| {
+                        !self.types.members_named(&receiver.ty, spelled).is_empty()
+                    });
+                self.certain_locals.contains(&local) && !shadowing_member
+            }
+            Reference::Declaration(_) => self.receivers_known() && !self.any_local_named(spelled),
+            _ => false,
+        }
+    }
+
     /// A call of a function (or constructor of a class) without type
-    /// parameters.
+    /// parameters, resolved with every argument known to fit.
     fn is_plain_call(&self, call: SyntaxNode<'_>) -> bool {
         let Some(callee) = named_children(call).next() else {
             return false;
@@ -442,16 +475,28 @@ impl Inferrer<'_> {
             "navigation_expression" => last_name(callee),
             _ => None,
         };
-        let Some(Reference::Declaration(location)) = name
-            .and_then(|name| self.recorded_at(name))
-            .map(|resolved| resolved.reference)
+        let Some(name) = name else {
+            return false;
+        };
+        if self.uncertain_calls.contains(&(name.start_byte() as u32)) {
+            return false;
+        }
+        let Some(Reference::Declaration(location)) =
+            self.recorded_at(name).map(|resolved| resolved.reference)
         else {
             return false;
         };
-        hir_def::item_tree(self.db, location.container)
-            .item(location.item)
-            .type_parameters
-            .is_empty()
+        let receiver_certain = match callee.kind() {
+            "navigation_expression" => named_children(callee)
+                .next()
+                .is_some_and(|receiver| self.examinable(receiver)),
+            _ => true,
+        };
+        receiver_certain
+            && hir_def::item_tree(self.db, location.container)
+                .item(location.item)
+                .type_parameters
+                .is_empty()
     }
 
     fn class_shape(&self, class: ItemLocation) -> ClassShape {

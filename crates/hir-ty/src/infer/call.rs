@@ -283,16 +283,28 @@ impl<'db> Inferrer<'db> {
         // function of the name (`builder.test(scope, client)` for `var
         // test: suspend Scope.(Client) -> Unit`, its receiver the first
         // argument) — when no function takes the arguments.
-        if let Typed::Value(receiver_type) = &receiver
-            && let Some((location, Ty::Function(function))) = self.property_of(receiver_type, name)
+        let invocable_property = match &receiver {
+            Typed::Value(receiver_type) => match self.property_of(receiver_type, name) {
+                Some((location, Ty::Function(function))) => Some((location, function)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((location, function)) = &invocable_property
             && function.parameters.len() + usize::from(function.receiver.is_some())
                 == arguments.len()
             && !self.any_shape_fits(&levels, name, arguments)
         {
+            let (location, function) = (*location, function.clone());
             let result = self.invoke(Some(*function), arguments);
             self.record(name_node, Reference::Declaration(location), result.clone());
             return if safe { result.nullable() } else { result };
         }
+        // A function of the name was taken over a property of function type
+        // by the arguments' shape; Kotlin also weighs their types and may
+        // invoke the property (`config.transform(node)` for `var transform:
+        // (Node) -> String` beside `fun transform(block)`).
+        let property_may_be_invoked = invocable_property.is_some();
         let site = match &receiver {
             Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
             Typed::Class(_) => NameSite::Static,
@@ -307,6 +319,9 @@ impl<'db> Inferrer<'db> {
             type_arguments,
             expected,
         );
+        if property_may_be_invoked {
+            self.mark_call_certainty(Some(name_node), false);
+        }
         if !safe
             && let Typed::Value(receiver_type) = &receiver
             && let Some(resolved) = self.recorded_at(name_node)
@@ -859,6 +874,7 @@ impl<'db> Inferrer<'db> {
                     self.complete(&only, arguments, type_arguments, expected, Some(name));
                 arguments_typed = true;
                 if let Some(result) = completion {
+                    self.mark_call_certainty(name_node, true);
                     self.record_callee(
                         name_node,
                         Reference::Declaration(only.candidate.callable.location()),
@@ -881,8 +897,12 @@ impl<'db> Inferrer<'db> {
             if applicable.is_empty() {
                 continue;
             }
+            let several_applicable = applicable.len() > 1;
             let best = self.most_specific(applicable, arguments);
             if let [only] = &best[..] {
+                // Chosen among several by specificity, which isn't
+                // modelled as fully as the compiler's.
+                self.mark_call_certainty(name_node, !several_applicable);
                 let result = self
                     .complete(only, arguments, type_arguments, expected, Some(name))
                     .unwrap_or(Ty::Unknown);
@@ -930,6 +950,20 @@ impl<'db> Inferrer<'db> {
         Some(Ty::Unknown)
     }
 
+    /// Remembers a call whose resolution may not be the compiler's: its
+    /// value isn't judged against what it's passed to.
+    fn mark_call_certainty(&mut self, name_node: Option<SyntaxNode<'_>>, certain: bool) {
+        let Some(name_node) = name_node else {
+            return;
+        };
+        let start = name_node.start_byte() as u32;
+        if certain {
+            self.uncertain_calls.remove(&start);
+        } else {
+            self.uncertain_calls.insert(start);
+        }
+    }
+
     /// The arguments of the one function a call can mean whose classes
     /// can't be their parameters' — parameters whose types don't depend on
     /// the call (no type parameter of the function's or unbound of its
@@ -940,6 +974,11 @@ impl<'db> Inferrer<'db> {
         parameter_of: &[usize],
         arguments: &[Argument<'_>],
     ) {
+        // A multiplatform `expect` (or `actual`) declaration may have
+        // counterparts and extensions this resolution doesn't weigh.
+        if self.is_multiplatform(candidate.callable.location()) {
+            return;
+        }
         for (argument, parameter_index) in arguments.iter().zip(parameter_of) {
             let parameter = &candidate.signature.parameters[*parameter_index];
             let (ArgumentValue::Typed { ty, .. }, Some(written)) =
@@ -954,6 +993,22 @@ impl<'db> Inferrer<'db> {
             }
             self.check_value(super::MismatchSite::Argument, written, ty, &declared);
         }
+    }
+
+    /// Whether `location` or a class around it is `expect` or `actual`.
+    fn is_multiplatform(&self, location: ItemLocation) -> bool {
+        let tree = hir_def::item_tree(self.db, location.container);
+        let mut current = Some(location.item);
+        while let Some(item) = current {
+            let modifiers = tree.item(item).modifiers;
+            let marked = modifiers.contains(hir_def::item_tree::Modifiers::EXPECT)
+                || modifiers.contains(hir_def::item_tree::Modifiers::ACTUAL);
+            if marked {
+                return true;
+            }
+            current = tree.item(item).parent;
+        }
+        false
     }
 
     fn record_callee(

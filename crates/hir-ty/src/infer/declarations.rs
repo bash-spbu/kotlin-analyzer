@@ -8,7 +8,7 @@ use hir_def::item_tree::{ItemKind, kotlin_type_ref};
 use hir_def::resolver::top_level_levels;
 use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::ast::AstNode;
 use syntax::ast::kotlin::{
     ClassParameter, FunctionDeclaration, ParameterBinding, PropertyDeclaration,
@@ -94,6 +94,12 @@ pub(crate) struct Inferrer<'db> {
     pub(super) probe: Option<super::completion::Probe>,
     /// What a plain `return` returns from, innermost last.
     pub(super) return_targets: Vec<ReturnTarget>,
+    /// Locals whose type is the compiler's for certain: written, or the
+    /// type of an initializer that is (see `examinable`).
+    pub(super) certain_locals: FxHashSet<LocalId>,
+    /// Where a call was resolved without every argument known to fit, or
+    /// chosen among several: by the start of its name.
+    pub(super) uncertain_calls: FxHashSet<u32>,
 }
 
 /// What a plain `return` (no label) inside it returns from.
@@ -133,6 +139,8 @@ impl<'db> Inferrer<'db> {
             uncertain_scopes: u32::from(is_script(parse)),
             probe: None,
             return_targets: Vec::new(),
+            certain_locals: FxHashSet::default(),
+            uncertain_calls: FxHashSet::default(),
         }
     }
 
@@ -448,6 +456,26 @@ impl<'db> Inferrer<'db> {
         if hidden { None } else { Some(local) }
     }
 
+    /// Whether any scope around declares a local `name`, visible here or
+    /// not: a receiver's member of that name is then ambiguous (which one
+    /// wins depends on nesting rules not all modelled).
+    /// A constructor's `val` parameter doesn't count: it's the property.
+    pub(super) fn any_local_named(&self, name: Name) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.names.iter().any(|(declared, local)| {
+                *declared == name && self.local_kind(*local) != LocalKind::PropertyParameter
+            })
+        })
+    }
+
+    /// Whether every implicit receiver's class is known: a lambda's `T.()`
+    /// receiver may have members of any name.
+    pub(super) fn receivers_known(&self) -> bool {
+        self.receivers
+            .iter()
+            .all(|receiver| matches!(receiver.ty, Ty::Class(_)))
+    }
+
     /// The innermost local named `name`, the depth of its scope and the
     /// scope's kind.
     fn innermost_local(
@@ -515,6 +543,23 @@ impl<'db> Inferrer<'db> {
                 crate::lower::builtin(self.db, self.file, "kotlin", "Array", vec![element.clone()])
             }
         }
+    }
+
+    /// Records that `local`'s type is the compiler's, unless it's unknown.
+    pub(super) fn mark_certain_if_known(&mut self, local: LocalId, ty: &Ty) {
+        if !ty.is_unknown() {
+            self.certain_locals.insert(local);
+        }
+    }
+
+    /// Inside a lambda whose receiver isn't known, or the like: a name may
+    /// be that receiver's member rather than what it resolved to here.
+    pub(super) fn in_uncertain_scope(&self) -> bool {
+        self.uncertain_scopes > 0
+    }
+
+    pub(super) fn local_kind(&self, local: LocalId) -> LocalKind {
+        self.result.locals[local.0 as usize].kind
     }
 
     /// A local's type as declared, before any smart cast.
@@ -793,7 +838,8 @@ impl<'db> Inferrer<'db> {
             if let Some(name) =
                 named_children(*parameter).find(|child| child.kind() == "simple_identifier")
             {
-                self.declare_node(name, ty.clone(), class_parameter_kind(*parameter));
+                let local = self.declare_node(name, ty.clone(), class_parameter_kind(*parameter));
+                self.mark_certain_if_known(local, &ty);
             }
             types.push(ty);
         }
@@ -895,7 +941,8 @@ impl<'db> Inferrer<'db> {
                     if let Some(name) =
                         named_children(child).find(|part| part.kind() == "simple_identifier")
                     {
-                        self.declare_node(name, ty.clone(), LocalKind::Parameter);
+                        let local = self.declare_node(name, ty.clone(), LocalKind::Parameter);
+                        self.mark_certain_if_known(local, &written);
                     }
                     last_type = written;
                     vararg = false;
@@ -1184,13 +1231,18 @@ impl<'db> Inferrer<'db> {
             LocalKind::Value
         };
         let value_type = written.clone().or(initialized).unwrap_or(Ty::Unknown);
+        let certain = written.is_some()
+            || initializer_of(node).is_some_and(|initializer| self.examinable(initializer));
         for child in named_children(node) {
             match child.kind() {
                 "variable_declaration" => {
                     if let Some(name) =
                         named_children(child).find(|part| part.kind() == "simple_identifier")
                     {
-                        self.declare_node(name, value_type.clone(), kind);
+                        let local = self.declare_node(name, value_type.clone(), kind);
+                        if certain {
+                            self.mark_certain_if_known(local, &value_type);
+                        }
                     }
                 }
                 "multi_variable_declaration" => self.destructure(child, &value_type, kind),
@@ -1366,4 +1418,24 @@ fn function_result(node: SyntaxNode<'_>) -> FunctionResult<'_> {
         Some(_) => FunctionResult::Expression,
         None => FunctionResult::Missing,
     }
+}
+
+/// A property's initializer: the expression after its name (not a
+/// delegate, accessors or modifiers).
+fn initializer_of(property: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    let mut after_variable = false;
+    for child in named_children(property) {
+        match child.kind() {
+            "variable_declaration" | "multi_variable_declaration" => after_variable = true,
+            "property_delegate"
+            | "getter"
+            | "setter"
+            | "modifiers"
+            | "type_constraints"
+            | "binding_pattern_kind" => {}
+            _ if after_variable => return Some(child),
+            _ => {}
+        }
+    }
+    None
 }

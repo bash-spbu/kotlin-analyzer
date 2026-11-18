@@ -311,7 +311,11 @@ impl<'db> Types<'db> {
                 };
                 for child in candidates.iter() {
                     let item = tree.item(*child);
-                    if item.modifiers.contains(Modifiers::STATIC) {
+                    let location = ItemLocation {
+                        container: class_type.class.container,
+                        item: *child,
+                    };
+                    if item.modifiers.contains(Modifiers::STATIC) || !self.may_see(location) {
                         continue;
                     }
                     let Some(shape) = MemberShape::of(&item.kind, &item.signature) else {
@@ -327,18 +331,20 @@ impl<'db> Types<'db> {
                             (class_substitution(&class_type), generic)
                         })
                         .clone();
-                    let location = ItemLocation {
-                        container: class_type.class.container,
-                        item: *child,
-                    };
                     let generic = Member {
                         location,
                         substitution: generic_substitution,
                     };
+                    let is_property = matches!(item.kind, ItemKind::Property { .. });
                     let overridden = found[..from_nearer_classes].iter().any(|known| {
+                        // A property of a sibling supertype isn't overridden
+                        // by the other's: both make an intersection override.
                         known.name == item.name
                             && known.shape == shape
                             && self.same_signature(&known.generic, &generic)
+                            && (!is_property
+                                || self
+                                    .declares_subclass_of(known.member.location, class_type.class))
                     });
                     if !overridden {
                         found.push(Found {
@@ -355,6 +361,37 @@ impl<'db> Types<'db> {
             }
         }
         found.into_iter().map(|found| found.member).collect()
+    }
+
+    /// Whether `member`'s class is `class` or a subclass of it.
+    fn declares_subclass_of(&self, member: ItemLocation, class: ItemLocation) -> bool {
+        let tree = item_tree(self.db, member.container);
+        let Some(parent) = tree.item(member.item).parent else {
+            return false;
+        };
+        let declaring = ItemLocation {
+            container: member.container,
+            item: parent,
+        };
+        declaring == class
+            || self
+                .hierarchy(declaring)
+                .iter()
+                .any(|supertype| supertype.class == class)
+    }
+
+    /// Whether code in this file may call `member`: a `private` function
+    /// only in the file declaring it — never another file's, nor a
+    /// library's, so an extension of the name is called instead (Kotlin
+    /// narrows it to the class body; within one file that isn't followed).
+    /// A private property stays: Java's private field stands in for its
+    /// getter's property where that synthesis isn't followed.
+    fn may_see(&self, member: ItemLocation) -> bool {
+        let tree = item_tree(self.db, member.container);
+        let item = tree.item(member.item);
+        let private_function = item.kind == ItemKind::Function
+            && item.visibility == hir_def::item_tree::Visibility::Private;
+        !private_function || member.container == ItemContainer::File(self.from)
     }
 
     /// The `inner` classes named `name` of `receiver`'s class and its

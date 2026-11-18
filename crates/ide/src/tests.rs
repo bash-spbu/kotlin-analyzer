@@ -1017,6 +1017,18 @@ class Response
 fun body(response: Response): String = ""
 fun <T> body(response: Response, marker: Int = 0): T = TODO()
 fun typed(response: Response): Dog = body<Dog>(response)
+class Success(val amount: Int)
+class Outcome { fun getOrThrow(): Success = TODO() }
+class Exchange { fun convert(amount: Int, code: String): Outcome = TODO() }
+class Settings<T>(val value: T) { fun get(): T = value }
+class Converter(private val exchange: Exchange, private val settings: Settings<String>) {
+    fun convert(amount: Int): Int {
+        return exchange.convert(
+            amount = amount,
+            code = settings.get(),
+        ).getOrThrow()
+    }
+}
 "#,
         config(),
         expect![[r#"
@@ -1028,7 +1040,66 @@ fun typed(response: Response): Dog = body<Dog>(response)
             [type-mismatch] 39: Assignment type mismatch: expected `String`, actual `Car`
             [type-mismatch] 45: Assignment type mismatch: expected `Animal`, actual `Car`
             [type-mismatch] 48: Initializer type mismatch: expected `Int`, actual `String`
-            [type-mismatch] 55: Argument type mismatch: expected `Dog`, actual `Car`"#]],
+            [type-mismatch] 55: Argument type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 79: Return type mismatch: expected `Int`, actual `Success`"#]],
+    );
+}
+
+#[test]
+fn type_mismatches_stay_silent_where_inference_is_unsure() {
+    // Each value here is right for the compiler; a resolution that misses
+    // a rule of its would make it look wrong.
+    let config = || crate::DiagnosticsConfig {
+        only: vec![crate::Check::ReturnTypeMismatch, crate::Check::TypeMismatch],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/a/Cache.kt
+package a
+class Dog
+class Cache {
+    private fun cached(key: Int): String = ""
+}
+interface Owned { val owner: Any }
+interface Bound<T> { val owner: T }
+interface DogSymbol : Owned, Bound<Dog>
+//- /app/b/Use.kt
+package b
+import a.*
+private fun Cache.cached(key: Int): Dog = Dog()
+fun fromExtension(cache: Cache): Dog = cache.cached(1)
+fun intersection(symbol: DogSymbol): Dog = symbol.owner
+fun <T> build(block: T.() -> Unit): T = TODO()
+interface Init { var method: Dog }
+class Form {
+    var method: String = ""
+    fun fill(dog: Dog): Init = build { method = dog }
+}
+class Config {
+    var transform: (Dog) -> String = { "" }
+    fun transform(block: (Dog) -> String) {}
+}
+fun invoked(config: Config): String = config.transform(Dog())
+fun takesText(text: String?) {}
+fun onlyNull(dog: Dog?) {
+    if (dog == null) takesText(dog)
+}
+class Request
+fun cookiesOf(request: Request): String = ""
+open class Cookies(protected val request: Any) {
+    open fun fetch(): String = ""
+}
+class Call {
+    inner class Incoming(request: Request) {
+        val cookies: Cookies = object : Cookies(this@Incoming) {
+            override fun fetch(): String = cookiesOf(request)
+        }
+    }
+}
+"#,
+        config(),
+        expect![[r#""#]],
     );
 }
 

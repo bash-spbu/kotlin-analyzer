@@ -30,7 +30,7 @@ whenever something it would need is `Unknown`, it stays silent.
 | `useless-is-check` | lint | `x is T` that is always `true` (or `x !is T` always `false`): `x`'s type is a `T` (`USELESS_IS_CHECK`) |
 | `redundant-else-in-when` | lint | an `else` in a `when` whose other branches cover every case of the subject's enum, sealed type or `Boolean` (`null` too, for a nullable or Java subject) — under the same conditions as `non-exhaustive-when`, and only for a sealed type whose source set no other of its module refines (`REDUNDANT_ELSE_IN_WHEN`); offers "Remove the `else` branch" |
 | `return-type-mismatch` | error | a returned value (`return x`, an expression body) whose class can't be the one the function declares (Kotlin's `RETURN_TYPE_MISMATCH`) — see "Type mismatches" below |
-| `type-mismatch` | error, **experimental** | the same for a declared property's or local's initializer, a parameter's default value, an assignment to a `var` that writes its type, and an argument of the only function a call can mean (`INITIALIZER_TYPE_MISMATCH`, `ASSIGNMENT_TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`) |
+| `type-mismatch` | error | the same for a declared property's or local's initializer, a parameter's default value, an assignment to a `var` that writes its type, and an argument of the only function a call can mean (`INITIALIZER_TYPE_MISMATCH`, `ASSIGNMENT_TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`) |
 | `duplicate-branch-condition` | lint | a `when` condition an earlier branch already checks: the same literal, enum entry or object, or `is`/`!is` of the same type; branches with a guard don't count (`DUPLICATE_BRANCH_CONDITION_IN_WHEN`) |
 
 A value *can't be null* when its type is a class or function type without
@@ -71,24 +71,41 @@ read-only one (a Java `List` parameter is `(Mutable)List!`), and a class
 of the same qualified name counts as the same. Silent:
 - for nullability alone and for type arguments: smart casts from
   contracts (`checkNotNull`, `require`) and generic variance aren't all
-  modelled;
-- for a value whose type isn't the compiler's for certain: anything but a
-  name, property, `this`, literal or call of a function without type
-  parameters (as for casts, below); a Java value (`T!`), whose type may
-  come through generics not followed; branches (`if`, `when`, `try`,
-  `?:`), lambdas, references; numbers (an integer literal converts);
-  `expect` classes (an `actual typealias` may be the other one);
+  modelled; a nullable name going where a nullable value goes may be
+  smart-cast to `Nothing?` (`if (x == null) f(x)`);
+- for a value whose type isn't the compiler's for certain (also what
+  cast checks require, below):
+  - anything but a name, property, `this`, literal or call of a function
+    without type parameters — a generic call may take its type from where
+    it goes; branches (`if`, `when`, `try`, `?:`), lambdas, references;
+  - a local whose type is neither written nor that of such a value
+    (`val charset = a ?: b`: a common supertype isn't followed);
+  - a name both a local (visible or not) and a receiver's member have —
+    which one wins varies with nesting (an object expression in an
+    initializer sees the constructor's parameter); a constructor's `val`
+    parameter is its property, not two names;
+  - a call or a receiver's member inside a lambda whose receiver isn't
+    known (`build<T> { … }`: `T` may have members of any name), or a
+    member read through a value that isn't certain itself;
+  - a call chosen among several applicable overloads, or a function
+    chosen where a property of function type of its name could be
+    invoked instead;
+  - a Java value (`T!`), whose type may come through generics not
+    followed; numbers (an integer literal converts); `expect` classes and
+    calls of `expect`/`actual` members (an `actual typealias`, an
+    extension of another platform);
 - for a `return` inside a lambda (an inline lambda's leaves the function
   around it) or labelled;
-- for an assignment to a `var` whose type is inferred, or to a smart-cast
-  value;
+- for an assignment to a `var` whose type is inferred;
 - for an argument when other functions of the name exist, for `vararg`
   and spread arguments, and for parameters whose type depends on the call.
 
-`type-mismatch` stays experimental: on the corpora it still meets values
-inference types differently from the compiler (an implicit receiver in a
-lambda, a generic resolved through a hierarchy, a property of function
-type called).
+Inference follows Kotlin for what these depend on: a `private` function
+of another file or of a library isn't called (an extension of its name
+is); a property several unrelated supertypes declare has the most
+specific type (an intersection override: `IrSimpleFunctionSymbol.owner`
+is an `IrSimpleFunction`); a call with type arguments only considers
+functions taking as many; a `vararg Int` parameter is an `IntArray`.
 
 ### Casts and type checks
 
