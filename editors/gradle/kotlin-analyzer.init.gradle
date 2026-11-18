@@ -215,6 +215,21 @@ def mergeCompilerOptions = { List all ->
     return merged
 }
 
+// What a Kotlin source set opts into through `languageSettings.optIn(…)`,
+// which the compile task's options don't show.
+def languageSettingsOptIns = { kotlinSourceSet ->
+    try {
+        return (kotlinSourceSet?.languageSettings?.optInAnnotationsInUse ?: []).collect { it.toString() }
+    } catch (ignored) {
+        return []
+    }
+}
+
+def withOptIns = { Map compiler, List optIns ->
+    if (compiler == null || optIns.isEmpty()) return compiler
+    return compiler + [optIn: (compiler.optIn + optIns).unique()]
+}
+
 def kotlinCompileTask = { project, String name ->
     try {
         return project.tasks.findByName(name)
@@ -237,7 +252,14 @@ def javaSourceSetExport = { project, sourceSet ->
         def targets = dependency.fixtures ? ["testFixtures"] : ["main", "commonMain", "jvmMain"]
         targets.each { addDependency(moduleDependencies, dependency.path, it) }
     }
-    def compiler = compilerOptionsOf(project, kotlinCompileTask(project, sourceSet.getCompileTaskName("kotlin")))
+    def kotlinSourceSet = null
+    try {
+        kotlinSourceSet = project.extensions.findByName("kotlin")?.sourceSets?.findByName(sourceSet.name)
+    } catch (ignored) {
+    }
+    def compiler = withOptIns(
+        compilerOptionsOf(project, kotlinCompileTask(project, sourceSet.getCompileTaskName("kotlin"))),
+        languageSettingsOptIns(kotlinSourceSet))
     return [
         name: sourceSet.name,
         sourceDirectories: directories.toList(),
@@ -352,14 +374,14 @@ def multiplatformExport = { project ->
                 projectSourceSets(sourceSet.name).each { addDependency(moduleDependencies, dependency.path, it) }
             }
         }
-        def compiler = mergeCompilerOptions(compilations.collect { compilation ->
+        def compiler = withOptIns(mergeCompilerOptions(compilations.collect { compilation ->
             def task = null
             try {
                 task = compilation.compileTaskProvider.get()
             } catch (ignored) {
             }
             compilerOptionsOf(project, task)
-        })
+        }), languageSettingsOptIns(sourceSet))
         return [
             name: sourceSet.name,
             kind: isTest ? "test" : "main",

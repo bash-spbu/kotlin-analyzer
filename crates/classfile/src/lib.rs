@@ -197,6 +197,20 @@ pub enum DeprecationOrigin {
     Java,
 }
 
+/// `@RequiresOptIn` on an annotation class: what using API marked with it
+/// without opting in is.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct OptInMarker {
+    pub level: OptInLevel,
+    pub message: Option<Box<str>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum OptInLevel {
+    Warning,
+    Error,
+}
+
 /// `@DeprecatedSinceKotlin(warningSince, errorSince, hiddenSince)`.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct DeprecatedSinceKotlin {
@@ -214,6 +228,10 @@ pub struct LibraryClass {
     pub modifiers: Modifiers,
     /// Rare: boxed, not to grow every member.
     pub deprecation: Option<Box<Deprecation>>,
+    /// The classes of its annotations that may mark it as needing opt-in.
+    pub annotations: Box<[ClassName]>,
+    /// For an annotation class: `@RequiresOptIn`.
+    pub opt_in_marker: Option<OptInMarker>,
     pub type_parameters: Vec<TypeParameter>,
     pub supertypes: Vec<LibraryType>,
     pub members: Vec<Member>,
@@ -257,6 +275,8 @@ pub struct Member {
     pub modifiers: Modifiers,
     /// Rare: boxed, not to grow every member.
     pub deprecation: Option<Box<Deprecation>>,
+    /// The classes of its annotations that may mark it as needing opt-in.
+    pub annotations: Box<[ClassName]>,
     pub type_parameters: Vec<TypeParameter>,
     pub receiver: Option<LibraryType>,
     pub parameters: Vec<ValueParameter>,

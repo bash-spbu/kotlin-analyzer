@@ -151,6 +151,10 @@ pub struct SourceSet {
 /// What the Kotlin compiler is told that changes what it reports.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct CompilerOptions {
+    /// Whether the build said what they are (a model exported with them);
+    /// otherwise they're the defaults, and what they'd accept — an opt-in
+    /// — isn't known.
+    pub declared: bool,
     /// `allWarningsAsErrors`, `-Werror`: a warning fails the build.
     pub warnings_as_errors: bool,
     /// `suppressWarnings`, `-nowarn`: no warning is reported.

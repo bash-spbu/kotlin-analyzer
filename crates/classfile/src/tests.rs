@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     ClassContents, ClassKind, DeprecationLevel, DeprecationOrigin, JarContents, LibraryClass,
-    LibraryType, Member, MemberKind, PackageMembers, TypeArgument, read_class, read_jar,
+    LibraryType, Member, MemberKind, OptInLevel, PackageMembers, TypeArgument, read_class,
+    read_jar,
 };
 
 /// The newest cached compiled JAR of `group:artifact`.
@@ -323,6 +324,31 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         .find(|member| member.name.as_str() == "endExclusive")
         .expect("IntRange.endExclusive");
     assert!(end_exclusive.deprecation.is_some());
+    // Opt-in: a marker is an annotation class with `@RequiresOptIn`, its
+    // level `ERROR` unless it says; a declaration it marks carries it.
+    let marker_level = |name: &str| {
+        class(&contents, name)
+            .opt_in_marker
+            .as_ref()
+            .map(|marker| marker.level)
+    };
+    assert_eq!(
+        marker_level("kotlin.ExperimentalStdlibApi"),
+        Some(OptInLevel::Error)
+    );
+    assert_eq!(
+        marker_level("kotlin.ExperimentalUnsignedTypes"),
+        Some(OptInLevel::Warning)
+    );
+    assert_eq!(marker_level("kotlin.collections.List"), None);
+    let if_or_null = top_level(&contents, "kotlin", "ifOrNull");
+    assert!(
+        if_or_null.iter().all(|member| member
+            .annotations
+            .iter()
+            .any(|annotation| annotation.qualified() == "kotlin.ExperimentalStdlibApi")),
+        "{if_or_null:?}"
+    );
     let jvm_default = class(&contents, "kotlin.jvm.JvmDefault");
     assert_eq!(
         jvm_default

@@ -121,7 +121,9 @@
               "unused-variable",
               "can-be-val",
               "deprecation",
-              "deprecation-error"
+              "deprecation-error",
+              "opt-in-usage",
+              "opt-in-usage-error"
             ]
           },
           "markdownDescription": "Checks that don't run."

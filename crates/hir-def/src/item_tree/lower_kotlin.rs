@@ -125,13 +125,25 @@ impl<'parse> Lowering<'parse> {
             signature: item.signature,
         };
         let deprecated = new.modifiers.contains(Modifiers::DEPRECATED);
+        let is_annotation_class = new.kind == ItemKind::Class(ClassKind::Annotation);
         let id = self.builder.push(new, ranges);
+        let Some(declaration) = self.node_spanning(item.range) else {
+            return id;
+        };
         if deprecated
-            && let Some(declaration) = self.node_spanning(item.range)
             && let Some(deprecation) =
-                super::written_deprecation::written_deprecation(self.parse, declaration)
+                super::written_annotations::written_deprecation(self.parse, declaration)
         {
             self.builder.deprecate(id, deprecation);
+        }
+        let annotations =
+            super::written_annotations::written_annotation_classes(self.parse, declaration);
+        self.builder.annotate(id, annotations);
+        if is_annotation_class
+            && let Some(marker) =
+                super::written_annotations::written_opt_in_marker(self.parse, declaration)
+        {
+            self.builder.mark_opt_in(id, marker);
         }
         id
     }

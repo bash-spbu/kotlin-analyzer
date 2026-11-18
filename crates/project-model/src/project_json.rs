@@ -60,6 +60,7 @@ struct CompilerOptionsEntry {
 impl CompilerOptionsEntry {
     fn options(&self) -> CompilerOptions {
         CompilerOptions {
+            declared: true,
             warnings_as_errors: self.warnings_as_errors,
             suppress_warnings: self.suppress_warnings,
             warning_levels: self
@@ -329,6 +330,7 @@ mod tests {
         }"#;
         let model = parse(Path::new("/work"), text).unwrap();
         let main = &model.source_sets[0].compiler;
+        assert!(main.declared);
         assert_eq!(main.api_version.as_deref(), Some("2.1"));
         assert_eq!(main.jdk_release, Some(17));
         assert_eq!(main.opt_in, vec!["kotlin.ExperimentalStdlibApi".to_owned()]);
@@ -342,7 +344,10 @@ mod tests {
         );
         let test = &model.source_sets[1].compiler;
         assert_eq!(test.warning_level("USELESS_ELVIS"), WarningLevel::Disabled);
+        // Exported without them: not declared, so what they'd accept isn't
+        // known.
         let other = &model.source_sets[2].compiler;
+        assert!(!other.declared);
         assert_eq!(*other, CompilerOptions::default());
         assert_eq!(other.warning_level("USELESS_ELVIS"), WarningLevel::Warning);
     }

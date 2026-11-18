@@ -71,6 +71,8 @@ pub(crate) fn read(class: &ClassFile) -> ClassContents {
             ..Modifiers::default()
         },
         deprecation: class.deprecation.clone().map(Box::new),
+        annotations: names.class_names(&class.annotations),
+        opt_in_marker: None,
         type_parameters,
         supertypes,
         members,
@@ -134,6 +136,7 @@ fn read_field(field: &RawMember, names: &NestedNames) -> Option<Member> {
             ..Modifiers::default()
         },
         deprecation: field.deprecation.clone().map(Box::new),
+        annotations: names.class_names(&field.annotations),
         type_parameters: Vec::new(),
         receiver: None,
         parameters: Vec::new(),
@@ -221,6 +224,7 @@ fn read_method(
             ..Modifiers::default()
         },
         deprecation: method.deprecation.clone().map(Box::new),
+        annotations: names.class_names(&method.annotations),
         type_parameters: signature.type_parameters,
         receiver: None,
         parameters,

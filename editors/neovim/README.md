@@ -82,7 +82,7 @@ Diagnostics checks: `syntax`, `unresolved-reference`, `missing-import`,
 `argument-mismatch`, `unsafe-call`, `non-exhaustive-when`, `unused-import`,
 `missing-package`, `unnecessary-not-null-assertion`, `unnecessary-safe-call`,
 `useless-elvis`, `senseless-comparison`, `unused-variable`, `can-be-val`,
-`deprecation`, `deprecation-error`.
+`deprecation`, `deprecation-error`, `opt-in-usage`, `opt-in-usage-error`.
 
 Inlay hints are off by default in Neovim; turn them on with
 `vim.lsp.inlay_hint.enable()`.

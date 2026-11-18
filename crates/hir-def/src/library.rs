@@ -294,6 +294,8 @@ impl Builder {
             class_modifiers.insert(Modifiers::PLATFORM);
         }
         let deprecation = class.deprecation.clone();
+        let annotations = annotation_paths(&class.annotations);
+        let opt_in_marker = class.opt_in_marker.clone();
         let index = self.push(
             Item {
                 name: class.name.simple_name(),
@@ -331,6 +333,10 @@ impl Builder {
         if let Some(deprecation) = deprecation {
             self.tree.deprecate(index, *deprecation);
         }
+        self.tree.annotate(index, annotations);
+        if let Some(marker) = opt_in_marker {
+            self.tree.mark_opt_in(index, marker);
+        }
         index
     }
 
@@ -342,6 +348,7 @@ impl Builder {
     ) -> ItemId {
         let mut kept = modifiers(&member.modifiers);
         let deprecation = member.deprecation.clone();
+        let annotations = annotation_paths(&member.annotations);
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
         }
@@ -389,8 +396,22 @@ impl Builder {
         if let Some(deprecation) = deprecation {
             self.tree.deprecate(id, *deprecation);
         }
+        self.tree.annotate(id, annotations);
         id
     }
+}
+
+/// Annotation classes as qualified paths
+/// (`kotlinx.coroutines.ExperimentalCoroutinesApi`).
+fn annotation_paths(classes: &[classfile::ClassName]) -> Box<[Path]> {
+    classes
+        .iter()
+        .map(|class| {
+            let mut segments: Vec<Name> = class.package.segments().to_vec();
+            segments.extend(class.classes.iter().copied());
+            Path::new(segments)
+        })
+        .collect()
 }
 
 fn visibility(visibility: classfile::Visibility) -> Visibility {

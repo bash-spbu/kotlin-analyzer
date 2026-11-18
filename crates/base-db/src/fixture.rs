@@ -14,7 +14,8 @@
 //! `set=name` (default `main`) say which source set it belongs to;
 //! `classpath=partial` marks the source set's classpath as only partly
 //! resolved by the build; `werror` compiles it with warnings as errors,
-//! `api=2.0` against that Kotlin API version;
+//! `api=2.0` against that Kotlin API version, `optin=a.Beta` opting in to
+//! that marker;
 //! `deps=:a,:b/test` lists the source sets it sees (`/main` by default). A
 //! single `$0` marks the cursor; it is removed from the text.
 
@@ -147,6 +148,8 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
                 file.compiler.warnings_as_errors = true;
             } else if let Some(version) = word.strip_prefix("api=") {
                 file.compiler.api_version = Some(version.to_owned());
+            } else if let Some(marker) = word.strip_prefix("optin=") {
+                file.compiler.opt_in.push(marker.to_owned());
             } else if let Some(dependencies) = word.strip_prefix("deps=") {
                 file.dependencies = dependencies
                     .split(',')
@@ -202,7 +205,11 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
                     dependencies: Vec::new(),
                     libraries: Vec::new(),
                     classpath: file.classpath,
-                    compiler: CompilerOptions::default(),
+                    // A fixture is a whole build: it says its options.
+                    compiler: CompilerOptions {
+                        declared: true,
+                        ..CompilerOptions::default()
+                    },
                 });
                 modules[module_index].source_sets.push(id);
                 id
@@ -214,7 +221,10 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
             source_sets[id.0 as usize].classpath = Classpath::Partial;
         }
         if file.compiler != CompilerOptions::default() {
-            source_sets[id.0 as usize].compiler = file.compiler.clone();
+            source_sets[id.0 as usize].compiler = CompilerOptions {
+                declared: true,
+                ..file.compiler.clone()
+            };
         }
         source_sets[id.0 as usize]
             .directories
@@ -300,6 +310,10 @@ fun <T> T.also(block: (T) -> Unit): T = TODO()
 fun <T, R> T.let(block: (T) -> R): R = TODO()
 fun <T> T.apply(block: T.() -> Unit): T = TODO()
 fun TODO(): Nothing = TODO()
+annotation class RequiresOptIn(val message: String = "", val level: Level = Level.ERROR) {
+    enum class Level { WARNING, ERROR }
+}
+annotation class OptIn(vararg val markerClass: Any)
 fun <T, R> with(receiver: T, block: T.() -> R): R = TODO()
 fun <T : Any> requireNotNull(value: T?): T = TODO()
 fun require(value: Boolean) {}

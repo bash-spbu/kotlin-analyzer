@@ -180,6 +180,51 @@ class Holder(@Deprecated("Use size") val count: Int) {
 }
 
 #[test]
+fn written_opt_in_markers_and_annotation_classes() {
+    let fixture = Fixture::parse(
+        r#"
+//- /src/Api.kt
+package app
+@RequiresOptIn(level = RequiresOptIn.Level.WARNING, message = "Still changing")
+annotation class Beta
+@RequiresOptIn
+annotation class Internal
+annotation class Plain
+@Beta @Plain fun beta() {}
+@Internal @Deprecated("x") @Suppress("UNUSED") class Hidden
+fun plain() {}
+"#,
+    );
+    let db = &fixture.database;
+    let file = db.all_files()[0];
+    let tree = file_item_tree(db, file);
+    let described: Vec<String> = tree
+        .indexed_items()
+        .filter(|(_, item)| item.kind != ItemKind::Constructor)
+        .map(|(id, item)| {
+            let marker = tree
+                .opt_in_marker(id)
+                .map(|marker| format!(" marker {:?} {:?}", marker.level, marker.message))
+                .unwrap_or_default();
+            let annotations: Vec<String> = tree
+                .annotations(id)
+                .iter()
+                .map(|path| path.to_string())
+                .collect();
+            format!("{} {annotations:?}{marker}", item.name)
+        })
+        .collect();
+    expect![[r#"
+        Beta ["RequiresOptIn"] marker Warning Some("Still changing")
+        Internal ["RequiresOptIn"] marker Error None
+        Plain []
+        beta ["Beta", "Plain"]
+        Hidden ["Internal"]
+        plain []"#]]
+    .assert_eq(&described.join("\n"));
+}
+
+#[test]
 fn java_item_tree() {
     check_item_tree(
         r#"

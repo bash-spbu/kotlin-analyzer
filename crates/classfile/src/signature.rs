@@ -25,6 +25,15 @@ impl NestedNames {
         Self { nested }
     }
 
+    /// The classes binary names name: an annotated declaration's
+    /// annotations.
+    pub(crate) fn class_names(&self, binaries: &[String]) -> Box<[ClassName]> {
+        binaries
+            .iter()
+            .map(|binary| self.class_name(binary))
+            .collect()
+    }
+
     /// The class a binary name (`java/util/Map$Entry`) names.
     pub(crate) fn class_name(&self, binary: &str) -> ClassName {
         let mut classes = Vec::new();

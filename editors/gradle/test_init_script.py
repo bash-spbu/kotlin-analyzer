@@ -121,6 +121,8 @@ class MultiplatformExportTest(unittest.TestCase):
         self.assertFalse(core["warningsAsErrors"])
         self.assertEqual(core["warningLevels"], {})
         self.assertIn("compilerOptions", self.source_set(":core", "jsMain"))
+        # languageSettings.optIn counts too.
+        self.assertIn("kotlin.ExperimentalStdlibApi", core["optIn"])
 
 
 if __name__ == "__main__":

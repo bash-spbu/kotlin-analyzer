@@ -13,6 +13,7 @@ pub use hir_def::def_map::{
 pub use hir_def::expect_actual::{
     Side as MultiplatformSide, expect_actual_family, side_of as multiplatform_side,
 };
+pub use hir_def::item_tree::OptInLevel;
 pub use hir_def::item_tree::{
     ClassKind, Import, ImportTarget, Item, ItemId, ItemKind, ItemRanges, ItemSourceMap, ItemTree,
     Modifiers, Parameter, Signature, TypeArgument, TypeRef, Visibility,
@@ -39,6 +40,7 @@ pub use hir_ty::infer::{
 pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use hir_ty::infer::{LocalFinding, local_findings};
 pub use hir_ty::members::{Member, Types};
+pub use hir_ty::opt_in::{OptInUse, opt_in_uses};
 pub use hir_ty::overrides::override_family;
 pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};

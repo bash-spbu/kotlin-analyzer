@@ -4,7 +4,8 @@
 //! `val`s.
 
 use hir::{
-    DeprecationLevel, LocalFinding, NonExhaustiveWhen, NullCheckKind, RootDatabase, SourceFile,
+    DeprecationLevel, LocalFinding, NonExhaustiveWhen, NullCheckKind, OptInLevel, RootDatabase,
+    SourceFile,
 };
 use syntax::{Parse, TextRange, has_token};
 
@@ -67,6 +68,38 @@ pub(super) fn diagnostics(
     found.extend(null_checks(db, file, config));
     found.extend(local_findings(db, file, config));
     found.extend(deprecations(db, file, config));
+    found.extend(opt_ins(db, file, config));
+    found
+}
+
+/// Uses of API that needs an opt-in the code doesn't give, as Kotlin words
+/// them: `This declaration needs opt-in. Its usage should be marked with
+/// '@Marker' or '@OptIn(Marker::class)'` — or the marker's own message.
+fn opt_ins(db: &RootDatabase, file: SourceFile, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+    let mut found = Vec::new();
+    for opt_in in hir::opt_in_uses(db, file) {
+        let (check, verb) = match opt_in.level() {
+            OptInLevel::Warning => (Check::OptInUsage, "should"),
+            OptInLevel::Error => (Check::OptInUsageError, "must"),
+        };
+        if !config.runs(check) {
+            continue;
+        }
+        let marker = &opt_in.marker_name;
+        let message = match opt_in.marker.message.as_deref().map(str::trim) {
+            Some(own) if !own.is_empty() => format!("This declaration needs opt-in. {own}"),
+            _ => format!(
+                "This declaration needs opt-in. Its usage {verb} be marked with `@{marker}` or `@OptIn({marker}::class)`"
+            ),
+        };
+        found.push(Diagnostic {
+            check,
+            severity: check.severity(),
+            range: opt_in.range,
+            message,
+            fixes: Vec::new(),
+        });
+    }
     found
 }
 

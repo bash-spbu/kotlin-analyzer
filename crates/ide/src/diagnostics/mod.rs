@@ -29,6 +29,8 @@ pub enum Check {
     CanBeVal,
     Deprecation,
     DeprecationError,
+    OptInUsage,
+    OptInUsageError,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,7 +55,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 16] = [
+    pub const ALL: [Check; 18] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -70,6 +72,8 @@ impl Check {
         Check::CanBeVal,
         Check::Deprecation,
         Check::DeprecationError,
+        Check::OptInUsage,
+        Check::OptInUsageError,
     ];
 
     pub fn name(self) -> &'static str {
@@ -90,6 +94,8 @@ impl Check {
             Check::CanBeVal => "can-be-val",
             Check::Deprecation => "deprecation",
             Check::DeprecationError => "deprecation-error",
+            Check::OptInUsage => "opt-in-usage",
+            Check::OptInUsageError => "opt-in-usage-error",
         }
     }
 
@@ -104,14 +110,16 @@ impl Check {
             | Check::ArgumentMismatch
             | Check::UnsafeCall
             | Check::NonExhaustiveWhen
-            | Check::DeprecationError => Severity::Error,
+            | Check::DeprecationError
+            | Check::OptInUsageError => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
             Check::UnnecessaryNotNullAssertion
             | Check::UnnecessarySafeCall
             | Check::UselessElvis
             | Check::SenselessComparison
             | Check::CanBeVal
-            | Check::Deprecation => Severity::Lint,
+            | Check::Deprecation
+            | Check::OptInUsage => Severity::Lint,
             Check::UnusedImport | Check::UnusedVariable => Severity::Unnecessary,
         }
     }
@@ -132,6 +140,8 @@ impl Check {
             Check::DeprecationError => {
                 &["DEPRECATION_ERROR", "TYPEALIAS_EXPANSION_DEPRECATION_ERROR"]
             }
+            Check::OptInUsage => &["OPT_IN_USAGE"],
+            Check::OptInUsageError => &["OPT_IN_USAGE_ERROR"],
             Check::Syntax
             | Check::UnresolvedReference
             | Check::MissingImport
@@ -151,6 +161,7 @@ impl Check {
             Check::UselessElvis => Some("USELESS_ELVIS"),
             Check::SenselessComparison => Some("SENSELESS_COMPARISON"),
             Check::Deprecation => Some("DEPRECATION"),
+            Check::OptInUsage => Some("OPT_IN_USAGE"),
             _ => None,
         }
     }

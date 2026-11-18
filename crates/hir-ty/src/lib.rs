@@ -8,6 +8,7 @@ pub mod display;
 pub mod infer;
 pub mod lower;
 pub mod members;
+pub mod opt_in;
 pub mod overrides;
 pub mod signature;
 pub mod ty;

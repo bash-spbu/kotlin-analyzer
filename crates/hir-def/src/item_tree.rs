@@ -8,7 +8,7 @@
 mod lower_java;
 mod lower_kotlin;
 mod pretty;
-mod written_deprecation;
+mod written_annotations;
 
 use intern::{Name, Path};
 use std::hash::{Hash, Hasher};
@@ -16,7 +16,10 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
-pub use classfile::{DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin};
+pub use classfile::{
+    DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin, OptInLevel,
+    OptInMarker,
+};
 pub(crate) use lower_java::lower_java;
 pub use lower_kotlin::kotlin_type_ref;
 pub(crate) use lower_kotlin::lower_kotlin;
@@ -75,12 +78,29 @@ pub struct ItemTree {
     /// What each deprecated item's deprecation says (its modifiers have
     /// `DEPRECATED`).
     deprecations: FxHashMap<ItemId, Deprecation>,
+    /// The annotation classes on each annotated item that may mark it as
+    /// needing opt-in: qualified for a library's items, as written for a
+    /// file's (resolved where it's declared).
+    annotations: FxHashMap<ItemId, Box<[Path]>>,
+    /// The annotation classes that are opt-in markers (`@RequiresOptIn`).
+    opt_in_markers: FxHashMap<ItemId, OptInMarker>,
 }
 
 impl ItemTree {
     /// What `@Deprecated` on the item says, if it's deprecated.
     pub fn deprecation(&self, id: ItemId) -> Option<&Deprecation> {
         self.deprecations.get(&id)
+    }
+
+    /// The annotation classes on the item that may mark it as needing
+    /// opt-in.
+    pub fn annotations(&self, id: ItemId) -> &[Path] {
+        self.annotations.get(&id).map_or(&[], |paths| &paths[..])
+    }
+
+    /// `@RequiresOptIn` on an annotation class.
+    pub fn opt_in_marker(&self, id: ItemId) -> Option<&OptInMarker> {
+        self.opt_in_markers.get(&id)
     }
 
     pub fn item(&self, id: ItemId) -> &Item {
@@ -459,9 +479,23 @@ pub(crate) struct ItemTreeBuilder {
     taken: FxHashSet<ItemId>,
     ranges: FxHashMap<ItemId, ItemRanges>,
     deprecations: FxHashMap<ItemId, Deprecation>,
+    annotations: FxHashMap<ItemId, Box<[Path]>>,
+    opt_in_markers: FxHashMap<ItemId, OptInMarker>,
 }
 
 impl ItemTreeBuilder {
+    /// Records the pushed item `id`'s annotation classes.
+    pub(crate) fn annotate(&mut self, id: ItemId, annotations: Box<[Path]>) {
+        if !annotations.is_empty() {
+            self.annotations.insert(id, annotations);
+        }
+    }
+
+    /// Marks the pushed annotation class `id` as an opt-in marker.
+    pub(crate) fn mark_opt_in(&mut self, id: ItemId, marker: OptInMarker) {
+        self.opt_in_markers.insert(id, marker);
+    }
+
     /// Marks the pushed item `id` deprecated, as `deprecation` says.
     pub(crate) fn deprecate(&mut self, id: ItemId, deprecation: Deprecation) {
         if let Some(position) = self.positions.get(&id) {
@@ -532,6 +566,8 @@ impl ItemTreeBuilder {
                 .collect(),
             top_level: top_level.into_boxed_slice(),
             deprecations: self.deprecations,
+            annotations: self.annotations,
+            opt_in_markers: self.opt_in_markers,
         };
         let source_map = ItemSourceMap {
             items: self.ranges,

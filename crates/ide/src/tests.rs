@@ -784,6 +784,107 @@ fn newest_cached_stdlib() -> Option<std::path::PathBuf> {
 }
 
 #[test]
+fn uses_of_api_that_needs_opt_in() {
+    let api = r#"
+//- /app/a/Api.kt
+package a
+@RequiresOptIn(level = RequiresOptIn.Level.WARNING)
+annotation class Beta
+@RequiresOptIn(message = "Internal API, may change")
+annotation class Internal
+@Beta fun beta() {}
+@Internal class Secret { fun reveal() {} }
+fun stable() {}
+@Beta fun over(number: Int) {}
+fun over(text: String) {}
+"#;
+    let config = || crate::DiagnosticsConfig {
+        only: vec![crate::Check::OptInUsage, crate::Check::OptInUsageError],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        &format!(
+            "{api}{}",
+            r#"
+//- /app/b/Use.kt
+package b
+import a.*
+fun use(secret: Secret) {
+    beta()
+    secret.reveal()
+    stable()
+    over(1)
+}
+@OptIn(Beta::class) fun optedIn() = beta()
+@Beta fun propagates() = beta()
+fun local() {
+    @OptIn(Internal::class) val secret = Secret()
+}
+class Holder {
+    @OptIn(Beta::class)
+    val value = run { beta() }
+    @OptIn(Beta::class)
+    val detached: Unit
+        get() = beta()
+}
+fun annotatedExpressions() {
+    @OptIn(Beta::class)
+    beta()
+    take(
+        @OptIn(Beta::class)
+        value = beta(),
+    )
+}
+fun take(value: Unit) = value
+fun <R> run(block: () -> R): R = block()
+"#
+        ),
+        config(),
+        expect![[r#"
+            [opt-in-usage-error] 3: This declaration needs opt-in. Internal API, may change
+            [opt-in-usage] 4: This declaration needs opt-in. Its usage should be marked with `@a.Beta` or `@OptIn(a.Beta::class)`
+            [opt-in-usage-error] 5: This declaration needs opt-in. Internal API, may change"#]],
+    );
+    // A file or a module that opts in accepts every use in it; without
+    // either, the same use needs it.
+    check_diagnostics(
+        &format!(
+            "{api}{}",
+            "\n//- /app/b/Use.kt\npackage b\nimport a.*\nfun use() = beta()\n"
+        ),
+        config(),
+        expect![
+            "[opt-in-usage] 3: This declaration needs opt-in. Its usage should be marked with `@a.Beta` or `@OptIn(a.Beta::class)`"
+        ],
+    );
+    check_diagnostics(
+        &format!(
+            "{api}{}",
+            "\n//- /app/b/Use.kt\n@file:OptIn(a.Beta::class)\npackage b\nimport a.*\nfun use() = beta()\n"
+        ),
+        config(),
+        expect![""],
+    );
+    check_diagnostics(
+        &format!(
+            "{api}{}",
+            "\n//- /app/b/Use.kt optin=a.Beta\npackage b\nimport a.*\nfun use() = beta()\n"
+        ),
+        config(),
+        expect![""],
+    );
+    // An annotation whose class doesn't resolve may be the opt-in.
+    check_diagnostics(
+        &format!(
+            "{api}{}",
+            "\n//- /app/b/Use.kt\npackage b\nimport a.*\n@Unknown(Beta::class) fun use() = beta()\n"
+        ),
+        config(),
+        expect![""],
+    );
+}
+
+#[test]
 fn unused_locals_and_vars_never_assigned_again() {
     check_diagnostics(
         r#"

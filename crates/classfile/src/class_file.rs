@@ -3,7 +3,10 @@
 //! the attributes that carry generic signatures, source file names, nested
 //! classes, parameter names and the Kotlin metadata annotation.
 
-use crate::{DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin, Nesting};
+use crate::{
+    DeprecatedSinceKotlin, Deprecation, DeprecationLevel, DeprecationOrigin, Nesting, OptInLevel,
+    OptInMarker,
+};
 
 /// Access flags, as the JVM specification numbers them.
 pub(crate) mod access {
@@ -44,6 +47,9 @@ pub(crate) struct Member {
     /// From the `MethodParameters` attribute, when compiled with `-parameters`.
     pub(crate) parameter_names: Vec<String>,
     pub(crate) deprecation: Option<Deprecation>,
+    /// The internal names of its other annotations
+    /// (`kotlinx/coroutines/ExperimentalCoroutinesApi`).
+    pub(crate) annotations: Vec<String>,
 }
 
 /// What `InnerClasses` says about one nested class.
@@ -84,6 +90,11 @@ pub(crate) struct ClassFile {
     pub(crate) inner_classes: Vec<InnerClass>,
     pub(crate) kotlin_metadata: Option<KotlinMetadata>,
     pub(crate) deprecation: Option<Deprecation>,
+    /// The internal names of its other annotations.
+    pub(crate) annotations: Vec<String>,
+    /// `@RequiresOptIn(level, message)`: an annotation class that marks
+    /// API needing opt-in.
+    pub(crate) opt_in_marker: Option<OptInMarker>,
 }
 
 struct Bytes<'data> {
@@ -155,6 +166,8 @@ impl ClassFile {
             inner_classes: Vec::new(),
             kotlin_metadata: None,
             deprecation: None,
+            annotations: Vec::new(),
+            opt_in_marker: None,
         };
         let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
@@ -174,6 +187,10 @@ impl ClassFile {
                 "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
                     let annotations = read_annotations(&mut body, &pool)?;
                     found.add(&annotations);
+                    class.annotations.extend(annotations.others.iter().cloned());
+                    if annotations.opt_in_marker.is_some() {
+                        class.opt_in_marker = annotations.opt_in_marker.clone();
+                    }
                     if annotations.kotlin_metadata.is_some() {
                         class.kotlin_metadata = annotations.kotlin_metadata;
                     }
@@ -301,6 +318,7 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             signature: None,
             parameter_names: Vec::new(),
             deprecation: None,
+            annotations: Vec::new(),
         };
         let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
@@ -331,6 +349,9 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
                 "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
                     let annotations = read_annotations(&mut body, pool)?;
                     found.add(&annotations);
+                    member
+                        .annotations
+                        .extend(annotations.others.iter().cloned());
                 }
                 _ => {}
             }
@@ -371,6 +392,12 @@ struct Annotations {
     java_deprecated: bool,
     since_kotlin: Option<DeprecatedSinceKotlin>,
     kotlin_metadata: Option<KotlinMetadata>,
+    /// `@kotlin.RequiresOptIn(…)`.
+    opt_in_marker: Option<OptInMarker>,
+    /// The internal names of the other annotations that may matter to
+    /// Kotlin (an opt-in marker); the JDK's, nullability's and the
+    /// compiler's own are left out.
+    others: Vec<String>,
 }
 
 /// What a declaration's attributes say about its deprecation, read in
@@ -423,7 +450,19 @@ fn read_annotations(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Annotati
             "Lkotlin/DeprecatedSinceKotlin;" => {
                 found.since_kotlin = Some(read_deprecated_since_kotlin(bytes, pool)?);
             }
-            _ => skip_element_pairs(bytes, Nesting::TOP)?,
+            "Lkotlin/RequiresOptIn;" => {
+                found.opt_in_marker = Some(read_opt_in_marker(bytes, pool)?)
+            }
+            other => {
+                if let Some(internal) = other
+                    .strip_prefix('L')
+                    .and_then(|rest| rest.strip_suffix(';'))
+                    && may_mark_opt_in(internal)
+                {
+                    found.others.push(internal.to_owned());
+                }
+                skip_element_pairs(bytes, Nesting::TOP)?
+            }
         }
     }
     Some(found)
@@ -466,6 +505,51 @@ fn read_kotlin_deprecation(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<D
         }
     }
     Some(deprecation)
+}
+
+/// Whether an annotation's class may be an opt-in marker: not the JDK's,
+/// nullability's or the compiler's own, which are on nearly every
+/// declaration.
+fn may_mark_opt_in(internal: &str) -> bool {
+    const NEVER: [&str; 8] = [
+        "java/",
+        "javax/",
+        "jakarta/",
+        "org/jetbrains/annotations/",
+        "kotlin/jvm/",
+        "kotlin/internal/",
+        "kotlin/SinceKotlin",
+        "kotlin/ReplaceWith",
+    ];
+    !NEVER.iter().any(|prefix| internal.starts_with(prefix))
+}
+
+/// `@RequiresOptIn(message, level)`: `ERROR` unless it says.
+fn read_opt_in_marker(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<OptInMarker> {
+    let mut marker = OptInMarker {
+        level: OptInLevel::Error,
+        message: None,
+    };
+    let pairs = bytes.u16()?;
+    for _ in 0..pairs {
+        let element = utf8(pool, bytes.u16()?)?.to_owned();
+        let tag = bytes.data.get(bytes.position).copied();
+        match (element.as_str(), tag) {
+            ("message", Some(b's')) => {
+                bytes.u8()?;
+                marker.message = Some(utf8(pool, bytes.u16()?)?.into());
+            }
+            ("level", Some(b'e')) => {
+                bytes.u8()?;
+                bytes.u16()?;
+                if utf8(pool, bytes.u16()?)? == "WARNING" {
+                    marker.level = OptInLevel::Warning;
+                }
+            }
+            _ => skip_element_value(bytes, Nesting::TOP)?,
+        }
+    }
+    Some(marker)
 }
 
 /// `@DeprecatedSinceKotlin(warningSince, errorSince, hiddenSince)`.

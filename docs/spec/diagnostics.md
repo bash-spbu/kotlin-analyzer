@@ -21,6 +21,8 @@ whenever something it would need is `Unknown`, it stays silent.
 | `unused-variable` | hint (unnecessary) | a local `val`/`var` (one name, not destructured, not delegated, not `_`) never read: inference recorded no use and the name appears nowhere else in the enclosing declaration — not in a string template, not as a namesake |
 | `deprecation` | lint | a use of a deprecated declaration (Kotlin's `DEPRECATION`): `'name' is deprecated. Message. Replace with 'x'.` — see "Deprecation" below |
 | `deprecation-error` | error | the same for a deprecation of level `ERROR` (`DEPRECATION_ERROR`) |
+| `opt-in-usage` | lint | a use of API that needs opt-in to a `WARNING` marker the code doesn't give (Kotlin's `OPT_IN_USAGE`) — see "Opt-in" below |
+| `opt-in-usage-error` | error | the same for an `ERROR` marker, `@RequiresOptIn`'s default (`OPT_IN_USAGE_ERROR`) |
 | `can-be-val` | lint | a local `var` with an initializer that the enclosing declaration never assigns again — no `name = …`, `name += …`, `name++`, `--name` of any local of the name; offers "Change to `val`" |
 
 A value *can't be null* when its type is a class or function type without
@@ -72,6 +74,24 @@ not an assignment's target, not a `name =` label. It stays silent:
   the code compiles against: the JDK the build runs on may deprecate what
   the module's toolchain doesn't (`URL(String)` in 20, for code built with
   JDK 8).
+
+### Opt-in
+
+A marker is an annotation class with `@RequiresOptIn(message, level)`. A
+declaration needs the markers it's annotated with; a class also its outer
+classes', a constructor its class's, a member its class's (the receiver's
+type). Uses are names in bodies and in types — not an annotation's own
+class (`@Beta` is how one opts in), not a `name =` label. A use is accepted
+when the module opts in (`optIn`, `-opt-in`, `languageSettings.optIn`), or
+an enclosing declaration, annotated expression or the file is annotated
+`@OptIn(Marker::class)` or with the marker itself. Reported with the
+marker's message when it has one. Silent:
+- when the source set's compiler options aren't declared (a model
+  exported before they were, or guessed): what the module opts into isn't
+  known;
+- for a function or constructor whose overloads need other markers;
+- for markers on the classes of a callable's signature,
+  `@SubclassOptInRequired` and overrides, which aren't modelled.
 
 ### What "known completely" means
 
