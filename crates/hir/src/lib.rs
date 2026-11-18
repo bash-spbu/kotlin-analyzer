@@ -2,8 +2,8 @@
 //! declaration is and where — one API in front of `hir-def` and `hir-ty`, so features never depend on how the layers below are split.
 
 pub use base_db::{
-    ArchiveKind, CompilerOptions, FileChange, FileId, IndexedLibrary, JdkRelease, Language,
-    LibrarySource, ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId,
+    ArchiveKind, CompilerOptions, FileChange, FileId, IndexedLibrary, JdkRelease, KotlinVersion,
+    Language, LibrarySource, ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId,
     WarningLevel, parse, salsa,
 };
 pub use hir_def::def_map::{
@@ -34,8 +34,9 @@ pub use hir_def::{
 pub use hir_ty::deprecation::{DeprecatedUse, deprecated_uses};
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
-    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName,
-    UnsafeCall, declaration_type, infer_file,
+    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName,
+    TypeOperationFinding, TypeOperationKind, UnresolvedName, UnsafeCall, WhenFinding,
+    declaration_type, infer_file,
 };
 pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use hir_ty::infer::{LocalFinding, local_findings};

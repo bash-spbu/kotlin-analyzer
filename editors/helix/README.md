@@ -67,7 +67,9 @@ config = { diagnostics = { disabled = ["unused-import"], experimental = false },
   `missing-package`, `unnecessary-not-null-assertion`,
   `unnecessary-safe-call`, `useless-elvis`, `senseless-comparison`,
   `unused-variable`, `can-be-val`, `deprecation`, `deprecation-error`,
-  `opt-in-usage` and `opt-in-usage-error`.
+  `opt-in-usage`, `opt-in-usage-error`, `useless-cast`,
+  `cast-never-succeeds`, `unchecked-cast`, `useless-is-check`,
+  `redundant-else-in-when` and `duplicate-branch-condition`.
 - `diagnostics.experimental`: also run checks that are still experimental.
 - `gradleExport`: export the Gradle model on start.
 - `projectJson`: a model exported beforehand.

@@ -198,7 +198,7 @@ impl Inferrer<'_> {
         let Some((&operand, rest)) = children.split_first() else {
             return Narrowing::default();
         };
-        self.expression(operand, None);
+        let operand_type = self.expression(operand, None);
         let test = TypeTest::of(node);
         let is_type_check = test != TypeTest::None;
         if !is_type_check {
@@ -213,6 +213,8 @@ impl Inferrer<'_> {
         else {
             return Narrowing::default();
         };
+        let negated = test == TypeTest::IsNot;
+        self.examine_type_test(node, Some(operand), &operand_type, *target, negated);
         let target_type = self.written_type(*target);
         if operand.kind() == "this_expression" && test == TypeTest::Is {
             return Narrowing {

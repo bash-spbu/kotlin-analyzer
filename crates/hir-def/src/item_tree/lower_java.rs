@@ -340,6 +340,7 @@ impl<'parse> Lowering<'parse> {
                 Some(TypeParameter {
                     name: self.name(name),
                     bounds,
+                    reified: false,
                 })
             })
             .collect()

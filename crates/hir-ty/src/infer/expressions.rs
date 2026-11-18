@@ -22,6 +22,9 @@ struct WhenSubject<'subject> {
     ty: Option<&'subject Ty>,
     /// `when (this)`: an `is T` branch sees `this` as a `T`.
     is_this: bool,
+    /// Whether the subject's type is the one the compiler gives it (see
+    /// `examinable`).
+    examinable: bool,
 }
 
 /// What an expression denotes: a value, or — as the qualifier before a
@@ -758,7 +761,8 @@ impl Inferrer<'_> {
         let (Some(operand), Some(target)) = (children.next(), children.next()) else {
             return Ty::Unknown;
         };
-        self.expression(operand, None);
+        let operand_type = self.expression(operand, None);
+        self.examine_cast(node, operand, &operand_type, target);
         let target_type = self.written_type(target);
         if has_token(node, "as?") {
             return target_type.nullable();
@@ -1015,10 +1019,19 @@ impl Inferrer<'_> {
         self.push_scope();
         let mut subject_local = None;
         let mut subject_type = None;
-        let subject_is_this = named_children(node)
+        let subject_value = named_children(node)
             .find(|child| child.kind() == "when_subject")
-            .and_then(|subject| named_children(subject).last())
-            .is_some_and(|subject| subject.kind() == "this_expression");
+            .and_then(|subject| {
+                named_children(subject)
+                    .filter(|child| {
+                        child.kind() != "variable_declaration"
+                            && child.kind() != "binding_pattern_kind"
+                    })
+                    .last()
+            });
+        let subject_is_this =
+            subject_value.is_some_and(|subject| subject.kind() == "this_expression");
+        let mut subject_examinable = false;
         let mut branches = Vec::new();
         let mut has_else = false;
         for child in named_children(node) {
@@ -1027,12 +1040,15 @@ impl Inferrer<'_> {
                     let (local, ty) = self.when_subject(child);
                     subject_local = local;
                     subject_type = Some(ty);
+                    subject_examinable =
+                        subject_value.is_some_and(|subject| self.examinable(subject));
                 }
                 "when_entry" => {
                     let subject = WhenSubject {
                         local: subject_local,
                         ty: subject_type.as_ref(),
                         is_this: subject_is_this,
+                        examinable: subject_examinable,
                     };
                     let (ty, is_else) = self.when_entry(child, subject, expected);
                     has_else |= is_else;
@@ -1048,6 +1064,9 @@ impl Inferrer<'_> {
         self.pop_scope();
         if let (false, Some(subject_type)) = (has_else, &subject_type) {
             self.check_exhaustive(node, subject_type);
+        }
+        if let Some(subject_type) = &subject_type {
+            self.examine_when_branches(node, subject_type, has_else);
         }
         let exhaustive_enough = has_else || expected.is_some();
         if branches.is_empty() || !exhaustive_enough && subject_type.is_none() {
@@ -1159,6 +1178,25 @@ impl Inferrer<'_> {
         vec![(local, self.smart_cast(&self.local_type(local), target))]
     }
 
+    /// `is T` as a branch's condition on the subject. The last branch of
+    /// an exhaustive `when` isn't examined: the compiler accepts it there.
+    fn examine_subject_test(
+        &mut self,
+        test: SyntaxNode<'_>,
+        subject: WhenSubject<'_>,
+        target: SyntaxNode<'_>,
+        negated: bool,
+    ) {
+        let subject_type = match (subject.local, subject.ty) {
+            (Some(local), _) => self.local_type(local),
+            (None, Some(ty)) => ty.clone(),
+            (None, None) => Ty::Unknown,
+        };
+        let examined = subject.examinable && !is_last_of_several_branches(test);
+        let subject_type = if examined { subject_type } else { Ty::Unknown };
+        self.examine_type_test(test, None, &subject_type, target, negated);
+    }
+
     fn when_condition(
         &mut self,
         node: SyntaxNode<'_>,
@@ -1175,6 +1213,7 @@ impl Inferrer<'_> {
                     };
                     let target_type = self.written_type(target);
                     let negated = TypeTest::of(child) == TypeTest::IsNot;
+                    self.examine_subject_test(child, subject, target, negated);
                     if negated {
                         continue;
                     }
@@ -1564,4 +1603,22 @@ fn narrowed_by_every(mut each_condition: Vec<Vec<(LocalId, Ty)>>) -> Vec<(LocalI
         .into_iter()
         .filter(|narrowing| each_condition.iter().all(|other| other.contains(narrowing)))
         .collect()
+}
+
+/// Whether `test` is a condition of the last of two or more branches of a
+/// `when` without `else`.
+fn is_last_of_several_branches(test: SyntaxNode<'_>) -> bool {
+    let Some(entry) = test.parent().and_then(|condition| condition.parent()) else {
+        return false;
+    };
+    let Some(when) = entry.parent() else {
+        return false;
+    };
+    let entries: Vec<SyntaxNode<'_>> = named_children(when)
+        .filter(|child| child.kind() == "when_entry")
+        .collect();
+    let has_else = entries
+        .iter()
+        .any(|entry| !named_children(*entry).any(|child| child.kind() == "when_condition"));
+    entries.len() >= 2 && !has_else && entries.last() == Some(&entry)
 }

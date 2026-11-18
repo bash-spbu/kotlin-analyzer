@@ -61,8 +61,10 @@ fn is_postfix(node: SyntaxNode<'_>) -> bool {
     )
 }
 
-/// `node` continues the postfix chain of its parent's base.
-fn continues_chain(node: SyntaxNode<'_>) -> bool {
+/// `node` continues the postfix chain of its parent's base: the grammar
+/// put it where only a postfix's receiver goes. A cast or type check there
+/// (`(x is A).B` for `x is A.B`) lost the rest of its type.
+pub(super) fn continues_chain(node: SyntaxNode<'_>) -> bool {
     node.parent()
         .is_some_and(|parent| is_postfix(parent) && named_children(parent).next() == Some(node))
 }

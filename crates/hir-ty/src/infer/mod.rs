@@ -25,6 +25,8 @@ mod local_usage;
 mod member_scope;
 mod narrowing;
 mod reassociation;
+mod type_operations;
+mod when_branches;
 
 use std::sync::Arc;
 
@@ -194,6 +196,50 @@ pub struct NonExhaustiveWhen {
     pub missing: Vec<String>,
 }
 
+/// A cast or type check whose outcome the types decide.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeOperationFinding {
+    pub kind: TypeOperationKind,
+    /// ` as T` for a useless or unchecked cast, `as` for one that never
+    /// succeeds, the whole check for `is`.
+    pub range: TextRange,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TypeOperationKind {
+    /// `x as T` where `x` is a `T` already; `removable` spans ` as T`.
+    UselessCast { removable: TextRange },
+    /// `x as T` where no value of `x`'s type is a `T`.
+    CastNeverSucceeds,
+    /// `x as T` the run time can't check: `T` is a type parameter, or has
+    /// type arguments `x`'s type doesn't determine.
+    UncheckedCast { from: Ty, to: Ty },
+    /// `x is T` (`result` true) or `x !is T` (false) where `x` is a `T`.
+    UselessIsCheck { result: bool },
+}
+
+/// What a `when` with a subject has twice or needlessly.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum WhenFinding {
+    /// An `else` after branches covering every case: its keyword, and the
+    /// whole branch.
+    RedundantElse {
+        keyword: TextRange,
+        entry: TextRange,
+    },
+    /// A condition an earlier branch already checks.
+    DuplicateCondition { range: TextRange },
+}
+
+impl WhenFinding {
+    pub fn range(&self) -> TextRange {
+        match self {
+            WhenFinding::RedundantElse { keyword, .. } => *keyword,
+            WhenFinding::DuplicateCondition { range } => *range,
+        }
+    }
+}
+
 /// What inference found in one file.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct InferenceResult {
@@ -207,6 +253,11 @@ pub struct InferenceResult {
     unsafe_calls: Vec<UnsafeCall>,
     non_exhaustive_whens: Vec<NonExhaustiveWhen>,
     redundant_null_checks: Vec<RedundantNullCheck>,
+    /// By the start of the cast's `as` or the check; `None` once examined
+    /// and found fine (a lambda inferred again overwrites it).
+    type_operations: FxHashMap<u32, Option<TypeOperationFinding>>,
+    /// By the start of the `when`; a lambda inferred again overwrites them.
+    when_findings: FxHashMap<u32, Vec<WhenFinding>>,
 }
 
 impl InferenceResult {
@@ -254,6 +305,21 @@ impl InferenceResult {
 
     pub fn redundant_null_checks(&self) -> &[RedundantNullCheck] {
         &self.redundant_null_checks
+    }
+
+    /// What `when`s have twice or needlessly, in text order.
+    pub fn when_findings(&self) -> Vec<&WhenFinding> {
+        let mut found: Vec<&WhenFinding> = self.when_findings.values().flatten().collect();
+        found.sort_by_key(|finding| finding.range().start);
+        found
+    }
+
+    /// Casts and type checks whose outcome is known, in text order.
+    pub fn type_operations(&self) -> Vec<&TypeOperationFinding> {
+        let mut found: Vec<&TypeOperationFinding> =
+            self.type_operations.values().flatten().collect();
+        found.sort_by_key(|finding| finding.range.start);
+        found
     }
 }
 

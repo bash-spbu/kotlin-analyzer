@@ -166,12 +166,22 @@ pub struct CompilerOptions {
     pub opt_in: Vec<String>,
     /// The Kotlin API version (`2.2`) the code compiles against.
     pub api_version: Option<String>,
+    /// The Kotlin language version (`2.3`): which compiler rules apply.
+    pub language_version: Option<String>,
     /// The JDK release the code compiles against: the toolchain's or
     /// `-Xjdk-release`'s.
     pub jdk_release: Option<u32>,
 }
 
 impl CompilerOptions {
+    pub fn api_version(&self) -> Option<KotlinVersion> {
+        KotlinVersion::parse(self.api_version.as_deref()?)
+    }
+
+    pub fn language_version(&self) -> Option<KotlinVersion> {
+        KotlinVersion::parse(self.language_version.as_deref()?)
+    }
+
     /// What the options make the compiler warning `name`: kept as a
     /// warning, an error, or not reported.
     pub fn warning_level(&self, name: &str) -> WarningLevel {
@@ -186,6 +196,27 @@ impl CompilerOptions {
             None if self.warnings_as_errors => WarningLevel::Error,
             None => WarningLevel::Warning,
         }
+    }
+}
+
+/// A Kotlin API or language version: `2.1`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct KotlinVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl KotlinVersion {
+    pub const fn new(major: u32, minor: u32) -> KotlinVersion {
+        KotlinVersion { major, minor }
+    }
+
+    /// `2.1`, `2.1.20`, `2`.
+    pub fn parse(text: &str) -> Option<KotlinVersion> {
+        let mut numbers = text.split('.');
+        let major = numbers.next()?.trim().parse().ok()?;
+        let minor = numbers.next().unwrap_or("0").trim().parse().ok()?;
+        Some(KotlinVersion { major, minor })
     }
 }
 

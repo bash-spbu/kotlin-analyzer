@@ -1,12 +1,13 @@
 //! Whether a `when` over an enum, a sealed type or a `Boolean` covers every
-//! case. Reported only when all of it is known: every condition resolved,
+//! case — missing some without `else`, or all of them with a redundant
+//! `else`. Reported only when all of it is known: every condition resolved,
 //! the subject's cases all found, and the subject not tested before the
 //! `when` (Kotlin's data flow may already have ruled cases out).
 
 use hir_def::item_tree::{ClassKind, ItemKind, Modifiers, Signature};
 use hir_def::{ItemContainer, ItemLocation};
 use syntax::ast::kotlin::TypeTest;
-use syntax::{SyntaxNode, TextRange, has_token, named_children};
+use syntax::{SyntaxNode, TextRange, named_children};
 
 use super::declarations::Inferrer;
 use super::fit::Fit;
@@ -27,6 +28,16 @@ struct Covered {
     null: bool,
 }
 
+/// How sure a list of cases must be: complete enough to call one missing,
+/// or so complete that nothing can be missing (an `else` redundant).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completeness {
+    /// Every case found is real.
+    Found,
+    /// No case exists beyond those found.
+    Exhaustive,
+}
+
 /// What a subject's type requires a `when` to cover.
 enum Cases {
     Booleans,
@@ -38,15 +49,39 @@ enum Cases {
 impl Inferrer<'_> {
     /// Records `node` (a `when` without `else`) when it misses cases.
     pub(super) fn check_exhaustive(&mut self, node: SyntaxNode<'_>, subject_type: &Ty) {
-        let Some(covered) = self.covered(node) else {
+        let Some(missing) = self.missing_cases(node, subject_type, Completeness::Found) else {
             return;
         };
-        if self.subject_tested_before(node) {
+        if missing.is_empty() {
             return;
         }
-        let Some(cases) = self.cases_of(subject_type) else {
-            return;
-        };
+        let start = node.start_byte();
+        self.record_non_exhaustive_when(NonExhaustiveWhen {
+            range: TextRange::new(start, start + "when".len()),
+            missing,
+        });
+    }
+
+    /// Whether `node`'s branches cover every case of `subject_type` without
+    /// its `else` — then the `else` is redundant. A Java value may be null
+    /// too.
+    pub(super) fn covers_all_cases(&self, node: SyntaxNode<'_>, subject_type: &Ty) -> bool {
+        self.missing_cases(node, subject_type, Completeness::Exhaustive)
+            .is_some_and(|missing| missing.is_empty())
+    }
+
+    /// The cases `node`'s branches miss; `None` when that isn't known.
+    fn missing_cases(
+        &self,
+        node: SyntaxNode<'_>,
+        subject_type: &Ty,
+        completeness: Completeness,
+    ) -> Option<Vec<String>> {
+        let covered = self.covered(node)?;
+        if self.subject_tested_before(node) {
+            return None;
+        }
+        let cases = self.cases_of(subject_type, completeness)?;
         let mut missing: Vec<String> = match cases {
             Cases::Booleans => [true, false]
                 .into_iter()
@@ -68,26 +103,23 @@ impl Inferrer<'_> {
             Cases::Inheritors(inheritors) => {
                 let mut missing = Vec::new();
                 for inheritor in inheritors {
-                    match self.uncovered_inheritor(inheritor, &covered, 0) {
+                    match self.uncovered_inheritor(inheritor, &covered, 0, completeness) {
                         InheritorCoverage::Covered => {}
                         InheritorCoverage::Missing(names) => missing.extend(names),
-                        InheritorCoverage::Unknown => return,
+                        InheritorCoverage::Unknown => return None,
                     }
                 }
                 missing
             }
         };
-        if subject_type.nullability() == Nullability::Nullable && !covered.null {
+        let may_be_null = match completeness {
+            Completeness::Found => subject_type.nullability() == Nullability::Nullable,
+            Completeness::Exhaustive => subject_type.nullability() != Nullability::NotNull,
+        };
+        if may_be_null && !covered.null {
             missing.push("null".to_owned());
         }
-        if missing.is_empty() {
-            return;
-        }
-        let start = node.start_byte();
-        self.record_non_exhaustive_when(NonExhaustiveWhen {
-            range: TextRange::new(start, start + "when".len()),
-            missing,
-        });
+        Some(missing)
     }
 
     /// What the branches' conditions cover; `None` when a condition is one
@@ -96,7 +128,7 @@ impl Inferrer<'_> {
     fn covered(&self, node: SyntaxNode<'_>) -> Option<Covered> {
         let mut covered = Covered::default();
         for entry in named_children(node).filter(|child| child.kind() == "when_entry") {
-            if has_token(entry, "if") {
+            if syntax::ast::kotlin::has_guard(entry) {
                 return None;
             }
             for condition in named_children(entry).filter(|child| child.kind() == "when_condition")
@@ -157,31 +189,47 @@ impl Inferrer<'_> {
         is_test && named_children(node).any(|operand| StablePath::of(self.text(operand)) == *path)
     }
 
-    fn cases_of(&self, subject_type: &Ty) -> Option<Cases> {
+    fn cases_of(&self, subject_type: &Ty, completeness: Completeness) -> Option<Cases> {
         let class = subject_type.class()?.class;
         if matches!(self.types.builtin("Boolean"), Ty::Class(boolean) if boolean.class == class) {
             return Some(Cases::Booleans);
         }
         let tree = hir_def::item_tree(self.db, class.container);
         let item = tree.item(class.item);
+        // An `expect` class's `actual` may have more.
+        let expected = item.modifiers.contains(Modifiers::EXPECT);
+        if expected && completeness == Completeness::Exhaustive {
+            return None;
+        }
         match item.kind {
             ItemKind::Class(ClassKind::Enum) => {
                 Some(Cases::EnumEntries(self.entries_of_enum(class)?))
             }
-            ItemKind::Class(_) if item.modifiers.contains(Modifiers::SEALED) => {
-                Some(Cases::Inheritors(self.sealed_inheritors(class)?))
-            }
+            ItemKind::Class(_) if item.modifiers.contains(Modifiers::SEALED) => Some(
+                Cases::Inheritors(self.sealed_inheritors(class, completeness)?),
+            ),
             _ => None,
         }
     }
 
     /// The direct subclasses of a workspace sealed class: in its package
     /// and source set. `None` for a compiled one, whose list isn't read.
-    fn sealed_inheritors(&self, sealed: ItemLocation) -> Option<Vec<ItemLocation>> {
+    /// To be exhaustive, every supertype in the package is resolved (one
+    /// written through a type alias counts), and no other source set of
+    /// the module and kind may build on it (a multiplatform `jvmMain` may
+    /// add subclasses to `commonMain`'s sealed class).
+    fn sealed_inheritors(
+        &self,
+        sealed: ItemLocation,
+        completeness: Completeness,
+    ) -> Option<Vec<ItemLocation>> {
         let ItemContainer::File(file) = sealed.container else {
             return None;
         };
         let source_set_id = file.source_set(self.db)?;
+        if completeness == Completeness::Exhaustive && self.is_refined(source_set_id) {
+            return None;
+        }
         let source_set = *self
             .db
             .workspace()
@@ -207,7 +255,8 @@ impl Inferrer<'_> {
                 let extends_sealed = supertypes
                     .iter()
                     .filter(|supertype| {
-                        supertype.path().and_then(|path| path.last()) == Some(sealed_name)
+                        completeness == Completeness::Exhaustive
+                            || supertype.path().and_then(|path| path.last()) == Some(sealed_name)
                     })
                     .any(|supertype| {
                         lower_supertype(self.db, self.file, location, supertype)
@@ -229,6 +278,7 @@ impl Inferrer<'_> {
         inheritor: ItemLocation,
         covered: &Covered,
         depth: usize,
+        completeness: Completeness,
     ) -> InheritorCoverage {
         if covered.declarations.contains(&inheritor) {
             return InheritorCoverage::Covered;
@@ -255,12 +305,12 @@ impl Inferrer<'_> {
             };
         }
         if item.modifiers.contains(Modifiers::SEALED) && depth < 8 {
-            let Some(own) = self.sealed_inheritors(inheritor) else {
+            let Some(own) = self.sealed_inheritors(inheritor, completeness) else {
                 return InheritorCoverage::Unknown;
             };
             let mut missing = Vec::new();
             for nested in own {
-                match self.uncovered_inheritor(nested, covered, depth + 1) {
+                match self.uncovered_inheritor(nested, covered, depth + 1, completeness) {
                     InheritorCoverage::Covered => {}
                     InheritorCoverage::Missing(names) => missing.extend(names),
                     InheritorCoverage::Unknown => return InheritorCoverage::Unknown,
@@ -279,6 +329,19 @@ impl Inferrer<'_> {
         } else {
             format!("is {name}")
         }])
+    }
+
+    /// Whether another source set of the module, of the same kind, builds
+    /// on `source_set` (`jvmMain` on `commonMain`).
+    fn is_refined(&self, source_set: base_db::SourceSetId) -> bool {
+        let model = self.db.workspace().model(self.db);
+        let own = model.source_set(source_set);
+        model.source_sets.iter().any(|other| {
+            other.id != source_set
+                && other.module == own.module
+                && other.kind == own.kind
+                && other.dependencies.contains(&source_set)
+        })
     }
 
     /// An enum's entries; `None` for a compiled Java enum, which lists them

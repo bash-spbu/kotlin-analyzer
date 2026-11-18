@@ -265,6 +265,18 @@ impl<'db> Inferrer<'db> {
         self.result.unsafe_calls.push(call);
     }
 
+    pub(super) fn record_when_findings(&mut self, start: u32, findings: Vec<super::WhenFinding>) {
+        self.result.when_findings.insert(start, findings);
+    }
+
+    pub(super) fn record_type_operation(
+        &mut self,
+        start: u32,
+        finding: Option<super::TypeOperationFinding>,
+    ) {
+        self.result.type_operations.insert(start, finding);
+    }
+
     pub(super) fn record_non_exhaustive_when(&mut self, when: NonExhaustiveWhen) {
         self.result.non_exhaustive_whens.push(when);
     }

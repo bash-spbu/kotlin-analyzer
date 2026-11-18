@@ -309,6 +309,8 @@ impl std::fmt::Debug for Modifiers {
 pub struct TypeParameter {
     pub name: Name,
     pub bounds: Box<[TypeRef]>,
+    /// `reified T` of an inline function: its type is known at run time.
+    pub reified: bool,
 }
 
 /// What a declaration says about types, per kind of declaration.

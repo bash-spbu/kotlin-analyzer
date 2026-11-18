@@ -24,6 +24,12 @@ whenever something it would need is `Unknown`, it stays silent.
 | `opt-in-usage` | lint | a use of API that needs opt-in to a `WARNING` marker the code doesn't give (Kotlin's `OPT_IN_USAGE`) — see "Opt-in" below |
 | `opt-in-usage-error` | error | the same for an `ERROR` marker, `@RequiresOptIn`'s default (`OPT_IN_USAGE_ERROR`) |
 | `can-be-val` | lint | a local `var` with an initializer that the enclosing declaration never assigns again — no `name = …`, `name += …`, `name++`, `--name` of any local of the name; offers "Change to `val`" |
+| `useless-cast` | lint | `x as T` where `x`'s type is exactly `T` (`as?` of a nullable `x`: `T?`) — Kotlin 2.3 on (`USELESS_CAST`); offers "Remove the cast" — see "Casts and type checks" below |
+| `cast-never-succeeds` | lint | `x as T` where no value of `x`'s type can be a `T` — Kotlin 2.3 on (`CAST_NEVER_SUCCEEDS`) |
+| `unchecked-cast` | lint | `x as T` the run time can't check: to a type parameter that isn't reified, or to type arguments `x`'s type doesn't determine (`UNCHECKED_CAST`) |
+| `useless-is-check` | lint | `x is T` that is always `true` (or `x !is T` always `false`): `x`'s type is a `T` (`USELESS_IS_CHECK`) |
+| `redundant-else-in-when` | lint | an `else` in a `when` whose other branches cover every case of the subject's enum, sealed type or `Boolean` (`null` too, for a nullable or Java subject) — under the same conditions as `non-exhaustive-when`, and only for a sealed type whose source set no other of its module refines (`REDUNDANT_ELSE_IN_WHEN`); offers "Remove the `else` branch" |
+| `duplicate-branch-condition` | lint | a `when` condition an earlier branch already checks: the same literal, enum entry or object, or `is`/`!is` of the same type; branches with a guard don't count (`DUPLICATE_BRANCH_CONDITION_IN_WHEN`) |
 
 A value *can't be null* when its type is a class or function type without
 `?` — as declared, not through a smart cast: Kotlin doesn't smart-cast
@@ -43,11 +49,41 @@ more.
 
 A check the Kotlin compiler reports itself (`UNNECESSARY_NOT_NULL_ASSERTION`,
 `UNNECESSARY_SAFE_CALL`, `USELESS_ELVIS`, `SENSELESS_COMPARISON`,
-`DEPRECATION`) follows the source set's compiler options (project-model.md):
+`DEPRECATION`, `OPT_IN_USAGE`, `USELESS_CAST`, `CAST_NEVER_SUCCEEDS`,
+`UNCHECKED_CAST`, `USELESS_IS_CHECK`, `REDUNDANT_ELSE_IN_WHEN`,
+`DUPLICATE_BRANCH_CONDITION_IN_WHEN`) follows the source set's compiler options (project-model.md):
 an error where the build makes warnings errors (`allWarningsAsErrors`,
 `-Werror`, `-Xwarning-level=NAME:error`), not reported where it suppresses
 them (`-nowarn`, `-Xsuppress-warning=NAME`). IntelliJ-only checks
 (`unused-variable`, `can-be-val`) don't.
+
+### Casts and type checks
+
+Kotlin's rules, from its cast checker: a cast is useless when the value's
+type equals the target; it never succeeds when the two types are unrelated
+(neither a subtype of the other) and one is a final class, or both are
+classes, not interfaces; it's unchecked when it targets a type parameter
+that isn't reified (unless the value is that parameter already), or type
+arguments the value's type doesn't fix: `Any as List<String>`, but not
+`Map<K, V> as MutableMap<K, V>` nor `x as List<*>`. A type check is
+useless when the value's type is a subtype of the type checked — not on
+the last branch of a `when` without `else`, where the compiler accepts it.
+The value's type is the one inference gives, smart casts included, as the
+compiler judges by the smart-cast type too. Silent:
+- for a value that isn't a name, property, `this`, plain string or a call
+  of a function without type parameters (a generic call may take its type
+  from the cast itself, and the compiler then doesn't warn);
+- when either type has an unknown part, a function type, or Java types
+  nested in its arguments (`List<String!>`);
+- `cast-never-succeeds` for generic classes, two nullable types and two
+  numbers (they have warnings of their own), `java.*` classes (mapped to
+  Kotlin's), enums, `expect` classes, and a workspace class with an
+  annotation (`kotlin-spring` and other `allopen` plugins open those);
+- `useless-cast` and `cast-never-succeeds` before Kotlin 2.3, or when the
+  language version isn't known: they're data-flow warnings the compiler
+  enables from 2.3 on;
+- where the grammar splits the type (`(x is A).B` for `x is A.B` at the
+  end of a file).
 
 ### Deprecation
 

@@ -4,8 +4,8 @@
 //! `val`s.
 
 use hir::{
-    DeprecationLevel, LocalFinding, NonExhaustiveWhen, NullCheckKind, OptInLevel, RootDatabase,
-    SourceFile,
+    DeprecationLevel, KotlinVersion, LocalFinding, NonExhaustiveWhen, NullCheckKind, OptInLevel,
+    RootDatabase, SourceFile, TypeOperationKind, WhenFinding,
 };
 use syntax::{Parse, TextRange, has_token};
 
@@ -69,7 +69,124 @@ pub(super) fn diagnostics(
     found.extend(local_findings(db, file, config));
     found.extend(deprecations(db, file, config));
     found.extend(opt_ins(db, file, config));
+    found.extend(type_operations(db, file, config));
+    found.extend(when_findings(db, file, config));
     found
+}
+
+/// The language version from which the compiler reports useless casts and
+/// casts that never succeed (its data-flow warnings, `KT-50965`).
+const DATA_FLOW_CAST_WARNINGS: KotlinVersion = KotlinVersion::new(2, 3);
+
+/// Casts and type checks whose outcome the types decide, as Kotlin words
+/// them.
+fn type_operations(
+    db: &RootDatabase,
+    file: SourceFile,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let inference = hir::infer_file(db, file);
+    let data_flow_warnings = hir::compiler_options(db, file)
+        .language_version()
+        .is_some_and(|version| version >= DATA_FLOW_CAST_WARNINGS);
+    let mut found = Vec::new();
+    for finding in inference.type_operations() {
+        let (check, message, fixes) = match &finding.kind {
+            TypeOperationKind::UselessCast { removable } => (
+                Check::UselessCast,
+                "No cast needed".to_owned(),
+                vec![replace("Remove the cast", *removable, "")],
+            ),
+            TypeOperationKind::CastNeverSucceeds => (
+                Check::CastNeverSucceeds,
+                "This cast can never succeed".to_owned(),
+                Vec::new(),
+            ),
+            TypeOperationKind::UncheckedCast { from, to } => (
+                Check::UncheckedCast,
+                format!(
+                    "Unchecked cast of `{}` to `{}`",
+                    hir::display_type(db, from),
+                    hir::display_type(db, to)
+                ),
+                Vec::new(),
+            ),
+            TypeOperationKind::UselessIsCheck { result } => (
+                Check::UselessIsCheck,
+                format!("Check for instance is always `{result}`"),
+                Vec::new(),
+            ),
+        };
+        let needs_data_flow_warnings =
+            matches!(check, Check::UselessCast | Check::CastNeverSucceeds);
+        if needs_data_flow_warnings && !data_flow_warnings || !config.runs(check) {
+            continue;
+        }
+        found.push(Diagnostic {
+            check,
+            severity: check.severity(),
+            range: finding.range,
+            message,
+            fixes,
+        });
+    }
+    found
+}
+
+/// Redundant `else` branches and conditions a `when` checks twice.
+fn when_findings(
+    db: &RootDatabase,
+    file: SourceFile,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let inference = hir::infer_file(db, file);
+    let text = file.text(db);
+    let mut found = Vec::new();
+    for finding in inference.when_findings() {
+        let (check, message, fixes) = match finding {
+            WhenFinding::RedundantElse { entry, .. } => (
+                Check::RedundantElseInWhen,
+                "`when` is exhaustive so `else` is redundant here",
+                vec![replace(
+                    "Remove the `else` branch",
+                    whole_lines(text, *entry),
+                    "",
+                )],
+            ),
+            WhenFinding::DuplicateCondition { .. } => (
+                Check::DuplicateBranchCondition,
+                "Duplicate branch condition in `when`",
+                Vec::new(),
+            ),
+        };
+        if config.runs(check) {
+            found.push(Diagnostic {
+                check,
+                severity: check.severity(),
+                range: finding.range(),
+                message: message.to_owned(),
+                fixes,
+            });
+        }
+    }
+    found
+}
+
+/// `range`, widened to the lines it's on when nothing else is on them.
+fn whole_lines(text: &str, range: TextRange) -> TextRange {
+    let line_start = text[..range.start as usize]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line_end = text[range.end as usize..]
+        .find('\n')
+        .map_or(text.len(), |newline| range.end as usize + newline + 1);
+    let before_blank = text[line_start..range.start as usize].trim().is_empty();
+    let after_blank = text[range.end as usize..line_end].trim().is_empty();
+    if before_blank && after_blank {
+        TextRange::new(line_start, line_end)
+    } else {
+        range
+    }
 }
 
 /// Uses of API that needs an opt-in the code doesn't give, as Kotlin words

@@ -9,7 +9,7 @@
 //! target of an assignment, which a setter's deprecation would decide, and
 //! not a `name =` label.
 
-use base_db::{ArchiveKind, JdkRelease, SourceDatabase, SourceFile};
+use base_db::{ArchiveKind, JdkRelease, KotlinVersion, SourceDatabase, SourceFile};
 use hir_def::item_tree::{
     Deprecation, DeprecationLevel, DeprecationOrigin, ItemKind, Signature, TypeRef,
 };
@@ -172,7 +172,10 @@ fn worst(first: Option<Deprecation>, second: Option<Deprecation>) -> Option<Depr
 /// by the Kotlin API version the code compiles against instead: hidden,
 /// an error or a warning from the versions it names on, not deprecated
 /// before — and no level when the version isn't known.
-fn level(deprecation: &Deprecation, api_version: Option<ApiVersion>) -> Option<DeprecationLevel> {
+fn level(
+    deprecation: &Deprecation,
+    api_version: Option<KotlinVersion>,
+) -> Option<DeprecationLevel> {
     let Some(since) = &deprecation.since_kotlin else {
         return Some(deprecation.level);
     };
@@ -180,7 +183,7 @@ fn level(deprecation: &Deprecation, api_version: Option<ApiVersion>) -> Option<D
     let reached = |version: &Option<Box<str>>| {
         version
             .as_deref()
-            .and_then(ApiVersion::parse)
+            .and_then(KotlinVersion::parse)
             .is_some_and(|version| version <= api_version)
     };
     if reached(&since.hidden_since) {
@@ -194,33 +197,12 @@ fn level(deprecation: &Deprecation, api_version: Option<ApiVersion>) -> Option<D
     }
 }
 
-/// A Kotlin API version: `2.1`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-struct ApiVersion {
-    major: u32,
-    minor: u32,
-}
-
-impl ApiVersion {
-    fn parse(text: &str) -> Option<ApiVersion> {
-        let mut numbers = text.split('.');
-        let major = numbers.next()?.trim().parse().ok()?;
-        let minor = numbers.next().unwrap_or("0").trim().parse().ok()?;
-        Some(ApiVersion { major, minor })
-    }
-}
-
 /// The API version `file`'s source set compiles against, when the model
 /// says.
-fn api_version(db: &dyn SourceDatabase, file: SourceFile) -> Option<ApiVersion> {
+fn api_version(db: &dyn SourceDatabase, file: SourceFile) -> Option<KotlinVersion> {
     let source_set = file.source_set(db)?;
     let model = db.workspace().model(db);
-    let version = model
-        .source_set(source_set)
-        .compiler
-        .api_version
-        .as_deref()?;
-    ApiVersion::parse(version)
+    model.source_set(source_set).compiler.api_version()
 }
 
 struct Uses<'db, 'parse> {

@@ -31,6 +31,12 @@ pub enum Check {
     DeprecationError,
     OptInUsage,
     OptInUsageError,
+    UselessCast,
+    CastNeverSucceeds,
+    UncheckedCast,
+    UselessIsCheck,
+    RedundantElseInWhen,
+    DuplicateBranchCondition,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,7 +61,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 18] = [
+    pub const ALL: [Check; 24] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -74,6 +80,12 @@ impl Check {
         Check::DeprecationError,
         Check::OptInUsage,
         Check::OptInUsageError,
+        Check::UselessCast,
+        Check::CastNeverSucceeds,
+        Check::UncheckedCast,
+        Check::UselessIsCheck,
+        Check::RedundantElseInWhen,
+        Check::DuplicateBranchCondition,
     ];
 
     pub fn name(self) -> &'static str {
@@ -96,6 +108,12 @@ impl Check {
             Check::DeprecationError => "deprecation-error",
             Check::OptInUsage => "opt-in-usage",
             Check::OptInUsageError => "opt-in-usage-error",
+            Check::UselessCast => "useless-cast",
+            Check::CastNeverSucceeds => "cast-never-succeeds",
+            Check::UncheckedCast => "unchecked-cast",
+            Check::UselessIsCheck => "useless-is-check",
+            Check::RedundantElseInWhen => "redundant-else-in-when",
+            Check::DuplicateBranchCondition => "duplicate-branch-condition",
         }
     }
 
@@ -119,7 +137,13 @@ impl Check {
             | Check::SenselessComparison
             | Check::CanBeVal
             | Check::Deprecation
-            | Check::OptInUsage => Severity::Lint,
+            | Check::OptInUsage
+            | Check::UselessCast
+            | Check::CastNeverSucceeds
+            | Check::UncheckedCast
+            | Check::UselessIsCheck
+            | Check::RedundantElseInWhen
+            | Check::DuplicateBranchCondition => Severity::Lint,
             Check::UnusedImport | Check::UnusedVariable => Severity::Unnecessary,
         }
     }
@@ -142,6 +166,16 @@ impl Check {
             }
             Check::OptInUsage => &["OPT_IN_USAGE"],
             Check::OptInUsageError => &["OPT_IN_USAGE_ERROR"],
+            Check::UselessCast => &["USELESS_CAST"],
+            Check::CastNeverSucceeds => &["CAST_NEVER_SUCCEEDS"],
+            Check::UncheckedCast => &["UNCHECKED_CAST"],
+            Check::UselessIsCheck => &["USELESS_IS_CHECK"],
+            Check::RedundantElseInWhen => &["REDUNDANT_ELSE_IN_WHEN"],
+            // K1 named it `DUPLICATE_LABEL_IN_WHEN`.
+            Check::DuplicateBranchCondition => &[
+                "DUPLICATE_BRANCH_CONDITION_IN_WHEN",
+                "DUPLICATE_LABEL_IN_WHEN",
+            ],
             Check::Syntax
             | Check::UnresolvedReference
             | Check::MissingImport
@@ -162,6 +196,12 @@ impl Check {
             Check::SenselessComparison => Some("SENSELESS_COMPARISON"),
             Check::Deprecation => Some("DEPRECATION"),
             Check::OptInUsage => Some("OPT_IN_USAGE"),
+            Check::UselessCast => Some("USELESS_CAST"),
+            Check::CastNeverSucceeds => Some("CAST_NEVER_SUCCEEDS"),
+            Check::UncheckedCast => Some("UNCHECKED_CAST"),
+            Check::UselessIsCheck => Some("USELESS_IS_CHECK"),
+            Check::RedundantElseInWhen => Some("REDUNDANT_ELSE_IN_WHEN"),
+            Check::DuplicateBranchCondition => Some("DUPLICATE_BRANCH_CONDITION_IN_WHEN"),
             _ => None,
         }
     }

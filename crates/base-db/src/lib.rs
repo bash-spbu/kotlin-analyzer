@@ -17,7 +17,7 @@ pub use library::{
 };
 pub use parse_cache::ParseCache;
 pub use project_model::{
-    Classpath, CompilerOptions, Platform, ProjectModel, SourceSetId, WarningLevel,
+    Classpath, CompilerOptions, KotlinVersion, Platform, ProjectModel, SourceSetId, WarningLevel,
 };
 pub use salsa;
 pub use syntax::{Language, Parse};

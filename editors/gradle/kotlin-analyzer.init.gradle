@@ -143,8 +143,8 @@ def addDependency = { List dependencies, String module, String sourceSet ->
 // --- Compiler options ----------------------------------------------------------
 
 // What a Kotlin compile task tells the compiler that changes what it reports:
-// warnings as errors or suppressed (all, or by name), opt-ins, the API
-// version and the JDK release. A field it can't read is left out.
+// warnings as errors or suppressed (all, or by name), opt-ins, the API and
+// language versions and the JDK release. A field it can't read is left out.
 def compilerOptionsOf = { project, task ->
     if (task == null) return null
     def options = [warningsAsErrors: false, suppressWarnings: false, warningLevels: [:], optIn: []]
@@ -156,6 +156,8 @@ def compilerOptionsOf = { project, task ->
         options.optIn = (compilerOptions.optIn.getOrElse([]) as List).collect { it.toString() }
         def apiVersion = compilerOptions.apiVersion.getOrNull()
         if (apiVersion != null) options.apiVersion = apiVersion.version
+        def languageVersion = compilerOptions.languageVersion.getOrNull()
+        if (languageVersion != null) options.languageVersion = languageVersion.version
         free = (compilerOptions.freeCompilerArgs.getOrElse([]) as List).collect { it.toString() }
     } catch (ignored) {
     }
@@ -179,16 +181,19 @@ def compilerOptionsOf = { project, task ->
             if (release.isInteger()) options.jdkRelease = release.toInteger()
         }
         else if (argument == "-api-version" && index + 1 < free.size()) options.apiVersion = free[index + 1]
+        else if (argument == "-language-version" && index + 1 < free.size()) options.languageVersion = free[index + 1]
     }
-    if (options.apiVersion == null) {
-        // Unset, it's the compiler's own version: the plugin's standard library.
+    // Unset, the language version is the compiler's own, and the API
+    // version the language version.
+    if (options.languageVersion == null) {
         try {
             def version = project.extensions.getByName("kotlin").coreLibrariesVersion.toString()
             def numbers = version.split(/[.\-]/)
-            if (numbers.length >= 2) options.apiVersion = "${numbers[0]}.${numbers[1]}"
+            if (numbers.length >= 2) options.languageVersion = "${numbers[0]}.${numbers[1]}"
         } catch (ignored) {
         }
     }
+    if (options.apiVersion == null) options.apiVersion = options.languageVersion
     return options
 }
 
@@ -211,6 +216,7 @@ def mergeCompilerOptions = { List all ->
         values.size() == 1 && values[0] != null ? values[0] : null
     }
     if (same("apiVersion") != null) merged.apiVersion = same("apiVersion")
+    if (same("languageVersion") != null) merged.languageVersion = same("languageVersion")
     if (same("jdkRelease") != null) merged.jdkRelease = same("jdkRelease")
     return merged
 }

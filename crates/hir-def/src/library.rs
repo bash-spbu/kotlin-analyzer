@@ -453,6 +453,7 @@ fn type_parameters(parameters: &[classfile::TypeParameter]) -> Box<[TypeParamete
         .map(|parameter| TypeParameter {
             name: parameter.name,
             bounds: parameter.bounds.iter().map(type_ref).collect(),
+            reified: false,
         })
         .collect()
 }

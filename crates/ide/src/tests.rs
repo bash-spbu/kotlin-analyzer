@@ -784,6 +784,162 @@ fn newest_cached_stdlib() -> Option<std::path::PathBuf> {
 }
 
 #[test]
+fn casts_and_type_checks_whose_outcome_is_known() {
+    let config = || crate::DiagnosticsConfig {
+        only: vec![
+            crate::Check::UselessCast,
+            crate::Check::CastNeverSucceeds,
+            crate::Check::UncheckedCast,
+            crate::Check::UselessIsCheck,
+        ],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt lang=2.3
+package b
+open class Animal
+class Dog : Animal()
+class Car
+interface Pet
+annotation class Component
+@Component class Service
+fun casts(animal: Animal, dog: Dog, any: Any, text: String?, list: List<String>, car: Car, pet: Pet, service: Service) {
+    dog as Dog
+    text as? String
+    animal as Pet
+    animal as Dog
+    dog as Car
+    car as Pet
+    pet as Car
+    service as Pet
+    any as List<String>
+    any as List<*>
+    list as MutableList<String>
+    1 as Any
+}
+fun <T> generic(value: Any?, own: T?, plain: T) {
+    value as T
+    own as T
+    plain as T?
+}
+fun <T : Any> bounded(own: T?) = own as T
+inline fun <reified R> reified(value: Any) = value as R
+fun checks(dog: Dog, animal: Animal, text: String?) {
+    if (dog is Animal) {}
+    if (dog !is Animal) {}
+    if (animal is Dog) {}
+    if (text is String) {}
+    if (text is String?) {}
+    when (dog) {
+        is Animal -> 1
+        else -> 2
+    }
+    when (animal) {
+        is Dog -> 1
+        is Animal -> 2
+    }
+}
+"#,
+        config(),
+        expect![[r#"
+            [useless-cast] 9: No cast needed | Remove the cast: ""
+            [useless-cast] 10: No cast needed | Remove the cast: ""
+            [cast-never-succeeds] 13: This cast can never succeed
+            [cast-never-succeeds] 14: This cast can never succeed
+            [cast-never-succeeds] 15: This cast can never succeed
+            [unchecked-cast] 17: Unchecked cast of `Any` to `List<String>`
+            [unchecked-cast] 23: Unchecked cast of `Any?` to `T`
+            [unchecked-cast] 24: Unchecked cast of `T?` to `T`
+            [useless-is-check] 30: Check for instance is always `true`
+            [useless-is-check] 31: Check for instance is always `false`
+            [useless-is-check] 34: Check for instance is always `true`
+            [useless-is-check] 36: Check for instance is always `true`"#]],
+    );
+    // Before Kotlin 2.3 the compiler doesn't report useless casts or casts
+    // that never succeed.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt lang=2.2
+package b
+class Dog
+class Car
+fun casts(dog: Dog) {
+    dog as Dog
+    dog as Car
+}
+"#,
+        config(),
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn when_branches_needless_or_twice() {
+    let config = || crate::DiagnosticsConfig {
+        only: vec![
+            crate::Check::RedundantElseInWhen,
+            crate::Check::DuplicateBranchCondition,
+        ],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+enum class Side { BUY, SELL }
+sealed interface Shape
+class Circle : Shape
+object Square : Shape
+open class Animal
+class Dog : Animal()
+fun whens(side: Side, shape: Shape, code: Int, animal: Animal, nullable: Side?, other: Side?, flag: Boolean) {
+    when (side) {
+        Side.BUY -> 1
+        Side.SELL -> 2
+        else -> 3
+    }
+    when (shape) { is Circle -> 1; Square -> 2; else -> 3 }
+    when (code) { 1 -> "a"; 2 -> "b"; 1 -> "c"; else -> "d" }
+    when (side) { Side.BUY -> 1; Side.BUY -> 2; else -> 3 }
+    when (animal) { is Dog -> 1; is  Dog -> 2; !is Dog -> 3; else -> 4 }
+    when (nullable) { Side.BUY -> 1; Side.SELL -> 2; else -> 3 }
+    when (other) { Side.BUY -> 1; Side.SELL -> 2; null -> 3; else -> 4 }
+    when (side) { Side.BUY if flag -> 1; Side.SELL -> 2; else -> 3 }
+    when (side) { Side.BUY if flag -> 1; Side.BUY -> 2; else -> 3 }
+    when (code) { "$code".length -> 1; "$code".length -> 2; else -> 3 }
+    when (flag) { true -> 1; false -> 2; else -> 3 }
+}
+"#,
+        config(),
+        expect![[r#"
+            [redundant-else-in-when] 12: `when` is exhaustive so `else` is redundant here | Remove the `else` branch: ""
+            [redundant-else-in-when] 14: `when` is exhaustive so `else` is redundant here | Remove the `else` branch: ""
+            [duplicate-branch-condition] 15: Duplicate branch condition in `when`
+            [duplicate-branch-condition] 16: Duplicate branch condition in `when`
+            [duplicate-branch-condition] 17: Duplicate branch condition in `when`
+            [redundant-else-in-when] 19: `when` is exhaustive so `else` is redundant here | Remove the `else` branch: ""
+            [redundant-else-in-when] 23: `when` is exhaustive so `else` is redundant here | Remove the `else` branch: """#]],
+    );
+    // A multiplatform `jvmMain` may add subclasses to `commonMain`'s sealed
+    // class: its `else` may be needed there.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt set=commonMain
+package b
+sealed interface Shape
+class Circle : Shape
+fun whens(shape: Shape) = when (shape) { is Circle -> 1; else -> 2 }
+//- /app/jvm/b/Square.kt set=jvmMain deps=:app/commonMain
+package b
+class Square : Shape
+"#,
+        config(),
+        expect![[r#""#]],
+    );
+}
+
+#[test]
 fn uses_of_api_that_needs_opt_in() {
     let api = r#"
 //- /app/a/Api.kt
@@ -2132,5 +2288,31 @@ fun inline(side: Side) = when (side) { Side.BUY -> 1; Side.SELL -> 2 }
         expect![[r#"
             [non-exhaustive-when] 5: `when` must be exhaustive: add the missing `Side.SELL`, `Side.HOLD` or an `else` branch | Add the missing branches: "        Side.SELL -> TODO()\n        Side.HOLD -> TODO()\n"
             [non-exhaustive-when] 9: `when` must be exhaustive: add the missing `Side.HOLD` or an `else` branch | Add the missing branches: "; Side.HOLD -> TODO()""#]],
+    );
+}
+
+#[test]
+fn a_type_check_the_grammar_splits_is_left_alone() {
+    // At the end of a file the grammar reads `this is Result.Resolved` as
+    // `(this is Result).Resolved`: a check the type `Result` would decide.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+sealed interface Result {
+    data class Resolved(val data: String) : Result
+    data object NotFound : Result
+}
+fun Result.dataOrNull(): String? = when (this) {
+    is Result.Resolved -> data
+    else -> null
+}
+fun Result.isResolved(): Boolean = this is Result.Resolved
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::UselessIsCheck],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#""#]],
     );
 }

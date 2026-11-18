@@ -490,6 +490,7 @@ impl<'parse> Lowering<'parse> {
                 Some(TypeParameter {
                     name,
                     bounds: written_beside.into_iter().chain(from_where).collect(),
+                    reified: parameter.is_reified(),
                 })
             })
             .collect()

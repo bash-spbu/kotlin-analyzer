@@ -297,6 +297,11 @@ impl TypeTest {
 }
 
 /// Whether `node` is a type: a reference, a nullable or function type.
+/// A `when` branch with a guard: `is T if condition ->`.
+pub fn has_guard(entry: SyntaxNode<'_>) -> bool {
+    named_children(entry).any(|child| child.kind() == "guard_condition")
+}
+
 pub fn is_type(node: SyntaxNode<'_>) -> bool {
     matches!(
         node.kind(),
@@ -504,6 +509,14 @@ impl<'tree> TypeParameter<'tree> {
     /// `Bound` of `T : Bound`.
     pub fn bound(self) -> Option<SyntaxNode<'tree>> {
         named_children(self.0).find(|child| is_type(*child))
+    }
+
+    /// `reified T`.
+    pub fn is_reified(self) -> bool {
+        named_children(self.0)
+            .filter(|child| child.kind() == "type_parameter_modifiers")
+            .flat_map(named_children)
+            .any(|modifier| modifier.kind() == "reification_modifier")
     }
 }
 

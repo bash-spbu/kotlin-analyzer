@@ -54,6 +54,7 @@ struct CompilerOptionsEntry {
     warning_levels: std::collections::BTreeMap<String, String>,
     opt_in: Vec<String>,
     api_version: Option<String>,
+    language_version: Option<String>,
     jdk_release: Option<u32>,
 }
 
@@ -78,6 +79,7 @@ impl CompilerOptionsEntry {
                 .collect(),
             opt_in: self.opt_in.clone(),
             api_version: self.api_version.clone(),
+            language_version: self.language_version.clone(),
             jdk_release: self.jdk_release,
         }
     }

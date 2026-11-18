@@ -148,6 +148,8 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
                 file.compiler.warnings_as_errors = true;
             } else if let Some(version) = word.strip_prefix("api=") {
                 file.compiler.api_version = Some(version.to_owned());
+            } else if let Some(version) = word.strip_prefix("lang=") {
+                file.compiler.language_version = Some(version.to_owned());
             } else if let Some(marker) = word.strip_prefix("optin=") {
                 file.compiler.opt_in.push(marker.to_owned());
             } else if let Some(dependencies) = word.strip_prefix("deps=") {

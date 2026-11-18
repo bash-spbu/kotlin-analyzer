@@ -95,8 +95,9 @@ are ordinary source directories that happen to be produced by the build.
    compile task(s) it's part of: `warningsAsErrors` (`allWarningsAsErrors`,
    `-Werror`), `suppressWarnings` (`-nowarn`), `warningLevels` by the
    compiler's warning name (`-Xsuppress-warning=NAME` is `disabled`,
-   `-Xwarning-level=NAME:error|warning|disabled`), `optIn`, `apiVersion`
-   (unset, the plugin's version: `2.3`) and `jdkRelease` (the task's Java
+   `-Xwarning-level=NAME:error|warning|disabled`), `optIn`,
+   `languageVersion` (unset, the plugin's version: `2.3`), `apiVersion`
+   (unset, the language version) and `jdkRelease` (the task's Java
    toolchain, or `-Xjdk-release`). A source set in several compilations
    (Kotlin Multiplatform) gets them merged: warnings are errors if any
    compilation says so; suppressed, opted into or of one level only if all

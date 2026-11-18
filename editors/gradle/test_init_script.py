@@ -117,6 +117,7 @@ class MultiplatformExportTest(unittest.TestCase):
         self.assertEqual(server["warningLevels"], {"UNUSED_VARIABLE": "disabled"})
         # Unset, the API version is the plugin's own: `2.3`, never empty.
         self.assertRegex(server["apiVersion"], r"^\d+\.\d+$")
+        self.assertRegex(server["languageVersion"], r"^\d+\.\d+$")
         core = self.source_set(":core", "commonMain")["compilerOptions"]
         self.assertFalse(core["warningsAsErrors"])
         self.assertEqual(core["warningLevels"], {})
