@@ -37,6 +37,8 @@ pub enum Check {
     UselessIsCheck,
     RedundantElseInWhen,
     DuplicateBranchCondition,
+    ReturnTypeMismatch,
+    TypeMismatch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,7 +63,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 24] = [
+    pub const ALL: [Check; 26] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -86,6 +88,8 @@ impl Check {
         Check::UselessIsCheck,
         Check::RedundantElseInWhen,
         Check::DuplicateBranchCondition,
+        Check::ReturnTypeMismatch,
+        Check::TypeMismatch,
     ];
 
     pub fn name(self) -> &'static str {
@@ -114,6 +118,8 @@ impl Check {
             Check::UselessIsCheck => "useless-is-check",
             Check::RedundantElseInWhen => "redundant-else-in-when",
             Check::DuplicateBranchCondition => "duplicate-branch-condition",
+            Check::ReturnTypeMismatch => "return-type-mismatch",
+            Check::TypeMismatch => "type-mismatch",
         }
     }
 
@@ -129,7 +135,9 @@ impl Check {
             | Check::UnsafeCall
             | Check::NonExhaustiveWhen
             | Check::DeprecationError
-            | Check::OptInUsageError => Severity::Error,
+            | Check::OptInUsageError
+            | Check::ReturnTypeMismatch
+            | Check::TypeMismatch => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
             Check::UnnecessaryNotNullAssertion
             | Check::UnnecessarySafeCall
@@ -181,7 +189,9 @@ impl Check {
             | Check::MissingImport
             | Check::ArgumentMismatch
             | Check::UnsafeCall
-            | Check::NonExhaustiveWhen => &[],
+            | Check::NonExhaustiveWhen
+            | Check::ReturnTypeMismatch
+            | Check::TypeMismatch => &[],
         }
     }
 
@@ -208,7 +218,11 @@ impl Check {
 
     pub fn stability(self) -> Stability {
         match self {
-            Check::UnresolvedReference => Stability::Experimental,
+            // Initializers, assignments and arguments: inference doesn't
+            // yet resolve every implicit receiver and generic as the
+            // compiler does (rust-analyzer kept its own type mismatches
+            // experimental for the same reason).
+            Check::UnresolvedReference | Check::TypeMismatch => Stability::Experimental,
             _ => Stability::Stable,
         }
     }

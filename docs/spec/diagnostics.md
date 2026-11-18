@@ -29,6 +29,8 @@ whenever something it would need is `Unknown`, it stays silent.
 | `unchecked-cast` | lint | `x as T` the run time can't check: to a type parameter that isn't reified, or to type arguments `x`'s type doesn't determine (`UNCHECKED_CAST`) |
 | `useless-is-check` | lint | `x is T` that is always `true` (or `x !is T` always `false`): `x`'s type is a `T` (`USELESS_IS_CHECK`) |
 | `redundant-else-in-when` | lint | an `else` in a `when` whose other branches cover every case of the subject's enum, sealed type or `Boolean` (`null` too, for a nullable or Java subject) — under the same conditions as `non-exhaustive-when`, and only for a sealed type whose source set no other of its module refines (`REDUNDANT_ELSE_IN_WHEN`); offers "Remove the `else` branch" |
+| `return-type-mismatch` | error | a returned value (`return x`, an expression body) whose class can't be the one the function declares (Kotlin's `RETURN_TYPE_MISMATCH`) — see "Type mismatches" below |
+| `type-mismatch` | error, **experimental** | the same for a declared property's or local's initializer, a parameter's default value, an assignment to a `var` that writes its type, and an argument of the only function a call can mean (`INITIALIZER_TYPE_MISMATCH`, `ASSIGNMENT_TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`) |
 | `duplicate-branch-condition` | lint | a `when` condition an earlier branch already checks: the same literal, enum entry or object, or `is`/`!is` of the same type; branches with a guard don't count (`DUPLICATE_BRANCH_CONDITION_IN_WHEN`) |
 
 A value *can't be null* when its type is a class or function type without
@@ -56,6 +58,37 @@ an error where the build makes warnings errors (`allWarningsAsErrors`,
 `-Werror`, `-Xwarning-level=NAME:error`), not reported where it suppresses
 them (`-nowarn`, `-Xsuppress-warning=NAME`). IntelliJ-only checks
 (`unused-variable`, `can-be-val`) don't.
+
+### Type mismatches
+
+Like rust-analyzer's, inference records a mismatch in one place, where a
+type is required rather than hinted, and the range shown is the salient
+part: the member name of a call or property chain (`getOrThrow` of
+`client.convert(…).getOrThrow()`), not the whole expression. Reported
+only when the value's class can't be the required one — no supertype of
+it is, every supertype known; a mutable collection required takes its
+read-only one (a Java `List` parameter is `(Mutable)List!`), and a class
+of the same qualified name counts as the same. Silent:
+- for nullability alone and for type arguments: smart casts from
+  contracts (`checkNotNull`, `require`) and generic variance aren't all
+  modelled;
+- for a value whose type isn't the compiler's for certain: anything but a
+  name, property, `this`, literal or call of a function without type
+  parameters (as for casts, below); a Java value (`T!`), whose type may
+  come through generics not followed; branches (`if`, `when`, `try`,
+  `?:`), lambdas, references; numbers (an integer literal converts);
+  `expect` classes (an `actual typealias` may be the other one);
+- for a `return` inside a lambda (an inline lambda's leaves the function
+  around it) or labelled;
+- for an assignment to a `var` whose type is inferred, or to a smart-cast
+  value;
+- for an argument when other functions of the name exist, for `vararg`
+  and spread arguments, and for parameters whose type depends on the call.
+
+`type-mismatch` stays experimental: on the corpora it still meets values
+inference types differently from the compiler (an implicit receiver in a
+lambda, a generic resolved through a hierarchy, a property of function
+type called).
 
 ### Casts and type checks
 

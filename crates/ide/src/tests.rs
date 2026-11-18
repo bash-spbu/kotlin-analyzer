@@ -940,6 +940,99 @@ class Square : Shape
 }
 
 #[test]
+fn values_whose_class_cannot_be_the_one_required() {
+    let config = || crate::DiagnosticsConfig {
+        only: vec![crate::Check::ReturnTypeMismatch, crate::Check::TypeMismatch],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+open class Animal
+class Dog : Animal()
+class Car
+class Result(val dog: Dog) { fun get(): Dog = dog }
+fun wrong(result: Result): Dog {
+    return result
+}
+fun wrongBody(result: Result): Dog = result
+fun right(result: Result): Dog {
+    return result.get()
+}
+fun subtype(dog: Dog): Animal = dog
+fun nullable(dog: Dog?): Dog {
+    return dog
+}
+fun literal(): Long = 1
+fun branches(flag: Boolean, dog: Dog, car: Car): Animal = if (flag) dog else Animal()
+fun inLambda(dogs: List<Dog>): Car {
+    dogs.forEach { return Car() }
+    run { return@run dogs }
+    return Car()
+}
+fun anonymous(car: Car): Dog {
+    val make = fun(): Car { return car }
+    return Dog()
+}
+fun throws(): Dog = throw IllegalStateException()
+fun unknown(): Dog = missing()
+fun local(car: Car) {
+    fun inner(): Dog = car
+}
+fun chain(result: Result): Car = result
+    .get()
+class Holder(var pet: Animal) {
+    val count: Int = "many"
+    var name: String = "x"
+    fun rename(car: Car, any: Any) {
+        name = car
+        pet = Dog()
+        var animal: Animal = Dog()
+        if (any is Dog) { animal = any }
+        var guessed = Dog()
+        guessed = Dog()
+        animal = car
+    }
+}
+fun defaults(count: Int = "one", pet: Animal = Dog()) {}
+fun feed(dog: Dog) {}
+fun <T> keep(value: T): T = value
+fun walk(dog: Dog) {}
+fun walk(car: Car) {}
+fun all(vararg dogs: Dog) {}
+fun calls(car: Car, dog: Dog?) {
+    feed(car)
+    feed(Dog())
+    keep(car)
+    walk(car)
+    all(Dog(), Dog())
+    feed(dog)
+}
+fun ints(values: IntArray) {}
+fun spread(vararg numbers: Int) {
+    ints(numbers)
+}
+class Response
+fun body(response: Response): String = ""
+fun <T> body(response: Response, marker: Int = 0): T = TODO()
+fun typed(response: Response): Dog = body<Dog>(response)
+"#,
+        config(),
+        expect![[r#"
+            [return-type-mismatch] 7: Return type mismatch: expected `Dog`, actual `Result`
+            [return-type-mismatch] 9: Return type mismatch: expected `Dog`, actual `Result`
+            [return-type-mismatch] 31: Return type mismatch: expected `Dog`, actual `Car`
+            [return-type-mismatch] 34: Return type mismatch: expected `Car`, actual `Dog`
+            [type-mismatch] 36: Initializer type mismatch: expected `Int`, actual `String`
+            [type-mismatch] 39: Assignment type mismatch: expected `String`, actual `Car`
+            [type-mismatch] 45: Assignment type mismatch: expected `Animal`, actual `Car`
+            [type-mismatch] 48: Initializer type mismatch: expected `Int`, actual `String`
+            [type-mismatch] 55: Argument type mismatch: expected `Dog`, actual `Car`"#]],
+    );
+}
+
+#[test]
 fn uses_of_api_that_needs_opt_in() {
     let api = r#"
 //- /app/a/Api.kt

@@ -113,7 +113,10 @@ impl Types<'_> {
     }
 
     /// `kotlin.collections.List` for `MutableList` (and so on).
-    fn read_only_collection(&self, mutable: &ClassType) -> Option<hir_def::ItemLocation> {
+    pub(crate) fn read_only_collection(
+        &self,
+        mutable: &ClassType,
+    ) -> Option<hir_def::ItemLocation> {
         if let Some(known) = self.read_only_collections.borrow().get(&mutable.class) {
             return *known;
         }

@@ -29,6 +29,8 @@ pub(super) struct Argument<'tree> {
     spread: bool,
     /// After the parentheses: always the last parameter.
     trailing: bool,
+    /// The value as written, where a mismatch is shown.
+    written: Option<SyntaxNode<'tree>>,
 }
 
 enum ArgumentValue<'tree> {
@@ -55,6 +57,7 @@ impl Argument<'_> {
             },
             spread: false,
             trailing: false,
+            written: None,
         }
     }
 }
@@ -371,6 +374,7 @@ impl<'db> Inferrer<'db> {
             value: ArgumentValue::Pending(right),
             spread: false,
             trailing: false,
+            written: Some(right),
         }];
         if receiver.is_unknown() {
             self.type_remaining(&mut arguments);
@@ -824,6 +828,9 @@ impl<'db> Inferrer<'db> {
     ) -> Option<Ty> {
         let mut seen: Vec<ItemLocation> = Vec::new();
         let mut arguments_typed = false;
+        // The one candidate of a level its arguments' shape fitted, when
+        // their types didn't.
+        let mut rejected: Option<(Candidate, Vec<usize>)> = None;
         for level in &levels {
             let candidates = self.level_candidates(level, name);
             for candidate in &candidates {
@@ -834,6 +841,7 @@ impl<'db> Inferrer<'db> {
             }
             let shaped: Vec<Shaped> = candidates
                 .into_iter()
+                .filter(|candidate| takes_type_arguments(candidate, type_arguments))
                 .filter_map(|candidate| {
                     let parameter_of = match_arguments(&candidate.signature, arguments)?;
                     Some(Shaped {
@@ -859,6 +867,7 @@ impl<'db> Inferrer<'db> {
                     self.record_labels(&only, arguments);
                     return Some(result);
                 }
+                rejected = Some((only.candidate, only.parameter_of));
                 continue;
             }
             if !arguments_typed {
@@ -898,6 +907,12 @@ impl<'db> Inferrer<'db> {
         }
         let no_shape_fits = !arguments_typed;
         self.type_remaining(arguments);
+        let only_candidate = seen.len() == 1;
+        if let (true, Some((candidate, parameter_of))) = (only_candidate, &rejected)
+            && self.lookup_certainty(name, &site) == Certainty::Certain
+        {
+            self.check_arguments(candidate, parameter_of, arguments);
+        }
         if let Some(name_node) = name_node
             && no_shape_fits
             && self.lookup_certainty(name, &site) == Certainty::Certain
@@ -913,6 +928,32 @@ impl<'db> Inferrer<'db> {
             &Ty::Unknown,
         );
         Some(Ty::Unknown)
+    }
+
+    /// The arguments of the one function a call can mean whose classes
+    /// can't be their parameters' — parameters whose types don't depend on
+    /// the call (no type parameter of the function's or unbound of its
+    /// class's), not `vararg`.
+    fn check_arguments(
+        &mut self,
+        candidate: &Candidate,
+        parameter_of: &[usize],
+        arguments: &[Argument<'_>],
+    ) {
+        for (argument, parameter_index) in arguments.iter().zip(parameter_of) {
+            let parameter = &candidate.signature.parameters[*parameter_index];
+            let (ArgumentValue::Typed { ty, .. }, Some(written)) =
+                (&argument.value, argument.written)
+            else {
+                continue;
+            };
+            let declared = parameter.ty.substitute(&candidate.substitution);
+            let independent = !declared.has_type_parameter();
+            if parameter.vararg || argument.spread || !independent {
+                continue;
+            }
+            self.check_value(super::MismatchSite::Argument, written, ty, &declared);
+        }
     }
 
     fn record_callee(
@@ -1453,6 +1494,7 @@ impl<'db> Inferrer<'db> {
                             value: ArgumentValue::Lambda(lambda),
                             spread: false,
                             trailing: true,
+                            written: Some(lambda),
                         });
                     }
                 }
@@ -1489,6 +1531,7 @@ impl<'db> Inferrer<'db> {
             },
             spread,
             trailing: false,
+            written: Some(value),
         })
     }
 
@@ -1647,6 +1690,16 @@ impl<'db> Inferrer<'db> {
 /// (a `vararg` takes all that follow), named ones by name, a trailing
 /// lambda to the last. `None` when they don't match: too many, an unknown
 /// name, a parameter given twice, or one without a default left out.
+/// Whether a function takes the type arguments written (`f<T>(…)`): as
+/// many as it declares, or none written. Kotlin doesn't call a function
+/// with type arguments it has no parameters for.
+fn takes_type_arguments(candidate: &Candidate, type_arguments: &[Ty]) -> bool {
+    let is_function = matches!(candidate.callable, Callable::Function(_));
+    type_arguments.is_empty()
+        || !is_function
+        || candidate.signature.type_parameters.len() == type_arguments.len()
+}
+
 fn match_arguments(
     signature: &CallableSignature,
     arguments: &[Argument<'_>],

@@ -161,11 +161,7 @@ impl Inferrer<'_> {
             "when_expression" => self.when_expression(node, expected),
             "try_expression" => self.try_expression(node, expected),
             "jump_expression" => {
-                for child in named_children(node) {
-                    if child.kind() != "label" {
-                        self.expression(child, None);
-                    }
-                }
+                self.jump(node);
                 Ty::Nothing { nullable: false }
             }
             "lambda_literal" => self.lambda(node, expected, None),
@@ -880,7 +876,44 @@ impl Inferrer<'_> {
         let target_type = self.assignable(target);
         let is_plain = has_token(node, "=");
         let expected = if is_plain { Some(&target_type) } else { None };
-        self.expression(value, expected);
+        let ty = self.expression(value, expected);
+        let required = is_plain.then(|| self.written_target_type(target)).flatten();
+        if let Some(required) = required {
+            self.check_value(super::MismatchSite::Assignment, value, &ty, &required);
+        }
+    }
+
+    /// The type an assignment's target writes: a local or property
+    /// declared with one. One inferred from an initializer isn't judged
+    /// (a branch's common type here may not be the compiler's), nor is a
+    /// smart cast.
+    fn written_target_type(&self, target: SyntaxNode<'_>) -> Option<Ty> {
+        let children: Vec<SyntaxNode<'_>> = named_children(target).collect();
+        let name = match children[..] {
+            [only] if only.kind() == "simple_identifier" => only,
+            [_, suffix] if suffix.kind() == "navigation_suffix" => {
+                named_children(suffix).find(|child| child.kind() == "simple_identifier")?
+            }
+            _ => return None,
+        };
+        match self.recorded_at(name)?.reference {
+            Reference::Local(local) => {
+                let declared = self.local_declaration_writes_type(local);
+                declared.then(|| self.local_declared_type(local))
+            }
+            Reference::Declaration(location) => {
+                let tree = hir_def::item_tree(self.db, location.container);
+                let written = matches!(
+                    &tree.item(location.item).signature,
+                    hir_def::item_tree::Signature::Property {
+                        type_ref: Some(_),
+                        ..
+                    }
+                );
+                written.then(|| self.types.property_type(location))
+            }
+            _ => None,
+        }
     }
 
     /// The left side of an assignment: a name, `receiver.name`, or
@@ -1441,10 +1474,13 @@ impl Inferrer<'_> {
             .as_ref()
             .map(|function| function.result.clone());
         let body = named_children(node).find(|child| child.kind() == "statements");
+        self.return_targets
+            .push(super::declarations::ReturnTarget::Lambda);
         let body_type = match body {
             Some(body) => self.lambda_body(body, expected_result.as_ref()),
             None => self.types.builtin("Unit"),
         };
+        self.return_targets.pop();
         let returns_unit = expected_result
             .as_ref()
             .is_some_and(|result| self.is_unit(result));
@@ -1511,6 +1547,34 @@ impl Inferrer<'_> {
 
     fn is_unit(&self, ty: &Ty) -> bool {
         matches!((ty, self.types.builtin("Unit")), (Ty::Class(class), Ty::Class(unit)) if class.class == unit.class)
+    }
+
+    /// `return x`, `throw e`, `break`, `continue`: `x` is checked against
+    /// what a plain `return` returns from, when that's a function writing
+    /// its type.
+    fn jump(&mut self, node: SyntaxNode<'_>) {
+        let is_plain_return =
+            has_token(node, "return") && !named_children(node).any(|child| child.kind() == "label");
+        let expected = match self.return_targets.last() {
+            Some(super::declarations::ReturnTarget::Function(Some(declared)))
+                if is_plain_return =>
+            {
+                Some(declared.clone())
+            }
+            _ => None,
+        };
+        for child in named_children(node) {
+            if child.kind() == "label" {
+                continue;
+            }
+            // Inferred as before, without the declared type: generic
+            // inference here would bind from it alone (`fold(…)` to a
+            // `Set` where Kotlin weighs the initial `mutableSetOf()` too).
+            let ty = self.expression(child, None);
+            if let Some(expected) = &expected {
+                self.check_value(super::MismatchSite::Return, child, &ty, expected);
+            }
+        }
     }
 
     fn anonymous_function(&mut self, node: SyntaxNode<'_>) -> Ty {

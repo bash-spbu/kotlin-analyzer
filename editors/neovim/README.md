@@ -84,7 +84,8 @@ Diagnostics checks: `syntax`, `unresolved-reference`, `missing-import`,
 `useless-elvis`, `senseless-comparison`, `unused-variable`, `can-be-val`,
 `deprecation`, `deprecation-error`, `opt-in-usage`, `opt-in-usage-error`,
 `useless-cast`, `cast-never-succeeds`, `unchecked-cast`, `useless-is-check`,
-`redundant-else-in-when`, `duplicate-branch-condition`.
+`redundant-else-in-when`, `duplicate-branch-condition`, `return-type-mismatch`,
+`type-mismatch` (experimental).
 
 Inlay hints are off by default in Neovim; turn them on with
 `vim.lsp.inlay_hint.enable()`.

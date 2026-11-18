@@ -4,8 +4,8 @@
 //! `val`s.
 
 use hir::{
-    DeprecationLevel, KotlinVersion, LocalFinding, NonExhaustiveWhen, NullCheckKind, OptInLevel,
-    RootDatabase, SourceFile, TypeOperationKind, WhenFinding,
+    DeprecationLevel, KotlinVersion, LocalFinding, MismatchSite, NonExhaustiveWhen, NullCheckKind,
+    OptInLevel, RootDatabase, SourceFile, TypeOperationKind, WhenFinding,
 };
 use syntax::{Parse, TextRange, has_token};
 
@@ -69,6 +69,25 @@ pub(super) fn diagnostics(
     found.extend(local_findings(db, file, config));
     found.extend(deprecations(db, file, config));
     found.extend(opt_ins(db, file, config));
+    for mismatch in inference.type_mismatches() {
+        let (check, what) = match mismatch.site {
+            MismatchSite::Return => (Check::ReturnTypeMismatch, "Return"),
+            MismatchSite::Initializer => (Check::TypeMismatch, "Initializer"),
+            MismatchSite::Assignment => (Check::TypeMismatch, "Assignment"),
+            MismatchSite::Argument => (Check::TypeMismatch, "Argument"),
+        };
+        if config.runs(check) {
+            let expected = hir::display_type(db, &mismatch.expected);
+            let actual = hir::display_type(db, &mismatch.actual);
+            found.push(Diagnostic {
+                check,
+                severity: check.severity(),
+                range: mismatch.range,
+                message: format!("{what} type mismatch: expected `{expected}`, actual `{actual}`"),
+                fixes: Vec::new(),
+            });
+        }
+    }
     found.extend(type_operations(db, file, config));
     found.extend(when_findings(db, file, config));
     found

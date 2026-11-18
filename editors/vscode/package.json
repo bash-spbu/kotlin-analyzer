@@ -129,7 +129,9 @@
               "unchecked-cast",
               "useless-is-check",
               "redundant-else-in-when",
-              "duplicate-branch-condition"
+              "duplicate-branch-condition",
+              "return-type-mismatch",
+              "type-mismatch"
             ]
           },
           "markdownDescription": "Checks that don't run."

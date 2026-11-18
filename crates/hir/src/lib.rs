@@ -33,9 +33,9 @@ pub use hir_def::{
 };
 pub use hir_ty::deprecation::{DeprecatedUse, deprecated_uses};
 pub use hir_ty::infer::{
-    ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
-    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName,
-    TypeOperationFinding, TypeOperationKind, UnresolvedName, UnsafeCall, WhenFinding,
+    ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, MismatchSite,
+    NameSite, NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName,
+    TypeMismatch, TypeOperationFinding, TypeOperationKind, UnresolvedName, UnsafeCall, WhenFinding,
     declaration_type, infer_file,
 };
 pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};

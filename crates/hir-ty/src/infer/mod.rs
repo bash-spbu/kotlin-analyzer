@@ -25,6 +25,7 @@ mod local_usage;
 mod member_scope;
 mod narrowing;
 mod reassociation;
+mod type_mismatches;
 mod type_operations;
 mod when_branches;
 
@@ -218,6 +219,30 @@ pub enum TypeOperationKind {
     UselessIsCheck { result: bool },
 }
 
+/// A value whose class can't be the one where it goes requires.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeMismatch {
+    pub site: MismatchSite,
+    /// The value — narrowed to the member name of a call or property
+    /// chain.
+    pub range: TextRange,
+    pub expected: Ty,
+    pub actual: Ty,
+}
+
+/// Where a value goes that requires a type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MismatchSite {
+    /// `return x`, `fun f(): T = x`.
+    Return,
+    /// `val x: T = value`, and a parameter's default value.
+    Initializer,
+    /// `x = value` to a `var` that writes its type.
+    Assignment,
+    /// `f(value)`, the only function the call can mean.
+    Argument,
+}
+
 /// What a `when` with a subject has twice or needlessly.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum WhenFinding {
@@ -258,6 +283,8 @@ pub struct InferenceResult {
     type_operations: FxHashMap<u32, Option<TypeOperationFinding>>,
     /// By the start of the `when`; a lambda inferred again overwrites them.
     when_findings: FxHashMap<u32, Vec<WhenFinding>>,
+    /// By the start of the value; `None` once examined and fine.
+    type_mismatches: FxHashMap<u32, Option<TypeMismatch>>,
 }
 
 impl InferenceResult {
@@ -305,6 +332,14 @@ impl InferenceResult {
 
     pub fn redundant_null_checks(&self) -> &[RedundantNullCheck] {
         &self.redundant_null_checks
+    }
+
+    /// Values whose class can't be the one required where they go, in
+    /// text order.
+    pub fn type_mismatches(&self) -> Vec<&TypeMismatch> {
+        let mut found: Vec<&TypeMismatch> = self.type_mismatches.values().flatten().collect();
+        found.sort_by_key(|mismatch| mismatch.range.start);
+        found
     }
 
     /// What `when`s have twice or needlessly, in text order.

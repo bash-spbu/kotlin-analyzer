@@ -92,6 +92,18 @@ pub(crate) struct Inferrer<'db> {
     uncertain_scopes: u32,
     /// For completion: the position whose scope to capture.
     pub(super) probe: Option<super::completion::Probe>,
+    /// What a plain `return` returns from, innermost last.
+    pub(super) return_targets: Vec<ReturnTarget>,
+}
+
+/// What a plain `return` (no label) inside it returns from.
+#[derive(Clone)]
+pub(super) enum ReturnTarget {
+    /// A function or anonymous function, with the type it writes.
+    Function(Option<Ty>),
+    /// A lambda: a `return` in it leaves the function around it (an inline
+    /// lambda's) — whether it may isn't modelled.
+    Lambda,
 }
 
 impl<'db> Inferrer<'db> {
@@ -120,6 +132,7 @@ impl<'db> Inferrer<'db> {
             // A script's implicit receivers (Gradle's DSL) aren't modelled.
             uncertain_scopes: u32::from(is_script(parse)),
             probe: None,
+            return_targets: Vec::new(),
         }
     }
 
@@ -263,6 +276,14 @@ impl<'db> Inferrer<'db> {
 
     pub(super) fn record_unsafe_call(&mut self, call: UnsafeCall) {
         self.result.unsafe_calls.push(call);
+    }
+
+    pub(super) fn record_type_mismatch(
+        &mut self,
+        start: u32,
+        mismatch: Option<super::TypeMismatch>,
+    ) {
+        self.result.type_mismatches.insert(start, mismatch);
     }
 
     pub(super) fn record_when_findings(&mut self, start: u32, findings: Vec<super::WhenFinding>) {
@@ -475,6 +496,51 @@ impl<'db> Inferrer<'db> {
 
     /// A local's type here: its declared or inferred type, or what a smart
     /// cast in force narrowed it to.
+    /// What a `vararg` parameter is in its function: an `IntArray` for
+    /// `vararg Int` (a primitive's own array), else an `Array<T>`.
+    fn vararg_array(&self, element: &Ty) -> Ty {
+        const PRIMITIVES: [&str; 8] = [
+            "Int", "Long", "Short", "Byte", "Char", "Boolean", "Float", "Double",
+        ];
+        let primitive = PRIMITIVES.into_iter().find(|name| {
+            matches!(
+                (self.types.builtin(name), element),
+                (Ty::Class(primitive), Ty::Class(class))
+                    if primitive.class == class.class && class.nullability == Nullability::NotNull
+            )
+        });
+        match primitive {
+            Some(name) => self.types.builtin(&format!("{name}Array")),
+            None => {
+                crate::lower::builtin(self.db, self.file, "kotlin", "Array", vec![element.clone()])
+            }
+        }
+    }
+
+    /// A local's type as declared, before any smart cast.
+    pub(super) fn local_declared_type(&self, local: LocalId) -> Ty {
+        self.result.locals[local.0 as usize].ty.clone()
+    }
+
+    /// Whether a local's declaration writes its type: `var count: Int`, a
+    /// constructor's `var` parameter — not `var count = 1`.
+    pub(super) fn local_declaration_writes_type(&self, local: LocalId) -> bool {
+        let declared = &self.result.locals[local.0 as usize];
+        match declared.kind {
+            LocalKind::PropertyParameter => true,
+            LocalKind::Variable => {
+                let range = declared.name_range;
+                self.parse
+                    .root()
+                    .named_descendant_for_byte_range(range.start as usize, range.end as usize)
+                    .and_then(|name| name.parent())
+                    .filter(|declaration| declaration.kind() == "variable_declaration")
+                    .is_some_and(|declaration| self.type_child(declaration).is_some())
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn local_type(&self, local: LocalId) -> Ty {
         self.scopes
             .iter()
@@ -822,13 +888,7 @@ impl<'db> Inferrer<'db> {
                         .map(|written| self.written_type(written))
                         .unwrap_or(Ty::Unknown);
                     let ty = if vararg {
-                        crate::lower::builtin(
-                            self.db,
-                            self.file,
-                            "kotlin",
-                            "Array",
-                            vec![written.clone()],
-                        )
+                        self.vararg_array(&written)
                     } else {
                         written.clone()
                     };
@@ -844,7 +904,8 @@ impl<'db> Inferrer<'db> {
             }
         }
         for (default, expected) in defaults {
-            self.expression(default, Some(&expected));
+            let ty = self.expression(default, Some(&expected));
+            self.check_value(super::MismatchSite::Initializer, default, &ty, &expected);
         }
     }
 
@@ -903,10 +964,13 @@ impl<'db> Inferrer<'db> {
             }
         }
         let body = named_children(node).find(|child| child.kind() == "function_body");
+        self.return_targets
+            .push(ReturnTarget::Function(return_type.clone()));
         let result = match body {
             Some(body) => self.function_body(body, return_type.as_ref()),
             None => return_type.clone().unwrap_or(Ty::Unknown),
         };
+        self.return_targets.pop();
         self.pop_scope();
         if pushed_receiver {
             self.pop_receiver();
@@ -925,7 +989,13 @@ impl<'db> Inferrer<'db> {
             return self.types.builtin("Unit");
         }
         match content {
-            Some(expression) => self.expression(expression, expected),
+            Some(expression) => {
+                let ty = self.expression(expression, expected);
+                if let Some(expected) = expected {
+                    self.check_value(super::MismatchSite::Return, expression, &ty, expected);
+                }
+                ty
+            }
             None => Ty::Unknown,
         }
     }
@@ -1026,7 +1096,13 @@ impl<'db> Inferrer<'db> {
                 }
                 "getter" | "setter" | "modifiers" | "type_constraints" | "binding_pattern_kind" => {
                 }
-                _ if after_variable => return Some(self.expression(child, written)),
+                _ if after_variable => {
+                    let ty = self.expression(child, written);
+                    if let Some(written) = written {
+                        self.check_value(super::MismatchSite::Initializer, child, &ty, written);
+                    }
+                    return Some(ty);
+                }
                 _ => {}
             }
         }

@@ -419,6 +419,7 @@ impl Inferrer<'_> {
                 !is_reference
                     && last_name(operand).is_some_and(|name| self.recorded_at(name).is_some())
             }
+            "boolean_literal" | "character_literal" => true,
             "string_literal" => named_children(operand).all(|part| {
                 !matches!(
                     part.kind(),

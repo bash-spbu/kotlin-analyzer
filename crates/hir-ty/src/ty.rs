@@ -92,6 +92,24 @@ impl Ty {
         }
     }
 
+    /// Whether a type parameter appears anywhere in the type.
+    pub fn has_type_parameter(&self) -> bool {
+        match self {
+            Ty::TypeParameter { .. } => true,
+            Ty::Class(class) => class.arguments.iter().any(Ty::has_type_parameter),
+            Ty::Function(function) => {
+                let in_receiver = function
+                    .receiver
+                    .as_ref()
+                    .is_some_and(Ty::has_type_parameter);
+                in_receiver
+                    || function.parameters.iter().any(Ty::has_type_parameter)
+                    || function.result.has_type_parameter()
+            }
+            Ty::Nothing { .. } | Ty::Unknown => false,
+        }
+    }
+
     /// Whether any part of the type is unknown (`Pair<String, *>`).
     pub fn has_unknown_part(&self) -> bool {
         match self {
