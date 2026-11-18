@@ -27,6 +27,7 @@ pub(super) fn diagnostics(
             };
             found.push(Diagnostic {
                 check: Check::ArgumentMismatch,
+                severity: Check::ArgumentMismatch.severity(),
                 range: mismatch.range,
                 message,
                 fixes: Vec::new(),
@@ -38,6 +39,7 @@ pub(super) fn diagnostics(
             let receiver = hir::display_type(db, &call.receiver);
             found.push(Diagnostic {
                 check: Check::UnsafeCall,
+                severity: Check::UnsafeCall.severity(),
                 range: call.range,
                 message: format!("Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `{receiver}`"),
                 fixes: Vec::new(),
@@ -48,6 +50,7 @@ pub(super) fn diagnostics(
         for when in inference.non_exhaustive_whens() {
             found.push(Diagnostic {
                 check: Check::NonExhaustiveWhen,
+                severity: Check::NonExhaustiveWhen.severity(),
                 range: when.range,
                 message: format!(
                     "`when` must be exhaustive: add the missing {} or an `else` branch",
@@ -98,6 +101,7 @@ fn deprecations(
         }
         found.push(Diagnostic {
             check,
+            severity: check.severity(),
             range: deprecated.range,
             message,
             fixes: Vec::new(),
@@ -143,6 +147,7 @@ fn null_checks(db: &RootDatabase, file: SourceFile, config: &DiagnosticsConfig) 
         if config.runs(kind) {
             found.push(Diagnostic {
                 check: kind,
+                severity: kind.severity(),
                 range: check.range,
                 message,
                 fixes: fix.into_iter().collect(),
@@ -166,6 +171,7 @@ fn local_findings(
                 let written = &text[name.start as usize..name.end as usize];
                 found.push(Diagnostic {
                     check: Check::UnusedVariable,
+                    severity: Check::UnusedVariable.severity(),
                     range: name,
                     message: format!("Variable `{written}` is never used"),
                     fixes: Vec::new(),
@@ -174,6 +180,7 @@ fn local_findings(
             LocalFinding::NeverReassigned { keyword } if config.runs(Check::CanBeVal) => {
                 found.push(Diagnostic {
                     check: Check::CanBeVal,
+                    severity: Check::CanBeVal.severity(),
                     range: keyword,
                     message: "Variable is never assigned again: it can be a `val`".to_owned(),
                     fixes: vec![replace("Change to `val`", keyword, "val")],

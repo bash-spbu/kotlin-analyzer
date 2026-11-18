@@ -203,6 +203,7 @@ fn missing_name(
         }
         return Some(Diagnostic {
             check: Check::UnresolvedReference,
+            severity: Check::UnresolvedReference.severity(),
             range,
             message: format!("Unresolved reference `{name}`"),
             fixes: Vec::new(),
@@ -227,6 +228,7 @@ fn missing_name(
     };
     Some(Diagnostic {
         check: Check::MissingImport,
+        severity: Check::MissingImport.severity(),
         range,
         message,
         fixes,
@@ -417,6 +419,7 @@ fn unused_imports(parse: &Parse) -> Vec<Diagnostic> {
         let end = line_end(text, import.end_byte());
         unused.push(Diagnostic {
             check: Check::UnusedImport,
+            severity: Check::UnusedImport.severity(),
             range: TextRange::of(import),
             message: format!("Unused import `{name}`"),
             fixes: vec![Fix {

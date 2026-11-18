@@ -701,6 +701,89 @@ fun use(clock: Clock) {
 }
 
 #[test]
+fn deprecated_since_kotlin_follows_the_api_version_and_werror_makes_warnings_errors() {
+    let Some(jar) = newest_cached_stdlib() else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    // `Iterable.sumBy`: `@DeprecatedSinceKotlin(warningSince = "1.5")`.
+    let diagnostics = |header: &str| {
+        let text = format!(
+            "\n//- /app/b/Use.kt {header}\npackage b\nfun total(numbers: List<Int>, name: String) = numbers.sumBy {{ it }} + name?.length!!\n"
+        );
+        let mut fixture = Fixture::parse(&text);
+        let source = base_db::LibrarySource {
+            archive: jar.clone(),
+            kind: base_db::ArchiveKind::Jar,
+            sources: None,
+        };
+        let indexed = hir::index_library(&source).unwrap();
+        fixture
+            .database
+            .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+        let file = fixture.file("/app/b/Use.kt");
+        let config = crate::DiagnosticsConfig {
+            only: vec![crate::Check::Deprecation, crate::Check::UnnecessarySafeCall],
+            ..crate::DiagnosticsConfig::default()
+        };
+        analysis(&fixture)
+            .diagnostics(file, &config)
+            .unwrap()
+            .iter()
+            .map(|diagnostic| format!("{:?} {:?}", diagnostic.check, diagnostic.severity))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // Before 1.5 it isn't deprecated; from it on, it is; unknown, nothing.
+    assert_eq!(diagnostics("api=1.4"), "UnnecessarySafeCall Lint");
+    assert_eq!(
+        diagnostics("api=2.0"),
+        "Deprecation Lint, UnnecessarySafeCall Lint"
+    );
+    assert_eq!(diagnostics(""), "UnnecessarySafeCall Lint");
+    // With warnings as errors, both are errors.
+    assert_eq!(
+        diagnostics("api=2.0 werror"),
+        "Deprecation Error, UnnecessarySafeCall Error"
+    );
+}
+
+/// The newest `kotlin-stdlib` JAR in the Gradle cache.
+fn newest_cached_stdlib() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let root = std::path::Path::new(&home)
+        .join(".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib");
+    let mut jars: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .flat_map(|version| {
+            std::fs::read_dir(version.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .flat_map(|hash| {
+            std::fs::read_dir(hash.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            name.ends_with(".jar")
+                && !name.ends_with("-sources.jar")
+                && !name.ends_with("-javadoc.jar")
+        })
+        .collect();
+    jars.sort();
+    jars.pop()
+}
+
+#[test]
 fn unused_locals_and_vars_never_assigned_again() {
     check_diagnostics(
         r#"

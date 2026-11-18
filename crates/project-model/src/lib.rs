@@ -143,6 +143,53 @@ pub struct SourceSet {
     pub dependencies: Vec<SourceSetId>,
     pub libraries: Vec<Library>,
     pub classpath: Classpath,
+    /// What its Kotlin compilation tells the compiler; the defaults when
+    /// the build didn't say.
+    pub compiler: CompilerOptions,
+}
+
+/// What the Kotlin compiler is told that changes what it reports.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub struct CompilerOptions {
+    /// `allWarningsAsErrors`, `-Werror`: a warning fails the build.
+    pub warnings_as_errors: bool,
+    /// `suppressWarnings`, `-nowarn`: no warning is reported.
+    pub suppress_warnings: bool,
+    /// Warnings by the compiler's name: `-Xsuppress-warning=NAME`,
+    /// `-Xwarning-level=NAME:error`.
+    pub warning_levels: Vec<(String, WarningLevel)>,
+    /// `optIn`, `-opt-in=…`: the requirement markers opted into.
+    pub opt_in: Vec<String>,
+    /// The Kotlin API version (`2.2`) the code compiles against.
+    pub api_version: Option<String>,
+    /// The JDK release the code compiles against: the toolchain's or
+    /// `-Xjdk-release`'s.
+    pub jdk_release: Option<u32>,
+}
+
+impl CompilerOptions {
+    /// What the options make the compiler warning `name`: kept as a
+    /// warning, an error, or not reported.
+    pub fn warning_level(&self, name: &str) -> WarningLevel {
+        let own = self
+            .warning_levels
+            .iter()
+            .find(|(named, _)| named == name)
+            .map(|(_, level)| *level);
+        match own {
+            Some(level) => level,
+            None if self.suppress_warnings => WarningLevel::Disabled,
+            None if self.warnings_as_errors => WarningLevel::Error,
+            None => WarningLevel::Warning,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum WarningLevel {
+    Warning,
+    Error,
+    Disabled,
 }
 
 /// A classpath entry of a source set.

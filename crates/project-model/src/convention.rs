@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    Classpath, ModelOrigin, Module, ModuleId, Platform, ProjectModel, SourceSet, SourceSetId,
-    SourceSetKind,
+    Classpath, CompilerOptions, ModelOrigin, Module, ModuleId, Platform, ProjectModel, SourceSet,
+    SourceSetId, SourceSetKind,
 };
 
 /// Directories that never hold workspace sources (unless a model lists one
@@ -57,6 +57,7 @@ pub(crate) fn discover(root: &Path) -> ProjectModel {
                 dependencies: Vec::new(),
                 libraries: Vec::new(),
                 classpath: Classpath::Complete,
+                compiler: CompilerOptions::default(),
             });
         }
         modules.push(Module {

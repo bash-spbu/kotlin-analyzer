@@ -33,6 +33,7 @@ pub(super) fn missing_package(
         .unwrap_or(start);
     Some(Diagnostic {
         check: Check::MissingPackage,
+        severity: Check::MissingPackage.severity(),
         range: TextRange::new(start, start),
         message: format!("No `package` line; the directory implies `package {expected}`"),
         fixes: vec![Fix {

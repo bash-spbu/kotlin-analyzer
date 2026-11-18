@@ -141,6 +141,20 @@ impl Check {
         }
     }
 
+    /// The compiler's own name for the warning, when the compiler reports
+    /// it — not an IDE-only check: its level follows the source set's
+    /// compiler options (`-Werror`, `-nowarn`, `-Xwarning-level`).
+    pub fn compiler_warning(self) -> Option<&'static str> {
+        match self {
+            Check::UnnecessaryNotNullAssertion => Some("UNNECESSARY_NOT_NULL_ASSERTION"),
+            Check::UnnecessarySafeCall => Some("UNNECESSARY_SAFE_CALL"),
+            Check::UselessElvis => Some("USELESS_ELVIS"),
+            Check::SenselessComparison => Some("SENSELESS_COMPARISON"),
+            Check::Deprecation => Some("DEPRECATION"),
+            _ => None,
+        }
+    }
+
     pub fn stability(self) -> Stability {
         match self {
             Check::UnresolvedReference => Stability::Experimental,
@@ -172,6 +186,9 @@ impl DiagnosticsConfig {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Diagnostic {
     pub check: Check,
+    /// The check's, unless the compiler options change it (a warning the
+    /// build makes an error).
+    pub severity: Severity,
     pub range: TextRange,
     pub message: String,
     pub fixes: Vec<Fix>,
@@ -203,6 +220,7 @@ pub(crate) fn diagnostics(
     if config.runs(Check::Syntax) {
         found.extend(parse.errors().into_iter().map(|error| Diagnostic {
             check: Check::Syntax,
+            severity: Check::Syntax.severity(),
             range: error.range,
             message: error.message,
             fixes: Vec::new(),
@@ -219,6 +237,20 @@ pub(crate) fn diagnostics(
     }
     let suppressions = suppression::suppressions(&parse);
     found.retain(|diagnostic| !suppressions.suppress(diagnostic));
+    let options = hir::compiler_options(db, source);
+    found.retain_mut(|diagnostic| {
+        let Some(name) = diagnostic.check.compiler_warning() else {
+            return true;
+        };
+        match options.warning_level(name) {
+            hir::WarningLevel::Warning => true,
+            hir::WarningLevel::Error => {
+                diagnostic.severity = Severity::Error;
+                true
+            }
+            hir::WarningLevel::Disabled => false,
+        }
+    });
     found.sort_by_key(|diagnostic| (diagnostic.range.start, diagnostic.check));
     found
 }

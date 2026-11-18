@@ -16,6 +16,7 @@
 
 mod class_file;
 mod java;
+mod jvm_descriptor;
 mod kotlin;
 mod protobuf;
 mod signature;

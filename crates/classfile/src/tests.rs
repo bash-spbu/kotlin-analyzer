@@ -278,6 +278,43 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
             .and_then(|since| since.warning_since.as_deref()),
         Some("1.5")
     );
+    // Overloads are told apart by the descriptor their types compile to.
+    let int_array_sum_by = top_level(&contents, "kotlin.collections", "sumBy")
+        .into_iter()
+        .find(|member| {
+            member
+                .receiver
+                .as_ref()
+                .is_some_and(|receiver| render(receiver) == "kotlin.IntArray")
+        })
+        .expect("IntArray.sumBy");
+    assert!(int_array_sum_by.deprecation.is_some());
+    let to_upper_case: Vec<(String, Option<String>)> =
+        top_level(&contents, "kotlin.text", "toUpperCase")
+            .into_iter()
+            .filter(|member| {
+                member
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|receiver| render(receiver) == "kotlin.String")
+            })
+            .map(|member| {
+                (
+                    signature(member),
+                    member
+                        .deprecation
+                        .as_ref()
+                        .and_then(|deprecation| deprecation.message.as_deref().map(str::to_owned)),
+                )
+            })
+            .collect();
+    assert!(
+        to_upper_case.contains(&(
+            "kotlin.String.toUpperCase(): kotlin.String".to_owned(),
+            Some("Use uppercase() instead.".to_owned())
+        )),
+        "{to_upper_case:?}"
+    );
     let sum_of = top_level(&contents, "kotlin.collections", "sumOf");
     assert!(sum_of.iter().all(|member| member.deprecation.is_none()));
     let end_exclusive = class(&contents, "kotlin.ranges.IntRange")

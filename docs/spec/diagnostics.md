@@ -37,6 +37,16 @@ and `SENSELESS_COMPARISON` come from the compiler (and fail an
 build doesn't. Where we're not sure we report less than Kotlin does, never
 more.
 
+### Compiler options
+
+A check the Kotlin compiler reports itself (`UNNECESSARY_NOT_NULL_ASSERTION`,
+`UNNECESSARY_SAFE_CALL`, `USELESS_ELVIS`, `SENSELESS_COMPARISON`,
+`DEPRECATION`) follows the source set's compiler options (project-model.md):
+an error where the build makes warnings errors (`allWarningsAsErrors`,
+`-Werror`, `-Xwarning-level=NAME:error`), not reported where it suppresses
+them (`-nowarn`, `-Xsuppress-warning=NAME`). IntelliJ-only checks
+(`unused-variable`, `can-be-val`) don't.
+
 ### Deprecation
 
 A declaration is deprecated by its `@Deprecated` — Kotlin's (with its
@@ -55,8 +65,9 @@ not an assignment's target, not a `name =` label. It stays silent:
 - for a function or constructor with an overload of another deprecation:
   overloads are chosen without every argument type judged, so the choice
   says nothing (`format("x")` beside a deprecated `format(String)`);
-- for `@DeprecatedSinceKotlin`, whose level depends on the Kotlin API
-  version;
+- for `@DeprecatedSinceKotlin` when the source set's Kotlin API version
+  isn't known: its level is hidden, an error or a warning from the
+  versions it names on (`warningSince = "1.5"`), none before;
 - for the JDK's declarations when the model doesn't declare the release
   the code compiles against: the JDK the build runs on may deprecate what
   the module's toolchain doesn't (`URL(String)` in 20, for code built with

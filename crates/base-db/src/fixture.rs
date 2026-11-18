@@ -13,7 +13,8 @@
 //! Each `//- /path` line starts a file. `module=:name` (default `:app`) and
 //! `set=name` (default `main`) say which source set it belongs to;
 //! `classpath=partial` marks the source set's classpath as only partly
-//! resolved by the build;
+//! resolved by the build; `werror` compiles it with warnings as errors,
+//! `api=2.0` against that Kotlin API version;
 //! `deps=:a,:b/test` lists the source sets it sees (`/main` by default). A
 //! single `$0` marks the cursor; it is removed from the text.
 
@@ -21,8 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use project_model::{
-    Classpath, ModelOrigin, Module, ModuleId, Platform, ProjectModel, SourceSet as ModelSourceSet,
-    SourceSetId, SourceSetKind,
+    Classpath, CompilerOptions, ModelOrigin, Module, ModuleId, Platform, ProjectModel,
+    SourceSet as ModelSourceSet, SourceSetId, SourceSetKind,
 };
 use syntax::Language;
 use vfs::{FileId, Vfs};
@@ -45,6 +46,7 @@ struct FixtureFile {
     set: String,
     dependencies: Vec<(String, String)>,
     classpath: Classpath,
+    compiler: CompilerOptions,
     text: String,
 }
 
@@ -131,6 +133,7 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
             set: "main".to_owned(),
             dependencies: Vec::new(),
             classpath: Classpath::Complete,
+            compiler: CompilerOptions::default(),
             text: String::new(),
         };
         for word in words {
@@ -140,6 +143,10 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
                 file.set = set.to_owned();
             } else if word == "classpath=partial" {
                 file.classpath = Classpath::Partial;
+            } else if word == "werror" {
+                file.compiler.warnings_as_errors = true;
+            } else if let Some(version) = word.strip_prefix("api=") {
+                file.compiler.api_version = Some(version.to_owned());
             } else if let Some(dependencies) = word.strip_prefix("deps=") {
                 file.dependencies = dependencies
                     .split(',')
@@ -195,14 +202,19 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
                     dependencies: Vec::new(),
                     libraries: Vec::new(),
                     classpath: file.classpath,
+                    compiler: CompilerOptions::default(),
                 });
                 modules[module_index].source_sets.push(id);
                 id
             }
         };
-        // Any of a source set's files may say its classpath is partial.
+        // Any of a source set's files may say its classpath is partial, or
+        // give its compiler options.
         if file.classpath == Classpath::Partial {
             source_sets[id.0 as usize].classpath = Classpath::Partial;
+        }
+        if file.compiler != CompilerOptions::default() {
+            source_sets[id.0 as usize].compiler = file.compiler.clone();
         }
         source_sets[id.0 as usize]
             .directories

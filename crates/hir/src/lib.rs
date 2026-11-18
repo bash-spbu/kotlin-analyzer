@@ -2,8 +2,9 @@
 //! declaration is and where — one API in front of `hir-def` and `hir-ty`, so features never depend on how the layers below are split.
 
 pub use base_db::{
-    ArchiveKind, FileChange, FileId, IndexedLibrary, JdkRelease, Language, LibrarySource,
-    ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId, parse, salsa,
+    ArchiveKind, CompilerOptions, FileChange, FileId, IndexedLibrary, JdkRelease, Language,
+    LibrarySource, ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId,
+    WarningLevel, parse, salsa,
 };
 pub use hir_def::def_map::{
     classpath_complete, importable_names, package_exists, package_names, package_prefix_exists,
@@ -43,6 +44,20 @@ pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};
 
 /// The type a type reference is written as, in Kotlin syntax.
+/// What the Kotlin compiler is told for `file`'s source set; the
+/// defaults for a file outside any.
+pub fn compiler_options(db: &dyn SourceDatabase, file: SourceFile) -> CompilerOptions {
+    match file.source_set(db) {
+        Some(source_set) => db
+            .workspace()
+            .model(db)
+            .source_set(source_set)
+            .compiler
+            .clone(),
+        None => CompilerOptions::default(),
+    }
+}
+
 pub fn type_ref_text(type_ref: &TypeRef) -> String {
     hir_def::item_tree::type_text(type_ref)
 }

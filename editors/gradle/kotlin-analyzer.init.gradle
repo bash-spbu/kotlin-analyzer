@@ -140,6 +140,89 @@ def addDependency = { List dependencies, String module, String sourceSet ->
 
 // --- JVM: the `java` plugin's source sets -----------------------------------
 
+// --- Compiler options ----------------------------------------------------------
+
+// What a Kotlin compile task tells the compiler that changes what it reports:
+// warnings as errors or suppressed (all, or by name), opt-ins, the API
+// version and the JDK release. A field it can't read is left out.
+def compilerOptionsOf = { project, task ->
+    if (task == null) return null
+    def options = [warningsAsErrors: false, suppressWarnings: false, warningLevels: [:], optIn: []]
+    def free = []
+    try {
+        def compilerOptions = task.compilerOptions
+        options.warningsAsErrors = compilerOptions.allWarningsAsErrors.getOrElse(false)
+        options.suppressWarnings = compilerOptions.suppressWarnings.getOrElse(false)
+        options.optIn = (compilerOptions.optIn.getOrElse([]) as List).collect { it.toString() }
+        def apiVersion = compilerOptions.apiVersion.getOrNull()
+        if (apiVersion != null) options.apiVersion = apiVersion.version
+        free = (compilerOptions.freeCompilerArgs.getOrElse([]) as List).collect { it.toString() }
+    } catch (ignored) {
+    }
+    try {
+        def javaVersion = task.kotlinJavaToolchain.javaVersion.getOrNull()
+        if (javaVersion != null) options.jdkRelease = Integer.parseInt(javaVersion.majorVersion)
+    } catch (ignored) {
+    }
+    free.eachWithIndex { argument, index ->
+        if (argument == "-Werror") options.warningsAsErrors = true
+        else if (argument == "-nowarn") options.suppressWarnings = true
+        else if (argument.startsWith("-Xsuppress-warning=")) options.warningLevels[argument - "-Xsuppress-warning="] = "disabled"
+        else if (argument.startsWith("-Xwarning-level=")) {
+            def parts = (argument - "-Xwarning-level=").split(":")
+            if (parts.length == 2) options.warningLevels[parts[0]] = parts[1]
+        }
+        else if (argument.startsWith("-opt-in=")) options.optIn << (argument - "-opt-in=")
+        else if (argument.startsWith("-Xopt-in=")) options.optIn << (argument - "-Xopt-in=")
+        else if (argument.startsWith("-Xjdk-release=")) {
+            def release = (argument - "-Xjdk-release=") - "1."
+            if (release.isInteger()) options.jdkRelease = release.toInteger()
+        }
+        else if (argument == "-api-version" && index + 1 < free.size()) options.apiVersion = free[index + 1]
+    }
+    if (options.apiVersion == null) {
+        // Unset, it's the compiler's own version: the plugin's standard library.
+        try {
+            def version = project.extensions.getByName("kotlin").coreLibrariesVersion.toString()
+            def numbers = version.split(/[.\-]/)
+            if (numbers.length >= 2) options.apiVersion = "${numbers[0]}.${numbers[1]}"
+        } catch (ignored) {
+        }
+    }
+    return options
+}
+
+// The options of every compilation a source set is part of, as one: a
+// warning is an error if any compilation makes it one; suppressed, opted
+// into or of one level only if all agree; a version only if all have it.
+def mergeCompilerOptions = { List all ->
+    def known = all.findAll { it != null }
+    if (known.isEmpty()) return null
+    def merged = [
+        warningsAsErrors: known.any { it.warningsAsErrors },
+        suppressWarnings: known.every { it.suppressWarnings },
+        warningLevels: known[0].warningLevels.findAll { name, level ->
+            known.every { it.warningLevels[name] == level }
+        },
+        optIn: known[0].optIn.findAll { name -> known.every { it.optIn.contains(name) } },
+    ]
+    def same = { String field ->
+        def values = known.collect { it[field] }.unique()
+        values.size() == 1 && values[0] != null ? values[0] : null
+    }
+    if (same("apiVersion") != null) merged.apiVersion = same("apiVersion")
+    if (same("jdkRelease") != null) merged.jdkRelease = same("jdkRelease")
+    return merged
+}
+
+def kotlinCompileTask = { project, String name ->
+    try {
+        return project.tasks.findByName(name)
+    } catch (ignored) {
+        return null
+    }
+}
+
 def javaSourceSetExport = { project, sourceSet ->
     def directories = new LinkedHashSet<String>()
     sourceSet.java.srcDirs.each { directories << it.absolutePath }
@@ -154,13 +237,14 @@ def javaSourceSetExport = { project, sourceSet ->
         def targets = dependency.fixtures ? ["testFixtures"] : ["main", "commonMain", "jvmMain"]
         targets.each { addDependency(moduleDependencies, dependency.path, it) }
     }
+    def compiler = compilerOptionsOf(project, kotlinCompileTask(project, sourceSet.getCompileTaskName("kotlin")))
     return [
         name: sourceSet.name,
         sourceDirectories: directories.toList(),
         moduleDependencies: moduleDependencies,
         libraries: resolved.libraries,
         classpath: resolved.complete ? "complete" : "partial",
-    ]
+    ] + (compiler != null ? [compilerOptions: compiler] : [:])
 }
 
 // --- Kotlin Multiplatform ----------------------------------------------------
@@ -268,6 +352,14 @@ def multiplatformExport = { project ->
                 projectSourceSets(sourceSet.name).each { addDependency(moduleDependencies, dependency.path, it) }
             }
         }
+        def compiler = mergeCompilerOptions(compilations.collect { compilation ->
+            def task = null
+            try {
+                task = compilation.compileTaskProvider.get()
+            } catch (ignored) {
+            }
+            compilerOptionsOf(project, task)
+        })
         return [
             name: sourceSet.name,
             kind: isTest ? "test" : "main",
@@ -277,7 +369,7 @@ def multiplatformExport = { project ->
             moduleDependencies: moduleDependencies,
             libraries: libraries,
             classpath: complete ? "complete" : "partial",
-        ]
+        ] + (compiler != null ? [compilerOptions: compiler] : [:])
     }
 }
 
@@ -329,6 +421,10 @@ def androidExport = { project ->
             addDependency(moduleDependencies, dependency.path, "commonMain")
             variantSets.each { addDependency(moduleDependencies, dependency.path, it) }
         }
+        // The variant's compile task: `compileDebugKotlin`,
+        // `compileDebugUnitTestKotlin`, `compileDebugAndroidTestKotlin`.
+        def compiled = variant == null ? null : variant.capitalize() + (isUnitTest(name) ? "UnitTest" : (isDeviceTest(name) ? "AndroidTest" : ""))
+        def compiler = compiled == null ? null : compilerOptionsOf(project, kotlinCompileTask(project, "compile${compiled}Kotlin"))
         return [
             name: name,
             kind: kind,
@@ -336,7 +432,7 @@ def androidExport = { project ->
             moduleDependencies: moduleDependencies,
             libraries: classpath.libraries + bootClasspath,
             classpath: classpath.complete == false ? "partial" : "complete",
-        ]
+        ] + (compiler != null ? [compilerOptions: compiler] : [:])
     }
 }
 

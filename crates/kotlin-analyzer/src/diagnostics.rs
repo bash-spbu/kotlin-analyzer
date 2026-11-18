@@ -77,7 +77,7 @@ pub fn command(arguments: &[String]) -> ExitCode {
             durations.push((file, duration));
             for diagnostic in found {
                 *counts.entry(diagnostic.check).or_default() += 1;
-                let severity = diagnostic.check.severity();
+                let severity = diagnostic.severity;
                 failing |= matches!(severity, Severity::Error | Severity::Warning);
                 if printed < options.limit {
                     printed += 1;

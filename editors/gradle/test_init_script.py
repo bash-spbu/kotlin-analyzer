@@ -110,6 +110,18 @@ class MultiplatformExportTest(unittest.TestCase):
         self.assertEqual(self.source_set(":server", "main")["classpath"], "complete")
         self.assertIn("kotlin-stdlib", self.libraries(":server", "main"))
 
+    def test_compiler_options_are_exported_per_source_set(self) -> None:
+        server = self.source_set(":server", "main")["compilerOptions"]
+        self.assertTrue(server["warningsAsErrors"])
+        self.assertIn("kotlin.ExperimentalStdlibApi", server["optIn"])
+        self.assertEqual(server["warningLevels"], {"UNUSED_VARIABLE": "disabled"})
+        # Unset, the API version is the plugin's own: `2.3`, never empty.
+        self.assertRegex(server["apiVersion"], r"^\d+\.\d+$")
+        core = self.source_set(":core", "commonMain")["compilerOptions"]
+        self.assertFalse(core["warningsAsErrors"])
+        self.assertEqual(core["warningLevels"], {})
+        self.assertIn("compilerOptions", self.source_set(":core", "jsMain"))
+
 
 if __name__ == "__main__":
     unittest.main()

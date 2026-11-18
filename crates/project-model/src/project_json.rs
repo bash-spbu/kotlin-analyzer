@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::{
-    Classpath, Jdk, Library, LoadError, ModelOrigin, Module, ModuleId, Platform, ProjectModel,
-    SourceSet, SourceSetId, SourceSetKind,
+    Classpath, CompilerOptions, Jdk, Library, LoadError, ModelOrigin, Module, ModuleId, Platform,
+    ProjectModel, SourceSet, SourceSetId, SourceSetKind, WarningLevel,
 };
 
 #[derive(Deserialize)]
@@ -43,6 +43,43 @@ struct SourceSetEntry {
     module_dependencies: Vec<ModuleDependencyEntry>,
     #[serde(default)]
     libraries: Vec<LibraryEntry>,
+    compiler_options: Option<CompilerOptionsEntry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct CompilerOptionsEntry {
+    warnings_as_errors: bool,
+    suppress_warnings: bool,
+    warning_levels: std::collections::BTreeMap<String, String>,
+    opt_in: Vec<String>,
+    api_version: Option<String>,
+    jdk_release: Option<u32>,
+}
+
+impl CompilerOptionsEntry {
+    fn options(&self) -> CompilerOptions {
+        CompilerOptions {
+            warnings_as_errors: self.warnings_as_errors,
+            suppress_warnings: self.suppress_warnings,
+            warning_levels: self
+                .warning_levels
+                .iter()
+                .filter_map(|(name, level)| {
+                    let level = match level.as_str() {
+                        "error" => WarningLevel::Error,
+                        "warning" => WarningLevel::Warning,
+                        "disabled" => WarningLevel::Disabled,
+                        _ => return None,
+                    };
+                    Some((name.clone(), level))
+                })
+                .collect(),
+            opt_in: self.opt_in.clone(),
+            api_version: self.api_version.clone(),
+            jdk_release: self.jdk_release,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -124,6 +161,11 @@ pub(crate) fn parse(root: &Path, text: &str) -> Result<ProjectModel, LoadError> 
                         sources_jar: library.sources_jar.as_deref().map(absolute),
                     })
                     .collect(),
+                compiler: source_set
+                    .compiler_options
+                    .as_ref()
+                    .map(CompilerOptionsEntry::options)
+                    .unwrap_or_default(),
             });
             pending_dependencies.push((id, &source_set.module_dependencies));
         }
@@ -267,6 +309,42 @@ mod tests {
             Some(Path::new("/m2/a-1-sources.jar"))
         );
         assert_eq!(model.jdk.as_ref().unwrap().release, Some(21));
+    }
+
+    #[test]
+    fn compiler_options_are_read_and_say_what_a_warning_becomes() {
+        let text = r#"{
+          "version": 1,
+          "modules": [
+            { "path": ":app", "directory": "app", "sourceSets": [
+                { "name": "main", "sourceDirectories": ["app/src/main/kotlin"],
+                  "compilerOptions": { "warningsAsErrors": true, "suppressWarnings": false,
+                    "warningLevels": { "DEPRECATION": "warning", "UNUSED_VARIABLE": "disabled", "X": "loud" },
+                    "optIn": ["kotlin.ExperimentalStdlibApi"], "apiVersion": "2.1", "jdkRelease": 17 } },
+                { "name": "test", "sourceDirectories": ["app/src/test/kotlin"],
+                  "compilerOptions": { "suppressWarnings": true } },
+                { "name": "other", "sourceDirectories": ["app/src/other/kotlin"] }
+            ]}
+          ]
+        }"#;
+        let model = parse(Path::new("/work"), text).unwrap();
+        let main = &model.source_sets[0].compiler;
+        assert_eq!(main.api_version.as_deref(), Some("2.1"));
+        assert_eq!(main.jdk_release, Some(17));
+        assert_eq!(main.opt_in, vec!["kotlin.ExperimentalStdlibApi".to_owned()]);
+        // An unknown level is left out.
+        assert_eq!(main.warning_levels.len(), 2);
+        assert_eq!(main.warning_level("USELESS_ELVIS"), WarningLevel::Error);
+        assert_eq!(main.warning_level("DEPRECATION"), WarningLevel::Warning);
+        assert_eq!(
+            main.warning_level("UNUSED_VARIABLE"),
+            WarningLevel::Disabled
+        );
+        let test = &model.source_sets[1].compiler;
+        assert_eq!(test.warning_level("USELESS_ELVIS"), WarningLevel::Disabled);
+        let other = &model.source_sets[2].compiler;
+        assert_eq!(*other, CompilerOptions::default());
+        assert_eq!(other.warning_level("USELESS_ELVIS"), WarningLevel::Warning);
     }
 
     #[test]

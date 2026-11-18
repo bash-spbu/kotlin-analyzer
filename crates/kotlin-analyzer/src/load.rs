@@ -127,7 +127,11 @@ fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
     if !symbols.is_file() {
         return None;
     }
-    let declared = model.jdk.as_ref().and_then(|jdk| jdk.release);
+    let declared = model
+        .jdk
+        .as_ref()
+        .and_then(|jdk| jdk.release)
+        .or_else(|| agreed_jdk_release(model));
     let (release, known) = match declared {
         Some(release) => (release, hir::JdkRelease::Declared),
         None => (java_version(&home)?, hir::JdkRelease::RunningJdk),
@@ -142,6 +146,20 @@ fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
         },
         sources: source_archive.is_file().then_some(source_archive),
     })
+}
+
+/// The JDK release every JVM source set compiles against, when they all
+/// name the same one (their toolchain's or `-Xjdk-release`'s).
+fn agreed_jdk_release(model: &ProjectModel) -> Option<u32> {
+    let mut releases = model
+        .source_sets
+        .iter()
+        .filter(|source_set| source_set.platform == project_model::Platform::Jvm)
+        .map(|source_set| source_set.compiler.jdk_release);
+    let first = releases.next()??;
+    releases
+        .all(|release| release == Some(first))
+        .then_some(first)
 }
 
 /// The major version in a JDK's `release` file: `JAVA_VERSION="25.0.5"`.
@@ -260,4 +278,60 @@ fn file_change(
         source_set: model.source_set_of(path),
         directory_package: model.directory_package(path),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model_with_releases(releases: &[(project_model::Platform, Option<u32>)]) -> ProjectModel {
+        let source_sets = releases
+            .iter()
+            .enumerate()
+            .map(|(index, (platform, release))| project_model::SourceSet {
+                id: project_model::SourceSetId(index as u32),
+                module: project_model::ModuleId(0),
+                name: format!("set{index}"),
+                kind: project_model::SourceSetKind::Main,
+                platform: *platform,
+                directories: Vec::new(),
+                dependencies: Vec::new(),
+                libraries: Vec::new(),
+                classpath: project_model::Classpath::Complete,
+                compiler: project_model::CompilerOptions {
+                    jdk_release: *release,
+                    ..project_model::CompilerOptions::default()
+                },
+            })
+            .collect();
+        ProjectModel::new(
+            PathBuf::from("/work"),
+            project_model::ModelOrigin::GradleExport,
+            Vec::new(),
+            source_sets,
+            None,
+        )
+    }
+
+    #[test]
+    fn the_jdk_release_is_declared_only_when_every_jvm_source_set_agrees() {
+        use project_model::Platform::{Jvm, NotJvm};
+        assert_eq!(
+            agreed_jdk_release(&model_with_releases(&[
+                (Jvm, Some(8)),
+                (Jvm, Some(8)),
+                (NotJvm, None)
+            ])),
+            Some(8)
+        );
+        assert_eq!(
+            agreed_jdk_release(&model_with_releases(&[(Jvm, Some(8)), (Jvm, Some(17))])),
+            None
+        );
+        assert_eq!(
+            agreed_jdk_release(&model_with_releases(&[(Jvm, Some(8)), (Jvm, None)])),
+            None
+        );
+        assert_eq!(agreed_jdk_release(&model_with_releases(&[])), None);
+    }
 }

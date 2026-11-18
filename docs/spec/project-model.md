@@ -86,7 +86,21 @@ are ordinary source directories that happen to be produced by the build.
    would come from it are never called missing. The JDK is read from
    `ct.sym` for the release asked for, or the newest one before it that
    `ct.sym` describes in full (JDK 21's own release is in its runtime image,
-   not its `ct.sym`).
+   not its `ct.sym`). The release is the root project's toolchain's, else
+   the one every JVM source set compiles against (below) when they agree;
+   else the JDK the build runs on is read, and what it alone says (a
+   deprecation) isn't reported.
+
+   Each source set also says its `compilerOptions`, read from the Kotlin
+   compile task(s) it's part of: `warningsAsErrors` (`allWarningsAsErrors`,
+   `-Werror`), `suppressWarnings` (`-nowarn`), `warningLevels` by the
+   compiler's warning name (`-Xsuppress-warning=NAME` is `disabled`,
+   `-Xwarning-level=NAME:error|warning|disabled`), `optIn`, `apiVersion`
+   (unset, the plugin's version: `2.3`) and `jdkRelease` (the task's Java
+   toolchain, or `-Xjdk-release`). A source set in several compilations
+   (Kotlin Multiplatform) gets them merged: warnings are errors if any
+   compilation says so; suppressed, opted into or of one level only if all
+   agree; a version only if all have the same.
 
    A source set with an explicit `kind` and dependencies (all of these) sees
    only what it lists; the implicit "a test sees its module's `main` and

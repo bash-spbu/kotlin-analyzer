@@ -294,7 +294,7 @@ pub(super) fn diagnostics(
 }
 
 fn to_lsp(index: &LineIndex, text: &str, diagnostic: &ide::Diagnostic) -> Diagnostic {
-    let (severity, tags) = match diagnostic.check.severity() {
+    let (severity, tags) = match diagnostic.severity {
         ide::Severity::Error => (DiagnosticSeverity::ERROR, None),
         ide::Severity::Warning | ide::Severity::Lint => (DiagnosticSeverity::WARNING, None),
         ide::Severity::Unnecessary => (

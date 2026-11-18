@@ -65,7 +65,7 @@ pub fn effective_deprecation(
     location: ItemLocation,
 ) -> Option<(Deprecation, DeprecationLevel)> {
     let deprecation = applying_deprecation(db, from, location)?;
-    let level = level(&deprecation)?;
+    let level = level(&deprecation, api_version(db, from))?;
     Some((deprecation, level))
 }
 
@@ -169,13 +169,58 @@ fn worst(first: Option<Deprecation>, second: Option<Deprecation>) -> Option<Depr
 }
 
 /// The level a deprecation gives a use. `@DeprecatedSinceKotlin` decides
-/// by the Kotlin API version the code is compiled against, not known here:
-/// no level.
-fn level(deprecation: &Deprecation) -> Option<DeprecationLevel> {
-    if deprecation.since_kotlin.is_some() {
-        return None;
+/// by the Kotlin API version the code compiles against instead: hidden,
+/// an error or a warning from the versions it names on, not deprecated
+/// before — and no level when the version isn't known.
+fn level(deprecation: &Deprecation, api_version: Option<ApiVersion>) -> Option<DeprecationLevel> {
+    let Some(since) = &deprecation.since_kotlin else {
+        return Some(deprecation.level);
+    };
+    let api_version = api_version?;
+    let reached = |version: &Option<Box<str>>| {
+        version
+            .as_deref()
+            .and_then(ApiVersion::parse)
+            .is_some_and(|version| version <= api_version)
+    };
+    if reached(&since.hidden_since) {
+        Some(DeprecationLevel::Hidden)
+    } else if reached(&since.error_since) {
+        Some(DeprecationLevel::Error)
+    } else if reached(&since.warning_since) {
+        Some(DeprecationLevel::Warning)
+    } else {
+        None
     }
-    Some(deprecation.level)
+}
+
+/// A Kotlin API version: `2.1`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct ApiVersion {
+    major: u32,
+    minor: u32,
+}
+
+impl ApiVersion {
+    fn parse(text: &str) -> Option<ApiVersion> {
+        let mut numbers = text.split('.');
+        let major = numbers.next()?.trim().parse().ok()?;
+        let minor = numbers.next().unwrap_or("0").trim().parse().ok()?;
+        Some(ApiVersion { major, minor })
+    }
+}
+
+/// The API version `file`'s source set compiles against, when the model
+/// says.
+fn api_version(db: &dyn SourceDatabase, file: SourceFile) -> Option<ApiVersion> {
+    let source_set = file.source_set(db)?;
+    let model = db.workspace().model(db);
+    let version = model
+        .source_set(source_set)
+        .compiler
+        .api_version
+        .as_deref()?;
+    ApiVersion::parse(version)
 }
 
 struct Uses<'db, 'parse> {
