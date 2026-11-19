@@ -16,7 +16,10 @@
 //! resolved by the build; `werror` compiles it with warnings as errors,
 //! `api=2.0` against that Kotlin API version, `optin=a.Beta` opting in to
 //! that marker;
-//! `deps=:a,:b/test` lists the source sets it sees (`/main` by default). A
+//! `deps=:a,:b/test` lists the source sets it sees (`/main` by default);
+//! `root=/app` makes that directory the source set's root, so a file's
+//! directory below it implies its package (`/app/a/b/X.kt`: `a.b`), as a
+//! Gradle source root does — else the file's own directory is a root. A
 //! single `$0` marks the cursor; it is removed from the text.
 
 use std::path::PathBuf;
@@ -48,6 +51,8 @@ struct FixtureFile {
     dependencies: Vec<(String, String)>,
     classpath: Classpath,
     compiler: CompilerOptions,
+    /// The source root the file is under, when given.
+    root: Option<PathBuf>,
     text: String,
 }
 
@@ -135,6 +140,7 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
             dependencies: Vec::new(),
             classpath: Classpath::Complete,
             compiler: CompilerOptions::default(),
+            root: None,
             text: String::new(),
         };
         for word in words {
@@ -152,6 +158,8 @@ fn split(fixture: &str) -> Vec<FixtureFile> {
                 file.compiler.language_version = Some(version.to_owned());
             } else if let Some(marker) = word.strip_prefix("optin=") {
                 file.compiler.opt_in.push(marker.to_owned());
+            } else if let Some(root) = word.strip_prefix("root=") {
+                file.root = Some(PathBuf::from(root));
             } else if let Some(dependencies) = word.strip_prefix("deps=") {
                 file.dependencies = dependencies
                     .split(',')
@@ -228,9 +236,15 @@ fn model_of(files: &[FixtureFile]) -> ProjectModel {
                 ..file.compiler.clone()
             };
         }
-        source_sets[id.0 as usize]
-            .directories
-            .push(file.path.parent().map(PathBuf::from).unwrap_or_default());
+        let directory = file
+            .root
+            .clone()
+            .or_else(|| file.path.parent().map(PathBuf::from))
+            .unwrap_or_default();
+        let directories = &mut source_sets[id.0 as usize].directories;
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
         declared_dependencies.push((id, file.dependencies.clone()));
     }
     for (id, dependencies) in declared_dependencies {

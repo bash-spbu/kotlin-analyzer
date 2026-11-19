@@ -45,6 +45,7 @@ pub use hir_ty::members::{Member, Types};
 pub use hir_ty::opt_in::{OptInUse, opt_in_uses};
 pub use hir_ty::overrides::{implementations, override_family};
 pub use hir_ty::ty::ClassType;
+pub use hir_ty::type_references::{TypeReference, type_references};
 pub use hir_ty::{
     Nullability, Ty, TypePart, display as display_type, display_parts as display_type_parts,
 };

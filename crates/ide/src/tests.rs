@@ -444,6 +444,205 @@ fun use(shapes: List<Shape>) {
     .assert_eq(&rendered.join("\n"));
 }
 
+/// The workspace's files after `moves` (by path, with the new stem and
+/// directory package) apply: each changed file, as `path` and its text.
+fn files_after_rename(fixture: &str, moves: &[(&str, &str, &str)]) -> String {
+    let fixture = Fixture::with_mini_stdlib(fixture);
+    let moves: Vec<crate::FileMove> = moves
+        .iter()
+        .map(|(path, new_stem, new_package)| {
+            let old_stem = std::path::Path::new(path)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            crate::FileMove {
+                file: fixture.file(path),
+                old_stem,
+                new_stem: (*new_stem).to_owned(),
+                new_directory_package: Some(intern::Path::parse(new_package)),
+            }
+        })
+        .collect();
+    let change = analysis(&fixture).will_rename_files(&moves).unwrap();
+    let mut rendered = Vec::new();
+    for (file, edits) in change.edits {
+        let mut text = fixture.vfs.contents(file).unwrap().to_string();
+        for edit in edits.iter().rev() {
+            text.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.new_text,
+            );
+        }
+        rendered.push(format!("{}:\n{text}", fixture.vfs.path(file).display()));
+    }
+    rendered.sort();
+    rendered.join("\n")
+}
+
+#[test]
+fn renaming_a_file_renames_the_class_it_is_named_after() {
+    expect![[r#"
+        /app/a/Order.kt:
+        package a
+        class Invoice(val total: Int)
+        fun helper() = Invoice(1)
+
+        /app/a/Use.kt:
+        package a
+        fun use(order: Invoice) = Invoice(order.total)
+    "#]]
+    .assert_eq(&files_after_rename(
+        r#"
+//- /app/a/Order.kt
+package a
+class Order(val total: Int)
+fun helper() = Order(1)
+//- /app/a/Use.kt
+package a
+fun use(order: Order) = Order(order.total)
+"#,
+        &[("/app/a/Order.kt", "Invoice", "a")],
+    ));
+}
+
+#[test]
+fn moving_a_file_moves_its_package_and_its_uses_follow() {
+    expect![[r#"
+        /app/a/Order.kt:
+        package b
+
+        import a.Helper
+        class Order(val helper: Helper)
+
+        /app/a/Same.kt:
+        package a
+
+        import b.Order
+        fun same() = Order(Helper())
+
+        /app/c/Imported.kt:
+        package c
+        import b.Order
+        fun imported(order: Order) = order
+
+        /app/d/Qualified.kt:
+        package d
+        fun qualified(order: b.Order) = order
+
+        /app/e/Star.kt:
+        package e
+        import a.*
+        import b.Order
+        fun star(order: Order) = order
+    "#]]
+    .assert_eq(&files_after_rename(
+        r#"
+//- /app/a/Order.kt root=/app
+package a
+class Order(val helper: Helper)
+//- /app/a/Helper.kt root=/app
+package a
+class Helper
+//- /app/a/Same.kt root=/app
+package a
+fun same() = Order(Helper())
+//- /app/c/Imported.kt root=/app
+package c
+import a.Order
+fun imported(order: Order) = order
+//- /app/d/Qualified.kt root=/app
+package d
+fun qualified(order: a.Order) = order
+//- /app/e/Star.kt root=/app
+package e
+import a.*
+fun star(order: Order) = order
+"#,
+        &[("/app/a/Order.kt", "Order", "b")],
+    ));
+}
+
+#[test]
+fn files_moved_together_need_no_imports_of_each_other() {
+    expect![[r#"
+        /app/a/Helper.kt:
+        package b
+        class Helper
+
+        /app/a/Order.kt:
+        package b
+        class Order(val helper: Helper)
+
+        /app/a/Same.kt:
+        package a
+
+        import b.Helper
+        import b.Order
+        fun same() = Order(Helper())
+    "#]]
+    .assert_eq(&files_after_rename(
+        r#"
+//- /app/a/Order.kt root=/app
+package a
+class Order(val helper: Helper)
+//- /app/a/Helper.kt root=/app
+package a
+class Helper
+//- /app/a/Same.kt root=/app
+package a
+fun same() = Order(Helper())
+"#,
+        &[
+            ("/app/a/Order.kt", "Order", "b"),
+            ("/app/a/Helper.kt", "Helper", "b"),
+        ],
+    ));
+}
+
+#[test]
+fn a_file_whose_package_isnt_its_directorys_keeps_it_and_a_rename_goes_with_a_move() {
+    expect![[r#"
+        /app/a/Order.kt:
+        package b
+        class Invoice
+
+        /app/a/Same.kt:
+        package a
+
+        import b.Invoice
+        fun same() = Invoice()
+
+        /app/c/Use.kt:
+        package c
+        import b.Invoice
+        import somewhere.else.Elsewhere
+        fun use(order: Invoice, elsewhere: Elsewhere) = order
+    "#]]
+    .assert_eq(&files_after_rename(
+        r#"
+//- /app/a/Elsewhere.kt root=/app
+package somewhere.else
+class Elsewhere
+//- /app/a/Order.kt root=/app
+package a
+class Order
+//- /app/c/Use.kt root=/app
+package c
+import a.Order
+import somewhere.else.Elsewhere
+fun use(order: Order, elsewhere: Elsewhere) = order
+//- /app/a/Same.kt root=/app
+package a
+fun same() = Order()
+"#,
+        &[
+            ("/app/a/Elsewhere.kt", "Elsewhere", "b"),
+            ("/app/a/Order.kt", "Invoice", "b"),
+        ],
+    ));
+}
+
 /// Each diagnostic of `/app/b/Use.kt` as `[check] line: message`, with the
 /// first fix's edit when it has one.
 fn check_diagnostics(fixture: &str, config: crate::DiagnosticsConfig, expected: Expect) {

@@ -38,9 +38,14 @@ first): what one file declares changes what another's code means.
 | `textDocument/semanticTokens/full` | every name classified by what it resolves to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, and decorator for an annotation's name where it annotates (`@Name`, `@Name(…)`, `@param:Name`; `Name::class` stays a class or interface); modifiers: declaration, readonly (`val`, non-`var` locals), static, deprecated. *(Later: defaultLibrary.)* |
 | `textDocument/semanticTokens/full/delta` | what changed since the tokens sent with `previousResultId` (the last sent for the file): one edit between their common start and end; all the tokens when that id isn't the last |
 | `textDocument/semanticTokens/range` | the tokens overlapping the range |
+| `workspace/willRenameFiles` | for Kotlin files and folders (a folder: every Kotlin file under it), the edits that keep the code right, made to the files before they move: a file renamed in its directory renames the one top-level class named as it was (`Order.kt` → `Invoice.kt` renames `class Order` and its uses); a file moved where its new directory implies another package — its package having been its old directory's — gets that `package` line, other files' imports and fully qualified names of its non-private top-level declarations follow, a file that used them without an import (same package, a star import) gets one, and the moved file gets imports of what it used from its old package; files moved together need no imports of each other |
 | `textDocument/inlayHint` | inferred types of what writes none: local `val`/`var` (and destructured components), except where a constructor call makes it obvious (`val box = Box(…)`); a lambda's untyped parameters; `it: T` after the `{` of a lambda with an implicit `it`; an expression-bodied function's result after its parameters (`fun total() = …`). Each class name in a hint is a label part linked to its declaration — a workspace class's at once, a library's on `inlayHint/resolve` (read from its sources archive when it has one) |
 | `textDocument/codeAction` | the fixes of the diagnostics in the range: "Import `a.b.C`", "Remove the unused import", "Add `package …`", "Add the missing branches" (of a `when`, each `case -> TODO()`) |
 | `textDocument/publishDiagnostics` | see diagnostics.md; published with the document version they were computed for |
+
+`workspace/didRenameFiles` (Kotlin files and folders): the old paths' files
+are dropped and the new ones read (a file open in the editor is the
+editor's to report).
 
 `workspace/executeCommand`: `kotlin-analyzer.reloadWorkspace` — export the
 model again if the build files changed, and reload it and every file.

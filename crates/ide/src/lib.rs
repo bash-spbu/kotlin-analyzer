@@ -8,6 +8,7 @@
 mod completion;
 mod diagnostics;
 mod document_symbols;
+mod file_rename;
 mod folding;
 mod goto_definition;
 mod goto_implementation;
@@ -30,6 +31,7 @@ use syntax::{SyntaxError, TextRange};
 pub use completion::{CompletionItem, CompletionKind, Completions};
 pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stability, TextEdit};
 pub use document_symbols::DocumentSymbol;
+pub use file_rename::FileMove;
 pub use folding::{Fold, FoldKind};
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
@@ -130,6 +132,12 @@ impl Analysis {
     }
 
     /// The range of the name at `offset` when it can be renamed.
+    /// What renaming or moving `moves`' files changes in the code (see
+    /// `file_rename`), as edits to the files before they move.
+    pub fn will_rename_files(&self, moves: &[FileMove]) -> Cancellable<SourceChange> {
+        self.with_db(|db| file_rename::will_rename_files(db, moves))
+    }
+
     pub fn prepare_rename(
         &self,
         file: FileId,

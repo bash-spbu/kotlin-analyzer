@@ -219,11 +219,38 @@ fn capabilities() -> ServerCapabilities {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            workspace_folders: None,
+            file_operations: Some(lsp_types::WorkspaceFileOperationsServerCapabilities {
+                will_rename: Some(kotlin_files_and_folders()),
+                did_rename: Some(kotlin_files_and_folders()),
+                ..lsp_types::WorkspaceFileOperationsServerCapabilities::default()
+            }),
+        }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![RELOAD_COMMAND.to_owned()],
             ..lsp_types::ExecuteCommandOptions::default()
         }),
         ..ServerCapabilities::default()
+    }
+}
+
+/// What file operations the server wants to hear of: Kotlin files, and
+/// folders (which may hold some).
+fn kotlin_files_and_folders() -> lsp_types::FileOperationRegistrationOptions {
+    let filter = |glob: &str, matches| lsp_types::FileOperationFilter {
+        scheme: Some("file".to_owned()),
+        pattern: lsp_types::FileOperationPattern {
+            glob: glob.to_owned(),
+            matches: Some(matches),
+            options: None,
+        },
+    };
+    lsp_types::FileOperationRegistrationOptions {
+        filters: vec![
+            filter("**/*.{kt,kts}", lsp_types::FileOperationPatternKind::File),
+            filter("**/*", lsp_types::FileOperationPatternKind::Folder),
+        ],
     }
 }
 
@@ -775,6 +802,54 @@ impl GlobalState {
         }
     }
 
+    /// Files (or folders) renamed in the editor: what was at the old paths
+    /// is gone, what's at the new ones read — sources open in the editor
+    /// excepted, which it tells of itself.
+    fn on_renamed_files(&mut self, renames: Vec<lsp_types::FileRename>) {
+        let path_of = |uri: &str| {
+            uri.parse::<lsp_types::Uri>()
+                .ok()
+                .and_then(|uri| convert::path_of(&uri))
+        };
+        let mut moved = 0usize;
+        for rename in renames {
+            let (Some(old), Some(new)) = (path_of(&rename.old_uri), path_of(&rename.new_uri))
+            else {
+                continue;
+            };
+            let gone: Vec<PathBuf> = self
+                .vfs
+                .paths()
+                .iter()
+                .filter(|path| path.starts_with(&old))
+                .cloned()
+                .collect();
+            for path in gone {
+                let open = self
+                    .vfs
+                    .file_id(&path)
+                    .is_some_and(|file| self.open_documents.contains_key(&file));
+                if !open {
+                    self.vfs.set_contents(&path, None);
+                }
+            }
+            let arrived = walkdir::WalkDir::new(&new)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path())
+                .filter(|path| syntax::Language::of_path(path).is_some());
+            for path in arrived {
+                let text = std::fs::read_to_string(&path).ok().map(Arc::from);
+                self.vfs.set_contents(&path, text);
+                moved += 1;
+            }
+        }
+        Event::debug("files-renamed").count("sources", moved).emit();
+        self.apply_vfs_changes();
+        self.update_diagnostics(self.open_documents.keys().copied().collect());
+    }
+
     fn is_model_file(&self, path: &std::path::Path) -> bool {
         let workspace_model = self.root.join(".kotlin-analyzer/project.json");
         path == workspace_model || self.project_json.as_deref() == Some(path)
@@ -805,6 +880,25 @@ impl GlobalState {
             self.execute_command(request);
             return;
         }
+        if request.method == request::WillRenameFiles::METHOD {
+            // What moves is found here, where the files and the model are.
+            let moves = self.file_moves(&request);
+            self.answer_on_pool(request, move |snapshot, request| {
+                handlers::will_rename_files(&snapshot, request.id, &moves)
+            });
+            return;
+        }
+        self.answer_on_pool(request, handlers::handle);
+    }
+
+    /// Answers `request` with `handle` on a worker, against a snapshot: a
+    /// panic answered as an error, a cancelled request skipped, the answer
+    /// logged.
+    fn answer_on_pool(
+        &mut self,
+        request: Request,
+        handle: impl FnOnce(handlers::Snapshot, Request) -> Response + Send + 'static,
+    ) {
         let request_file = self.request_file_of(&request);
         let method = known_method(&request.method);
         let id = request_number(&request.id);
@@ -831,9 +925,7 @@ impl GlobalState {
             let request_id = request.id.clone();
             let context = Context::Request { id, method, file };
             let handled = crate::log::within(context, || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    handlers::handle(snapshot, request)
-                }))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(snapshot, request)))
             });
             let response = handled.unwrap_or_else(|_| {
                 Response::new_err(
@@ -872,6 +964,55 @@ impl GlobalState {
             lsp_server::ErrorCode::RequestCanceled as i32,
             "cancelled".to_owned(),
         ));
+    }
+
+    /// The Kotlin files a `workspace/willRenameFiles` renames or moves —
+    /// a folder's, all under it — with the package their new directory
+    /// implies.
+    fn file_moves(&self, request: &Request) -> Vec<ide::FileMove> {
+        let Ok(params) =
+            serde_json::from_value::<lsp_types::RenameFilesParams>(request.params.clone())
+        else {
+            return Vec::new();
+        };
+        let path_of = |uri: &str| {
+            uri.parse::<lsp_types::Uri>()
+                .ok()
+                .and_then(|uri| convert::path_of(&uri))
+        };
+        let mut moves = Vec::new();
+        for rename in params.files {
+            let (Some(old), Some(new)) = (path_of(&rename.old_uri), path_of(&rename.new_uri))
+            else {
+                continue;
+            };
+            for path in self.vfs.paths() {
+                let Ok(rest) = path.strip_prefix(&old) else {
+                    continue;
+                };
+                let is_kotlin = syntax::Language::of_path(path) == Some(syntax::Language::Kotlin);
+                let Some(file) = self.vfs.file_id(path).filter(|_| is_kotlin) else {
+                    continue;
+                };
+                let new_path = if rest.as_os_str().is_empty() {
+                    new.clone()
+                } else {
+                    new.join(rest)
+                };
+                let stem = |path: &std::path::Path| {
+                    path.file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
+                moves.push(ide::FileMove {
+                    file,
+                    old_stem: stem(path),
+                    new_stem: stem(&new_path),
+                    new_directory_package: self.model.directory_package(&new_path),
+                });
+            }
+        }
+        moves
     }
 
     /// A file as the log names it.
@@ -978,6 +1119,13 @@ impl GlobalState {
                 }
                 Err(notification) => notification,
             };
+        let notification = match cast_notification::<notification::DidRenameFiles>(notification) {
+            Ok(params) => {
+                self.on_renamed_files(params.files);
+                return;
+            }
+            Err(notification) => notification,
+        };
         let notification =
             match cast_notification::<notification::DidChangeWatchedFiles>(notification) {
                 Ok(params) => {
@@ -1186,6 +1334,7 @@ const KNOWN_METHODS: &[&str] = &[
     "inlayHint/resolve",
     "textDocument/codeAction",
     "workspace/executeCommand",
+    "workspace/willRenameFiles",
     "shutdown",
 ];
 

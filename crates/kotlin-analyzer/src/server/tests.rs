@@ -637,3 +637,60 @@ fn semantic_tokens_come_whole_as_a_delta_and_for_a_range() {
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn renaming_files_and_folders_edits_what_follows_them() {
+    let root = workspace("file-rename");
+    let kotlin = root.join("src/main/kotlin");
+    std::fs::create_dir_all(kotlin.join("other")).unwrap();
+    let order = kotlin.join("app/Order.kt");
+    let user = kotlin.join("other/Use.kt");
+    std::fs::write(&order, "package app\nclass Order\n").unwrap();
+    std::fs::write(
+        &user,
+        "package other\nimport app.Order\nfun use(order: Order) = order\n",
+    )
+    .unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    // What each file's edits write, in order.
+    let written = |edit: &Value, file: &Path| -> Vec<String> {
+        edit["documentChanges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|document| document["textDocument"]["uri"] == uri(file))
+            .flat_map(|document| document["edits"].as_array().cloned().unwrap_or_default())
+            .map(|edit| edit["newText"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // The folder `app` renamed `billing`: the package moves with it.
+    let moved = client.request(
+        "workspace/willRenameFiles",
+        json!({ "files": [{ "oldUri": uri(&kotlin.join("app")), "newUri": uri(&kotlin.join("billing")) }] }),
+    );
+    assert_eq!(written(&moved, &order), ["billing"]);
+    assert_eq!(written(&moved, &user), ["billing."]);
+
+    // `Order.kt` renamed `Invoice.kt`: so is its class.
+    let renamed = client.request(
+        "workspace/willRenameFiles",
+        json!({ "files": [{ "oldUri": uri(&order), "newUri": uri(&kotlin.join("app/Invoice.kt")) }] }),
+    );
+    assert_eq!(written(&renamed, &order), ["Invoice"]);
+    assert_eq!(written(&renamed, &user), ["Invoice", "Invoice"]);
+
+    // Once renamed on disk, the old file is gone and the new one read.
+    let invoice = kotlin.join("app/Invoice.kt");
+    std::fs::rename(&order, &invoice).unwrap();
+    std::fs::write(&invoice, "package app\nclass Invoice\n").unwrap();
+    client.notify(
+        "workspace/didRenameFiles",
+        json!({ "files": [{ "oldUri": uri(&order), "newUri": uri(&invoice) }] }),
+    );
+    assert_eq!(client.workspace_symbols("Invoice"), vec!["Invoice"]);
+    assert!(client.workspace_symbols("Order").is_empty());
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

@@ -308,38 +308,7 @@ fn rename(snapshot: &Snapshot, params: lsp_types::RenameParams) -> Answer {
             Ok(change) => change,
             Err(error) => return Ok(Err(error.to_string())),
         };
-        let mut document_edits = Vec::new();
-        for (file, edits) in change.edits {
-            let (Some(text), Some(uri)) = (
-                snapshot.analysis.file_text(file)?,
-                snapshot
-                    .paths
-                    .get(file.index())
-                    .and_then(|path| convert::uri_of(path)),
-            ) else {
-                continue;
-            };
-            let index = LineIndex::new(&text);
-            document_edits.push(lsp_types::TextDocumentEdit {
-                text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
-                    uri,
-                    version: None,
-                },
-                edits: edits
-                    .into_iter()
-                    .map(|edit| {
-                        lsp_types::OneOf::Left(lsp_types::TextEdit {
-                            range: convert::range(&index, &text, edit.range),
-                            new_text: edit.new_text,
-                        })
-                    })
-                    .collect(),
-            });
-        }
-        let edit = lsp_types::WorkspaceEdit {
-            document_changes: Some(lsp_types::DocumentChanges::Edits(document_edits)),
-            ..lsp_types::WorkspaceEdit::default()
-        };
+        let edit = workspace_edit(snapshot, change)?;
         Ok(Ok(serde_json::to_value(edit).unwrap_or_default()))
     })();
     match answer {
@@ -398,4 +367,43 @@ fn folding(snapshot: &Snapshot) -> ide::Cancellable<serde_json::Value> {
         })
         .collect();
     Ok(serde_json::to_value(folds).unwrap_or_default())
+}
+
+/// `change` as LSP edits to the documents, positions in their current text.
+pub(super) fn workspace_edit(
+    snapshot: &Snapshot,
+    change: ide::SourceChange,
+) -> ide::Cancellable<lsp_types::WorkspaceEdit> {
+    let mut document_edits = Vec::new();
+    for (file, edits) in change.edits {
+        let (Some(text), Some(uri)) = (
+            snapshot.analysis.file_text(file)?,
+            snapshot
+                .paths
+                .get(file.index())
+                .and_then(|path| convert::uri_of(path)),
+        ) else {
+            continue;
+        };
+        let index = LineIndex::new(&text);
+        document_edits.push(lsp_types::TextDocumentEdit {
+            text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                uri,
+                version: None,
+            },
+            edits: edits
+                .into_iter()
+                .map(|edit| {
+                    lsp_types::OneOf::Left(lsp_types::TextEdit {
+                        range: convert::range(&index, &text, edit.range),
+                        new_text: edit.new_text,
+                    })
+                })
+                .collect(),
+        });
+    }
+    Ok(lsp_types::WorkspaceEdit {
+        document_changes: Some(lsp_types::DocumentChanges::Edits(document_edits)),
+        ..lsp_types::WorkspaceEdit::default()
+    })
 }

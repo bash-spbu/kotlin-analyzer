@@ -233,6 +233,34 @@ fn inlay_hints(
     Ok(serde_json::to_value(hints).unwrap_or_default())
 }
 
+/// `workspace/willRenameFiles`: the edits that keep the code right once
+/// `moves` happen (made to the files as they are before).
+pub(super) fn will_rename_files(
+    snapshot: &Snapshot,
+    id: lsp_server::RequestId,
+    moves: &[ide::FileMove],
+) -> Response {
+    if !snapshot.loaded {
+        return Response::new_ok(id, serde_json::Value::Null);
+    }
+    let edit = snapshot
+        .analysis
+        .will_rename_files(moves)
+        .and_then(|change| {
+            let nothing = change.edits.is_empty();
+            let edit = super::editing::workspace_edit(snapshot, change)?;
+            Ok((!nothing).then_some(edit))
+        });
+    match edit {
+        Ok(edit) => Response::new_ok(id, edit),
+        Err(_cancelled) => Response::new_err(
+            id,
+            ErrorCode::ContentModified as i32,
+            "content modified".to_owned(),
+        ),
+    }
+}
+
 /// `inlayHint/resolve`: the hint with each library class name linked to
 /// its declaration in the library's sources (when they're there).
 fn resolve_inlay_hint(

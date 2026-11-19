@@ -271,6 +271,20 @@ fn target_references(
     found
 }
 
+/// Where `declaration` (with its `expect`/`actual` counterparts) is used,
+/// its own declaration left out.
+pub(crate) fn declaration_occurrences(
+    db: &RootDatabase,
+    declaration: ItemLocation,
+) -> Vec<FileRange> {
+    let name = hir::item_tree(db, declaration.container)
+        .item(declaration.item)
+        .name
+        .to_string();
+    let target = Target::Declarations(vec![declaration]).with_counterparts(db);
+    target_references(db, &target, &[name], false)
+}
+
 /// Can the name at `offset` be renamed? Its range when it can.
 pub(crate) fn prepare_rename(
     db: &RootDatabase,
