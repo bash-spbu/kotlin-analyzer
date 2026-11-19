@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use hir_def::ItemLocation;
 use hir_def::item_tree::{ItemKind, Modifiers, Signature};
-use hir_def::resolver::{Resolution, resolve_type_path};
+use hir_def::resolver::Resolution;
 use intern::{Name, Path};
 use syntax::{SyntaxNode, has_token, named_children};
 
@@ -565,7 +565,7 @@ impl<'db> Inferrer<'db> {
                 });
             }
         }
-        match resolve_type_path(self.db, self.file, &Path::new([name]), offset) {
+        match self.resolve_type_path_at(&Path::new([name]), offset) {
             Resolution::Declaration(class) => levels.push(Level::Constructors(class)),
             Resolution::Ambiguous(classes) => {
                 for class in classes {

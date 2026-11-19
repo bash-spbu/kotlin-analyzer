@@ -1661,6 +1661,48 @@ fun use(account: Account) = account.balance()
 }
 
 #[test]
+fn an_edit_inside_one_function_reinfers_only_that_function() {
+    let source = |first_body: &str| {
+        format!(
+            "package app\nclass Shop(val name: String) {{\n    val label = name.length\n    fun first(): Int {{{first_body}}}\n    fun second(): Int = label + 2\n}}\nfun third() = Shop(\"a\").second()\n"
+        )
+    };
+    let mut fixture = with_stdlib(&format!("//- /app/Use.kt\n{}", source(" return 1 ")));
+    let bodies = |fixture: &Fixture| {
+        let db = &fixture.database;
+        let file = db.source_file(fixture.file("/app/Use.kt")).unwrap();
+        let crate::infer::FileUnits::Units(units) = crate::infer::file_units(db, file) else {
+            panic!("a Kotlin file is inferred unit by unit");
+        };
+        let tree = file_item_tree(db, file);
+        units
+            .iter()
+            .map(|unit| {
+                let name = match unit {
+                    crate::infer::BodyUnit::File => "file".to_owned(),
+                    crate::infer::BodyUnit::Item(item) => tree.item(*item).name.to_string(),
+                };
+                (name, crate::infer::infer_body(db, file, *unit))
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = bodies(&fixture);
+    // The edit moves everything after it.
+    fixture.edit(
+        "/app/Use.kt",
+        &source("\n        val moved = name.length\n        return moved\n    "),
+    );
+    let after = bodies(&fixture);
+    let reinferred: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|((_, old), (_, new))| !std::sync::Arc::ptr_eq(old, new))
+        .map(|((name, _), _)| name.as_str())
+        .collect();
+    assert_eq!(reinferred, ["first"]);
+}
+
+#[test]
 fn a_block_bodied_function_is_unit_without_inferring_its_body() {
     check_inference(
         r#"

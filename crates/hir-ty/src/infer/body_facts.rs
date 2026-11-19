@@ -9,8 +9,9 @@ use base_db::{SourceDatabase, SourceFile};
 use hir_def::item_tree::kotlin_type_ref;
 use syntax::{Parse, SyntaxNode, named_children};
 
+use super::placement::Placement;
 use super::{InferenceResult, ResolvedName};
-use crate::lower::{TypeScope, lower_type};
+use crate::lower::lower_type;
 use crate::members::Types;
 use crate::ty::Ty;
 
@@ -18,6 +19,7 @@ pub(super) struct BodyFacts<'facts, 'db> {
     pub(super) db: &'db dyn SourceDatabase,
     pub(super) file: SourceFile,
     pub(super) parse: &'db Parse,
+    pub(super) placement: &'facts Placement,
     pub(super) types: &'facts Types<'db>,
     pub(super) result: &'facts InferenceResult,
 }
@@ -43,7 +45,7 @@ impl<'db> BodyFacts<'_, 'db> {
             // A bare class name, as `Type::class` and `Type::member` write it.
             let name = intern::Name::new(self.text(node).trim_matches('`'));
             let path = intern::Path::new([name]);
-            return match hir_def::resolver::resolve_type_path(
+            return match self.placement.resolve_type_path(
                 self.db,
                 self.file,
                 &path,
@@ -61,7 +63,8 @@ impl<'db> BodyFacts<'_, 'db> {
         let type_ref = kotlin_type_ref(self.parse, node);
         lower_type(
             self.db,
-            TypeScope::written_at(self.db, self.file, node.start_byte()),
+            self.placement
+                .type_scope(self.db, self.file, node.start_byte()),
             &type_ref,
         )
     }

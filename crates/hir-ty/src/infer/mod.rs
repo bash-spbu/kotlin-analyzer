@@ -27,10 +27,12 @@ mod flow;
 mod local_usage;
 mod member_scope;
 mod narrowing;
+mod placement;
 mod property_paths;
 mod reassociation;
 mod type_mismatches;
 mod type_operations;
+mod units;
 mod validation;
 mod value_path;
 mod when_branches;
@@ -48,6 +50,7 @@ use crate::ty::Ty;
 pub use completion::{CompletionScope, PLACEHOLDER, Qualifier, completion_scope};
 pub use fit::Fit;
 pub use local_usage::{LocalFinding, local_findings};
+pub use units::{BodyUnit, FileUnits, file_units, infer_body};
 
 /// A local declaration: a `val`/`var` in a body, a parameter, a lambda's
 /// parameter (`it` included), a local function.
@@ -393,10 +396,15 @@ pub fn infer_file(db: &dyn SourceDatabase, file: SourceFile) -> Arc<InferenceRes
     if file.language(db) != Language::Kotlin {
         return Arc::new(InferenceResult::default());
     }
-    let parse = base_db::parse(db, file);
-    let mut inferrer = declarations::Inferrer::new(db, file, &parse);
-    inferrer.file_declarations();
-    Arc::new(inferrer.finish())
+    match units::file_units(db, file) {
+        units::FileUnits::Units(units) => Arc::new(units::infer_units(db, file, &units)),
+        units::FileUnits::Script => {
+            let parse = base_db::parse(db, file);
+            let mut inferrer = declarations::Inferrer::new(db, file, &parse);
+            inferrer.file_declarations();
+            Arc::new(inferrer.finish())
+        }
+    }
 }
 
 /// The type of a workspace declaration that doesn't write one: a
@@ -407,6 +415,9 @@ pub fn infer_file(db: &dyn SourceDatabase, file: SourceFile) -> Arc<InferenceRes
 pub fn declaration_type(db: &dyn SourceDatabase, file: SourceFile, item: ItemId) -> Ty {
     if file.language(db) != Language::Kotlin {
         return Ty::Unknown;
+    }
+    if let Some(ty) = units::unit_declaration_type(db, file, item) {
+        return ty;
     }
     let range = hir_def::file_item_source_map(db, file).ranges(item).range;
     let parse = base_db::parse(db, file);

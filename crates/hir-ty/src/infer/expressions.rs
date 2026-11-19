@@ -3,7 +3,7 @@
 
 use hir_def::ItemLocation;
 use hir_def::item_tree::{ItemKind, Signature};
-use hir_def::resolver::{Resolution, resolve_type_path};
+use hir_def::resolver::Resolution;
 use intern::{Name, Path};
 use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
@@ -314,7 +314,7 @@ impl Inferrer<'_> {
             return Typed::Value(ty);
         }
         let path = Path::new([name]);
-        match resolve_type_path(self.db, self.file, &path, node.start_byte()) {
+        match self.resolve_type_path_at(&path, node.start_byte()) {
             Resolution::Declaration(class) => {
                 let ty = self.value_of(Typed::Class(class));
                 self.record(node, Reference::Declaration(class), ty);

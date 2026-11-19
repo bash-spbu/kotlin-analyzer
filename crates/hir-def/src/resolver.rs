@@ -113,6 +113,22 @@ pub fn resolve_type_path_in_declaration(
     resolve_type_path_within(db, file, path, &enclosing)
 }
 
+/// What the type name `path` written in a body inside `innermost` (and the
+/// items around it; at the top level of `file` without one) refers to. Asks
+/// only the item tree, as [`resolve_type_path_in_declaration`] does: a
+/// body's types don't depend on where in the file it is.
+pub fn resolve_type_path_inside(
+    db: &dyn SourceDatabase,
+    file: SourceFile,
+    path: &Path,
+    innermost: Option<ItemId>,
+) -> Resolution {
+    match innermost {
+        Some(item) => resolve_type_path_in_declaration(db, file, path, item),
+        None => resolve_type_path_within(db, file, path, &[]),
+    }
+}
+
 /// `path` resolved inside the items `enclosing` (outermost first).
 fn resolve_type_path_within(
     db: &dyn SourceDatabase,
@@ -171,12 +187,13 @@ pub fn resolve_import_path(db: &dyn SourceDatabase, file: SourceFile, path: &Pat
 /// Kotlin's default imports, the platform's. Expressions take the first
 /// level where a candidate fits — which may not be the first non-empty one
 /// (an imported `max(Int, Int)` doesn't stop `kotlin.comparisons.max` for
-/// other arguments).
+/// other arguments). Asked once per file and name, whichever body asks.
+#[salsa::tracked(returns(clone), lru = 4096)]
 pub fn top_level_levels(
     db: &dyn SourceDatabase,
     file: SourceFile,
     name: Name,
-) -> Vec<Vec<ItemLocation>> {
+) -> std::sync::Arc<[Vec<ItemLocation>]> {
     let tree = file_item_tree(db, file);
     let mut levels = Vec::with_capacity(5);
     levels.push(
@@ -203,7 +220,7 @@ pub fn top_level_levels(
                 .collect(),
         );
     }
-    levels
+    levels.into()
 }
 
 fn classifiers_in_package(

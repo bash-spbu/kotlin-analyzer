@@ -1,12 +1,10 @@
 //! The walk's state — scopes, implicit receivers, what's been found — and
 //! the declarations and statements it walks through.
 
-use std::rc::Rc;
-
 use base_db::{SourceDatabase, SourceFile};
+use hir_def::ItemLocation;
 use hir_def::item_tree::ItemKind;
 use hir_def::resolver::top_level_levels;
-use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -88,11 +86,11 @@ pub(crate) struct Inferrer<'db> {
     pub(super) db: &'db dyn SourceDatabase,
     pub(super) file: SourceFile,
     pub(super) parse: &'db Parse,
-    items_by_range: FxHashMap<TextRange, ItemId>,
+    /// Where the walked tree sits in the file.
+    placement: super::placement::Placement,
     scopes: Vec<Scope>,
     pub(super) receivers: Vec<ImplicitReceiver>,
     result: InferenceResult,
-    top_level: FxHashMap<Name, Rc<Vec<Vec<ItemLocation>>>>,
     pub(super) depth: u32,
     /// How many scopes of unknown shape enclose the walk.
     uncertain_scopes: u32,
@@ -142,30 +140,35 @@ pub(super) enum ReturnTarget {
 }
 
 impl<'db> Inferrer<'db> {
+    /// An inferrer of `parse`, `file`'s whole tree.
     pub(crate) fn new(
         db: &'db dyn SourceDatabase,
         file: SourceFile,
         parse: &'db Parse,
     ) -> Inferrer<'db> {
-        let tree = file_item_tree(db, file);
-        let source_map = hir_def::file_item_source_map(db, file);
-        let items_by_range = tree
-            .indexed_items()
-            .map(|(item, _)| (source_map.ranges(item).range, item))
-            .collect();
+        Self::placed(db, file, parse, super::placement::Placement::file(db, file))
+    }
+
+    /// An inferrer of `parse`, which sits in `file` as `placement` says.
+    pub(crate) fn placed(
+        db: &'db dyn SourceDatabase,
+        file: SourceFile,
+        parse: &'db Parse,
+        placement: super::placement::Placement,
+    ) -> Inferrer<'db> {
+        let is_whole_file = matches!(placement, super::placement::Placement::File { .. });
         Inferrer {
             types: Types::new(db, file),
             db,
             file,
             parse,
-            items_by_range,
+            placement,
             scopes: vec![Scope::default()],
             receivers: Vec::new(),
             result: InferenceResult::default(),
-            top_level: FxHashMap::default(),
             depth: 0,
             // A script's implicit receivers (Gradle's DSL) aren't modelled.
-            uncertain_scopes: u32::from(is_script(parse)),
+            uncertain_scopes: u32::from(is_whole_file && is_script(parse)),
             probe: None,
             return_targets: Vec::new(),
             certain_locals: FxHashSet::default(),
@@ -237,9 +240,9 @@ impl<'db> Inferrer<'db> {
             start: self.original_offset(node.start_byte() as u32),
             end: self.original_offset(node.end_byte() as u32),
         };
-        self.items_by_range
-            .get(&range)
-            .map(|index| ItemLocation::in_file(self.file, *index))
+        self.placement
+            .item_spanning(range)
+            .map(|index| ItemLocation::in_file(self.file, index))
     }
 
     pub(super) fn item_kind(&self, location: ItemLocation) -> ItemKind {
@@ -249,18 +252,24 @@ impl<'db> Inferrer<'db> {
     }
 
     /// The top-level declarations named `name` this file sees, by level.
-    pub(super) fn top_level(&mut self, name: Name) -> Rc<Vec<Vec<ItemLocation>>> {
-        if let Some(levels) = self.top_level.get(&name) {
-            return levels.clone();
-        }
-        let levels = Rc::new(top_level_levels(self.db, self.file, name));
-        self.top_level.insert(name, levels.clone());
-        levels
+    pub(super) fn top_level(&mut self, name: Name) -> std::sync::Arc<[Vec<ItemLocation>]> {
+        top_level_levels(self.db, self.file, name)
     }
 
     /// A type written in this file.
     pub(super) fn written_type(&self, node: SyntaxNode<'_>) -> Ty {
         self.facts().written_type(node)
+    }
+
+    /// What the type name `path` written at `offset` of the walked text
+    /// refers to.
+    pub(super) fn resolve_type_path_at(
+        &self,
+        path: &intern::Path,
+        offset: usize,
+    ) -> hir_def::resolver::Resolution {
+        self.placement
+            .resolve_type_path(self.db, self.file, path, offset)
     }
 
     /// What's inferred so far, for the checks that read only that.
@@ -269,6 +278,7 @@ impl<'db> Inferrer<'db> {
             db: self.db,
             file: self.file,
             parse: self.parse,
+            placement: &self.placement,
             types: &self.types,
             result: &self.result,
         }
@@ -822,16 +832,34 @@ impl<'db> Inferrer<'db> {
         for child in named_children(root) {
             self.declaration(child);
         }
-        self.annotations();
+        self.annotations(TextRange::of(root));
+    }
+
+    /// Walks a unit's snippet (see `units`): the declaration `node` in the
+    /// classes around it — or, for the file's own unit, what's at its top
+    /// level — then the annotations of its own text, `own`.
+    pub(crate) fn unit_declarations(&mut self, node: Option<SyntaxNode<'_>>, own: TextRange) {
+        let Some(node) = node else {
+            self.file_declarations();
+            return;
+        };
+        self.enter_enclosing_classes(node);
+        self.declaration(node);
+        // Annotations are walked as the whole file's are: outside every
+        // declaration.
+        self.receivers.clear();
+        self.scopes.truncate(1);
+        self.annotations(own);
     }
 
     /// Every annotation's arguments: `name =` labels mean the annotation's
     /// members, values are expressions. What's in scope there (a class's
     /// constants for its members' annotations) isn't tracked, so misses
     /// are uncertain.
-    fn annotations(&mut self) {
+    fn annotations(&mut self, within: TextRange) {
         let annotations: Vec<SyntaxNode<'_>> = syntax::descendants(self.parse.root())
             .filter(|node| node.kind() == "annotation")
+            .filter(|node| within.contains_range(TextRange::of(*node)))
             .collect();
         self.enter_uncertain_scope();
         for annotation in annotations {

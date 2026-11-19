@@ -35,6 +35,9 @@ pub enum TypeSite {
     Declaration(ItemLocation),
     /// At an offset of the file's text: in a body.
     Offset(usize),
+    /// In a body inside this item of the file (at its top level without
+    /// one): what an offset of the file's text gives, without the offset.
+    Inside(Option<hir_def::ItemId>),
 }
 
 impl TypeScope {
@@ -51,7 +54,7 @@ impl TypeScope {
     fn owner(self) -> Option<ItemLocation> {
         match self.site {
             TypeSite::Declaration(location) => Some(location),
-            TypeSite::Offset(_) => None,
+            TypeSite::Offset(_) | TypeSite::Inside(_) => None,
         }
     }
 
@@ -65,6 +68,23 @@ impl TypeScope {
             // A compiled signature's names are fully qualified.
             TypeSite::Declaration(_) => resolve_type_path(db, self.from, path, 0),
             TypeSite::Offset(offset) => resolve_type_path(db, self.from, path, offset),
+            TypeSite::Inside(innermost) => {
+                hir_def::resolver::resolve_type_path_inside(db, self.from, path, innermost)
+            }
+        }
+    }
+
+    /// A type written in a body of `file` inside `innermost` (see
+    /// [`TypeSite::Inside`]).
+    pub fn inside(
+        db: &dyn SourceDatabase,
+        file: SourceFile,
+        innermost: Option<hir_def::ItemId>,
+    ) -> TypeScope {
+        TypeScope {
+            from: file,
+            site: TypeSite::Inside(innermost),
+            platform: file.language(db) == syntax::Language::Java,
         }
     }
 

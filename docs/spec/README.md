@@ -21,7 +21,8 @@ rust-analyzer's architecture — never from another implementation's source.
 2. **One semantic model.** Navigation, hover, completion and diagnostics read
    the same facts, so they never disagree about what a name means.
 3. **Incremental.** An edit invalidates only what depends on it: changing a
-   function body re-analyses that body, not the declarations of the module.
+   function body re-analyses that body — not the file's other bodies, nor the
+   declarations of the module.
 4. **Low memory.** Declarations are stored compactly with interned names;
    source text of libraries is read on demand; caches can be evicted.
 5. **No external tools.** No `rg`, `fd`, IDE exports or JVM: compiled classes
