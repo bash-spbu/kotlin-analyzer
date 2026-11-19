@@ -43,6 +43,12 @@ local function run_in_terminal(arguments)
   vim.cmd.startinsert()
 end
 
+--- Runs the tests `filter` names (Gradle's `--tests`) in the project
+--- holding `path`: what a "Run test" lens asks for.
+function gradle.run_tests(path, filter)
+  run_in_terminal({ "tests", path, filter })
+end
+
 local function command(invocation)
   local task, project = invocation.fargs[1], invocation.fargs[2]
   if not vim.list_contains(TASKS, task) then

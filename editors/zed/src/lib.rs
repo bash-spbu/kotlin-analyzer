@@ -7,6 +7,8 @@
 //! formatter they choose (`formatting.formatter`: ktrs unless `ktfmt` or
 //! `off`) added as `formatting.path` unless they give one: the formatter on
 //! the PATH, else its pinned release, downloaded once like the server's.
+//! Code lenses are off unless they say (`codeLens`): Zed can't run their
+//! commands, and tests run from the gutter instead (`runnables.scm`).
 
 mod formatter;
 mod release;
@@ -70,6 +72,7 @@ impl zed::Extension for KotlinAnalyzer {
         let options = settings
             .as_ref()
             .and_then(|settings| settings.initialization_options.clone());
+        let options = with_code_lenses_off_by_default(options);
         Ok(self.with_formatter(options, settings.as_ref(), language_server_id, worktree))
     }
 
@@ -160,6 +163,18 @@ impl KotlinAnalyzer {
         options["formatting"]["path"] = Value::from(program);
         Some(options)
     }
+}
+
+/// `options` with `codeLens` off when they don't set it: the lenses' commands
+/// are the client's to run, and Zed runs only rust-analyzer's.
+fn with_code_lenses_off_by_default(options: Option<Value>) -> Option<Value> {
+    let mut options = options.unwrap_or_else(|| Value::Object(Default::default()));
+    if let Some(object) = options.as_object_mut() {
+        object
+            .entry("codeLens")
+            .or_insert_with(|| zed::serde_json::json!({ "references": false, "tests": false }));
+    }
+    Some(options)
 }
 
 /// A `formatting` setting as text: from `settings`, else from

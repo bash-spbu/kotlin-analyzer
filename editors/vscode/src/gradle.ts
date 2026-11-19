@@ -15,6 +15,8 @@ interface GradleTaskDefinition extends vscode.TaskDefinition {
   task: GradleTask;
   /** A file or directory in the build; for `test`, in the project to test. */
   path: string;
+  /** For `test`: only the tests this Gradle `--tests` filter names, in the project holding `path`. */
+  tests?: string;
 }
 
 /** A project holding the file, as gradle_task.py lists it. */
@@ -25,13 +27,33 @@ interface Project {
 
 export function registerGradleTasks(context: vscode.ExtensionContext): vscode.Disposable {
   const script = context.asAbsolutePath(path.join("dist", "gradle_task.py"));
-  return vscode.tasks.registerTaskProvider(TASK_TYPE, {
+  const runTests = vscode.commands.registerCommand(RUN_TESTS_COMMAND, (run: TestRun) =>
+    runFilteredTests(script, run),
+  );
+  const provider = vscode.tasks.registerTaskProvider(TASK_TYPE, {
     provideTasks: () => tasksForActiveFile(script),
     resolveTask: (task) => {
       const definition = task.definition as GradleTaskDefinition;
       return gradleTask(script, definition, nameOf(definition, undefined), task.scope);
     },
   });
+  return vscode.Disposable.from(runTests, provider);
+}
+
+/** The command of the server's "Run test" lenses (docs/spec/lsp.md). */
+export const RUN_TESTS_COMMAND = "kotlin-analyzer.runTests";
+
+/** A "Run test" lens's argument: the test file, and Gradle's `--tests` filter. */
+interface TestRun {
+  uri: string;
+  filter: string;
+}
+
+async function runFilteredTests(script: string, run: TestRun): Promise<void> {
+  const file = vscode.Uri.parse(run.uri);
+  const definition: GradleTaskDefinition = { type: TASK_TYPE, task: "test", path: file.fsPath, tests: run.filter };
+  const scope = vscode.workspace.getWorkspaceFolder(file) ?? vscode.TaskScope.Workspace;
+  await vscode.tasks.executeTask(gradleTask(script, definition, nameOf(definition, undefined), scope));
 }
 
 async function tasksForActiveFile(script: string): Promise<vscode.Task[]> {
@@ -63,6 +85,9 @@ function nameOf(definition: GradleTaskDefinition, project: Project | undefined):
     case "clean":
       return "gradle clean";
     case "test":
+      if (definition.tests !== undefined) {
+        return `gradle test --tests ${definition.tests}`;
+      }
       return `gradle test --rerun-tasks: ${project?.path ?? path.basename(definition.path)}`;
   }
 }
@@ -73,7 +98,11 @@ function gradleTask(
   name: string,
   scope: vscode.WorkspaceFolder | vscode.TaskScope | undefined,
 ): vscode.Task {
-  const execution = new vscode.ProcessExecution("python3", ["-I", script, definition.task, definition.path]);
+  const scriptArguments =
+    definition.tests === undefined
+      ? [definition.task, definition.path]
+      : ["tests", definition.path, definition.tests];
+  const execution = new vscode.ProcessExecution("python3", ["-I", script, ...scriptArguments]);
   const task = new vscode.Task(definition, scope ?? vscode.TaskScope.Workspace, name, "kotlin-analyzer", execution, []);
   task.group = { build: vscode.TaskGroup.Build, clean: vscode.TaskGroup.Clean, test: vscode.TaskGroup.Test }[
     definition.task

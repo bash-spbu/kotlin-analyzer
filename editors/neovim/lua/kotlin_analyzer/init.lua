@@ -5,6 +5,9 @@
 --     cmd = nil,          -- a command to run instead of finding the binary
 --     download = true,    -- download the release when there's no binary
 --     java = true,        -- also serve Java buffers
+--     codelens = true,    -- show the server's code lenses (run a test,
+--                         -- reference counts); run one with
+--                         -- vim.lsp.codelens.run()
 --     init_options = { diagnostics = { disabled = { "unused-import" } } },
 --     lsp = {},           -- anything else for vim.lsp.config (on_attach, …)
 --   })
@@ -21,6 +24,7 @@ local defaults = {
   cmd = nil,
   download = true,
   java = true,
+  codelens = true,
   init_options = {},
   lsp = {},
 }
@@ -64,6 +68,34 @@ local function reload_workspace()
   end
 end
 
+--- The commands the server's code lenses carry, which the client runs.
+local function register_lens_commands()
+  vim.lsp.commands["kotlin-analyzer.runTests"] = function(command)
+    local run = command.arguments[1]
+    require("kotlin_analyzer.gradle").run_tests(vim.uri_to_fname(run.uri), run.filter)
+  end
+  vim.lsp.commands["kotlin-analyzer.showReferences"] = function(command, context)
+    local client = vim.lsp.get_client_by_id(context.client_id)
+    local encoding = client and client.offset_encoding or "utf-16"
+    local items = vim.lsp.util.locations_to_items(command.arguments[3], encoding)
+    vim.fn.setqflist({}, " ", { title = "References", items = items })
+    vim.cmd("botright copen")
+  end
+end
+
+--- Shows the code lenses in the buffers the server attaches to.
+local function show_code_lenses()
+  vim.api.nvim_create_autocmd("LspAttach", {
+    group = vim.api.nvim_create_augroup("kotlin_analyzer_codelens", { clear = true }),
+    callback = function(event)
+      local client = vim.lsp.get_client_by_id(event.data.client_id)
+      if client and client.name == NAME then
+        vim.lsp.codelens.enable(true, { bufnr = event.buf })
+      end
+    end,
+  })
+end
+
 local function install_release(options)
   notify("downloading the server " .. version)
   release.install(version, function(error)
@@ -91,6 +123,10 @@ end
 function kotlin_analyzer.setup(user_options)
   local options = vim.tbl_deep_extend("force", defaults, user_options or {})
   create_commands(options)
+  register_lens_commands()
+  if options.codelens then
+    show_code_lenses()
+  end
   if options.cmd then
     enable(options, { source = "setting", command = options.cmd })
   elseif vim.fn.executable("kotlin-analyzer") == 1 then

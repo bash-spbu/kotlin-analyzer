@@ -44,6 +44,8 @@ first): what one file declares changes what another's code means.
 | `textDocument/documentHighlight` | the occurrences in the current file of what the name at the cursor means, found as references are; the declaration, an assignment's target (`x = …`, `x += …`, `this.x = …`) and `x++`/`--x` as *write*, the rest — `x` of `x.y = …` included — as *read* |
 | `textDocument/documentSymbol` | the file's declarations as a tree |
 | `workspace/symbol` | workspace declarations (and, for queries of 3+ characters, library classes) matching the query fuzzily |
+| `textDocument/selectionRange` | for each position, the ranges "expand selection" grows through, innermost first: the word at it (inside a string or a comment too; at a word's end before punctuation, that word), then each syntax node around it, with what lies between a node's brackets or quotes (`(…)`, `{…}`, `[…]`, `<…>`, `"…"`, whitespace by them left out) before the node itself |
+| `textDocument/codeLens`, `codeLens/resolve` | in a Kotlin file, once the workspace has loaded: over each class, function, property and type alias, its reference count — counted on `codeLens/resolve` (`data` holds where its name is), as `textDocument/references` would find them, with the command `kotlin-analyzer.showReferences` (arguments: the file's URI, the name's position, the references' locations); over each function annotated as a test (JUnit 4 and 5's `@Test`, `@ParameterizedTest`, `@RepeatedTest`, `@TestFactory`, `@TestTemplate`, kotlin.test's and TestNG's `@Test`: by what the annotation resolves to, or without the library on the classpath by its import or qualified spelling) "▶ Run test", and over each class holding one (itself or in a nested class) "▶ Run tests", with the command `kotlin-analyzer.runTests` and `{ "uri", "filter" }` — Gradle's `--tests` filter (`app.OrderTest.creates an order`, `app.Outer$Nested`). The commands are the client's to run (the editor extensions do). `codeLens.references` and `codeLens.tests` (both on by default) turn either kind off; the client is asked to refresh its lenses (`workspace/codeLens/refresh`, when it supports it) after a load and a change of these |
 | `textDocument/foldingRange` | multi-line class and function bodies, blocks, lambdas, `when`s, the import list, block comments (a body and its block fold once) |
 | `textDocument/semanticTokens/full` | every name classified by what it resolves to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, and decorator for an annotation's name where it annotates (`@Name`, `@Name(…)`, `@param:Name`; `Name::class` stays a class or interface); modifiers: declaration, readonly (`val`, non-`var` locals), static, deprecated, mutable (`var`), defaultLibrary (Kotlin's standard library, the JDK: `kotlin.*`, `java.*`, `javax.*`). |
 | `textDocument/semanticTokens/full/delta` | what changed since the tokens sent with `previousResultId` (the last sent for the file): one edit between their common start and end; all the tokens when that id isn't the last |
@@ -66,10 +68,11 @@ Settings in `initializationOptions`: `diagnostics.disabled`,
 `"off"`), `formatting.style` (`"kotlinlang"`, `"meta"`, `"google"`),
 `formatting.path` (the formatter's executable or ktfmt's `.jar`, run with
 `$JAVA_HOME/bin/java` or `java`; else the formatter's name on the `PATH`),
+`codeLens.references`, `codeLens.tests` (booleans, `true` by default),
 `gradleExport`, `projectJson`, and `log` (`"info"`, `"debug"`; see
 logging.md). A value not understood is the default. `diagnostics`,
-`formatting` and `log` may also change in `workspace/didChangeConfiguration`
+`formatting`, `codeLens` and `log` may also change in `workspace/didChangeConfiguration`
 (under `kotlin-analyzer`, or at the top); a `formatting` there replaces the
 one before as a whole.
 
-Not provided: range formatting, on-type formatting, selection range.
+Not provided: range formatting, on-type formatting.

@@ -40,6 +40,21 @@ The server binary is the first of:
    downloads are removed. Releases exist for macOS and Linux on arm64 and
    x86_64.
 
+## Running tests
+
+Test functions (`@Test`, `@ParameterizedTest`, `@RepeatedTest`,
+`@TestFactory`, `@TestTemplate`) get a ▶ in the gutter, and so do the
+classes holding them, top-level or nested one level
+(`languages/kotlin/runnables.scm`). It runs `gradle test --tests <filter>
+--rerun` in the file's project — `app.OrderTest.creates an order`,
+`app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py tests`.
+
+The server's code lenses are off in Zed (`codeLens` defaults to
+`{ "references": false, "tests": false }`): Zed doesn't run their commands,
+and tests run from the gutter. Turning `references` on in `settings` shows
+the reference counts with `"code_lens": "on"`, but clicking one does
+nothing.
+
 ## Gradle tasks
 
 With a Kotlin file open, *task: spawn* offers:

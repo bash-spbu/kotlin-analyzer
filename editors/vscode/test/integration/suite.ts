@@ -21,6 +21,7 @@ export async function run(): Promise<void> {
     ["the server's reload command is in the palette", () => reloads()],
     ["Format Document runs the configured formatter", () => formats(workspace, sources)],
     ["Gradle tasks build, clean and test the file's project or a parent", () => runsGradleTasks(workspace)],
+    ["code lenses run a test and count references", () => runsTestsFromLenses(workspace)],
   ];
   const failures: string[] = [];
   for (const [name, check] of checks) {
@@ -103,6 +104,33 @@ async function formats(workspace: string, sources: string): Promise<void> {
   assert.equal(document.getText(), "package app\n\nval one = 1\n");
   const call = await fs.readFile(path.join(workspace, "fake-ktrs.call"), "utf8");
   assert.equal(call, "fmt --style kotlinlang -\n");
+}
+
+async function runsTestsFromLenses(workspace: string): Promise<void> {
+  const file = vscode.Uri.file(path.join(workspace, "lib/src/test/kotlin/lib/LibTest.kt"));
+  await vscode.window.showTextDocument(file);
+  const lenses = await waitFor(async () => {
+    const found = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", file, 100);
+    return found.some((lens) => lens.command?.title === "▶ Run test") ? found : undefined;
+  }, "a Run test lens in LibTest.kt");
+  const counts = lenses.map((lens) => lens.command?.title).filter((title) => title?.endsWith("references"));
+  assert.ok(counts.includes("0 references"), `reference counts resolved: ${counts.join(", ")}`);
+  const showReferences = lenses.find((lens) => lens.command?.title.endsWith("references"))!.command!;
+  await vscode.commands.executeCommand(showReferences.command, ...(showReferences.arguments ?? []));
+  const runTest = lenses.find((lens) => lens.command?.title === "▶ Run test")!.command!;
+  const callFile = process.env.GRADLE_CALL;
+  assert.ok(callFile, "run.ts sets GRADLE_CALL");
+  await fs.rm(callFile, { force: true });
+  const ended = new Promise<number | undefined>((resolve) => {
+    const listener = vscode.tasks.onDidEndTaskProcess((event) => {
+      listener.dispose();
+      resolve(event.exitCode);
+    });
+  });
+  await vscode.commands.executeCommand(runTest.command, ...(runTest.arguments ?? []));
+  assert.equal(await ended, 0);
+  const call: string[] = (await fs.readFile(callFile, "utf8")).trim().split("\n");
+  assert.deepEqual(call.slice(1), ["-p", "lib", "test", "--tests", "lib.LibTest.works", "--rerun"]);
 }
 
 async function reloads(): Promise<void> {

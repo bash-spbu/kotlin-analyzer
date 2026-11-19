@@ -8,7 +8,8 @@ use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
     CodeActionRequest, DocumentDiagnosticRequest, DocumentSymbolRequest, GotoDeclaration,
     GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest,
-    InlayHintResolveRequest, Request as _, WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
+    InlayHintResolveRequest, Request as _, SelectionRangeRequest, WorkspaceDiagnosticRequest,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -29,6 +30,7 @@ pub(super) struct Snapshot {
     pub(super) request_file: Option<FileId>,
     pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
     pub(super) formatting: Arc<super::formatting::FormattingConfig>,
+    pub(super) code_lens_config: super::code_lens::CodeLensConfig,
     /// What a position's column counts, as agreed with the client.
     pub(super) encoding: vfs::ColumnUnit,
     /// How many times the workspace has changed: a pull diagnostics
@@ -48,6 +50,7 @@ impl Snapshot {
             request_file: self.request_file,
             diagnostics_config: self.diagnostics_config.clone(),
             formatting: self.formatting.clone(),
+            code_lens_config: self.code_lens_config,
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
@@ -97,11 +100,16 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             }
             WorkspaceSymbolRequest::METHOD => params::<WorkspaceSymbolRequest>(request)
                 .map(|params| workspace_symbols(&snapshot, &params.query)),
+            SelectionRangeRequest::METHOD => params::<SelectionRangeRequest>(request)
+                .map(|params| selection_ranges(&snapshot, &params.positions)),
             method if editing::handles(method) => editing::handle(&snapshot, request),
             DocumentDiagnosticRequest::METHOD => params::<DocumentDiagnosticRequest>(request)
                 .map(|params| super::pull_diagnostics::document(&snapshot, params)),
             WorkspaceDiagnosticRequest::METHOD => params::<WorkspaceDiagnosticRequest>(request)
                 .map(|params| super::pull_diagnostics::workspace(&snapshot, params)),
+            method if super::code_lens::METHODS.contains(&method) => {
+                Ok(super::code_lens::handle(&snapshot, method, &request.params))
+            }
             method if super::hierarchy::METHODS.contains(&method) => {
                 Ok(super::hierarchy::handle(&snapshot, method, &request.params))
             }
@@ -122,6 +130,49 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
         ),
         Err(error) => Response::new_err(id, ErrorCode::InvalidParams as i32, error),
     }
+}
+
+/// For each position, the ranges "expand selection" grows through, as LSP
+/// nests them (the innermost first, each with the next as its parent); a
+/// position in a file the server doesn't know gets just itself.
+fn selection_ranges(
+    snapshot: &Snapshot,
+    positions: &[lsp_types::Position],
+) -> Cancellable<serde_json::Value> {
+    let empty_at = |position: lsp_types::Position| lsp_types::SelectionRange {
+        range: lsp_types::Range::new(position, position),
+        parent: None,
+    };
+    let text = match snapshot.request_file {
+        Some(file) => snapshot.analysis.file_text(file)?,
+        None => None,
+    };
+    let (Some(file), Some(text)) = (snapshot.request_file, text) else {
+        let answer: Vec<_> = positions.iter().copied().map(empty_at).collect();
+        return Ok(serde_json::to_value(answer).unwrap_or_default());
+    };
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
+    let offsets: Vec<usize> = positions
+        .iter()
+        .map(|position| convert::offset(&text, *position, snapshot.encoding))
+        .collect();
+    let all_ranges = snapshot.analysis.selection_ranges(file, &offsets)?;
+    let answer: Vec<lsp_types::SelectionRange> = positions
+        .iter()
+        .zip(all_ranges)
+        .map(|(position, ranges)| {
+            let outermost_first = ranges.iter().rev();
+            outermost_first
+                .fold(None, |parent, range| {
+                    Some(lsp_types::SelectionRange {
+                        range: convert::range(&index, &text, *range),
+                        parent: parent.map(Box::new),
+                    })
+                })
+                .unwrap_or_else(|| empty_at(*position))
+        })
+        .collect();
+    Ok(serde_json::to_value(answer).unwrap_or_default())
 }
 
 fn params<R: lsp_types::request::Request>(request: Request) -> Result<R::Params, String> {

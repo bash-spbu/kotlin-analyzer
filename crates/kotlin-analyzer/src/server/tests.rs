@@ -1041,3 +1041,112 @@ fn formatting_runs_the_configured_formatter_and_shows_its_complaints_only_to_the
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn code_lenses_run_tests_and_count_references_when_resolved_and_selection_grows() {
+    let root = workspace("lenses");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("PriceTest.kt");
+    let text = "package app\n\nimport org.junit.jupiter.api.Test\n\nclass PriceTest {\n    @Test\n    fun doubles() { check(price(2)) }\n}\n\nfun price(amount: Int) = amount * 2\nfun check(value: Int) = price(value)\n";
+    std::fs::write(&file, text).unwrap();
+    let (mut client, initialized) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false, "codeLens": { "references": true } }),
+        json!({ "workspace": { "codeLens": { "refreshSupport": true } } }),
+    );
+    assert_eq!(
+        initialized["capabilities"]["codeLensProvider"]["resolveProvider"],
+        true
+    );
+    assert_eq!(initialized["capabilities"]["selectionRangeProvider"], true);
+    client.wait_for_load(1);
+    client.wait_for_server_request("workspace/codeLens/refresh");
+    client.open(&file, text);
+    let document = json!({ "textDocument": { "uri": uri(&file) } });
+    let lenses = client.request("textDocument/codeLens", document.clone());
+    let lenses = lenses.as_array().unwrap();
+    let run_test = lenses
+        .iter()
+        .find(|lens| lens["command"]["title"] == "▶ Run test")
+        .unwrap();
+    assert_eq!(
+        run_test["range"]["start"],
+        json!({ "line": 6, "character": 8 })
+    );
+    assert_eq!(
+        run_test["command"],
+        json!({
+            "title": "▶ Run test",
+            "command": "kotlin-analyzer.runTests",
+            "arguments": [{ "uri": uri(&file), "filter": "app.PriceTest.doubles" }],
+        })
+    );
+    assert!(
+        lenses
+            .iter()
+            .any(|lens| lens["command"]["arguments"][0]["filter"] == "app.PriceTest")
+    );
+    let price = lenses
+        .iter()
+        .find(|lens| lens["range"]["start"] == json!({ "line": 9, "character": 4 }))
+        .unwrap();
+    assert!(
+        price.get("command").is_none_or(Value::is_null),
+        "counted only on resolve"
+    );
+    let resolved = client.request("codeLens/resolve", price.clone());
+    assert_eq!(resolved["command"]["title"], "2 references");
+    assert_eq!(
+        resolved["command"]["command"],
+        "kotlin-analyzer.showReferences"
+    );
+    assert_eq!(resolved["command"]["arguments"][0], uri(&file));
+    assert_eq!(
+        resolved["command"]["arguments"][1],
+        json!({ "line": 9, "character": 4 })
+    );
+    assert_eq!(
+        resolved["command"]["arguments"][2]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Tests' lenses turned off: the reference counts stay, the client is
+    // asked to refresh.
+    client.server_requests.clear();
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "kotlin-analyzer": { "codeLens": { "tests": false } } } }),
+    );
+    client.wait_for_server_request("workspace/codeLens/refresh");
+    let lenses = client.request("textDocument/codeLens", document);
+    assert!(
+        lenses
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|lens| lens["data"]["offset"].is_u64())
+    );
+
+    // From `amount` in `amount * 2`: the word, the expression, the body…
+    let selection = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "positions": [{ "line": 9, "character": 27 }],
+        }),
+    );
+    let innermost = &selection[0];
+    assert_eq!(
+        innermost["range"],
+        json!({ "start": { "line": 9, "character": 25 }, "end": { "line": 9, "character": 31 } })
+    );
+    assert_eq!(
+        innermost["parent"]["range"],
+        json!({ "start": { "line": 9, "character": 25 }, "end": { "line": 9, "character": 35 } })
+    );
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

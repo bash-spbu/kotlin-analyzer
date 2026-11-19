@@ -1,5 +1,5 @@
 // The extension's settings as the server reads them (docs/spec/lsp.md):
-// `initializationOptions` at start; `diagnostics` and `formatting` again,
+// `initializationOptions` at start; `diagnostics`, `formatting` and `codeLens` again,
 // under `kotlin-analyzer`, on every change.
 
 import * as vscode from "vscode";
@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 export interface ServerSettings {
   diagnostics: { disabled: string[]; experimental: boolean };
   formatting: { formatter: string; style: string; path?: string };
+  codeLens: { references: boolean; tests: boolean };
 }
 
 export interface InitializationOptions extends ServerSettings {
@@ -32,6 +33,10 @@ export function serverSettings(
       formatter: configuration.get<string>("formatting.formatter") ?? "ktrs",
       style: configuration.get<string>("formatting.style") ?? "kotlinlang",
       ...(path ? { path } : {}),
+    },
+    codeLens: {
+      references: configuration.get<boolean>("codeLens.references") ?? true,
+      tests: configuration.get<boolean>("codeLens.tests") ?? true,
     },
   };
 }

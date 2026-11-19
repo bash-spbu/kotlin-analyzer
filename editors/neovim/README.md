@@ -69,8 +69,10 @@ require("kotlin_analyzer").setup({
   cmd = nil,            -- e.g. { "/path/to/kotlin-analyzer" }
   download = true,      -- download the release when there's no binary
   java = true,          -- also serve Java buffers (false next to jdtls)
+  codelens = true,      -- show code lenses: reference counts, ▶ Run test
   init_options = {
     diagnostics = { disabled = { "unused-import" }, experimental = false },
+    codeLens = { references = true, tests = true },
     gradleExport = true,
     projectJson = nil,  -- a model exported beforehand
   },
@@ -106,6 +108,11 @@ Inlay hints are off by default in Neovim; turn them on with
   the `PATH`. `python3` must be on the `PATH`; the tasks are run by
   `editors/gradle/gradle_task.py`.
 
+- Code lenses: `vim.lsp.codelens.run()` on a lens's line runs it. *▶ Run
+  test* / *▶ Run tests* (above test functions and the classes holding them)
+  run `gradle test --tests <filter> --rerun` in the file's project, in a
+  terminal split; a reference count puts the references in the quickfix
+  list.
 - `:KotlinAnalyzerReload` exports the model again if the build changed, then
   reloads every file.
 - `:KotlinAnalyzerInstall` downloads the plugin's release again.

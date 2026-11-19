@@ -10,6 +10,11 @@ in its tasks.json (see zed_tasks.py).
                                     holding <path>, with its subprojects
     gradle_task.py choose <path>    asks which project to test: the one
                                     holding <path> or one of its parents
+    gradle_task.py tests <path> <filter>
+                                    gradle test --tests <filter> --rerun in
+                                    the project holding <path>: a test class
+                                    (`app.OrderTest`, a nested one as `app.Outer/Nested`) or
+                                    function (`app.OrderTest.creates order`)
     gradle_task.py projects <path>  prints those projects, nearest first, as
                                     JSON: [{"path": ":app", "directory": …}]
 
@@ -30,7 +35,7 @@ from pathlib import Path
 
 BUILD_SCRIPTS = ("build.gradle.kts", "build.gradle")
 SETTINGS_SCRIPTS = ("settings.gradle.kts", "settings.gradle")
-TASKS = ("build", "clean", "test", "choose", "projects")
+TASKS = ("build", "clean", "test", "choose", "projects", "tests")
 
 
 class NotABuild(Exception):
@@ -57,6 +62,23 @@ class Build:
             return ["test", "--rerun-tasks"]
         directory = project.relative_to(self.root).as_posix()
         return ["-p", directory, "test", "--rerun-tasks"]
+
+
+    def filtered_test_arguments(self, project: Path, test_filter: str) -> list[str]:
+        """Gradle's arguments to run the tests `test_filter` names in `project`."""
+        arguments = ["test", "--tests", test_filter, "--rerun"]
+        if project == self.root:
+            return arguments
+        return ["-p", project.relative_to(self.root).as_posix(), *arguments]
+
+
+def gradle_test_filter(written: str) -> str:
+    """A test filter as Gradle takes it: no backticks around Kotlin names,
+    no empty segments (a class in no package: `.OrderTest`), and a `/`
+    between class names — which editors write where a `$` would be expanded
+    — as the `$` of a nested class."""
+    segments = [segment for segment in written.replace("`", "").split(".") if segment != ""]
+    return ".".join(segments).replace("/", "$")
 
 
 def has_any(directory: Path, names: tuple[str, ...]) -> bool:
@@ -108,10 +130,15 @@ def chosen_project(build: Build) -> Path:
 
 
 def main(arguments: list[str]) -> int:
-    if len(arguments) != 2 or arguments[0] not in TASKS:
-        print("usage: gradle_task.py " + "|".join(TASKS) + " <file or directory>", file=sys.stderr)
+    task = arguments[0] if arguments else ""
+    expected_count = 3 if task == "tests" else 2
+    if len(arguments) != expected_count or task not in TASKS:
+        print(
+            "usage: gradle_task.py " + "|".join(TASKS) + " <file or directory> [<test filter>]",
+            file=sys.stderr,
+        )
         return 2
-    task, path = arguments
+    path = arguments[1]
     try:
         build = find_build(Path(path))
         if task == "projects":
@@ -125,6 +152,11 @@ def main(arguments: list[str]) -> int:
             run(build, ["build", "-x", "test"])
         elif task == "clean":
             run(build, ["clean"])
+        elif task == "tests":
+            project = build.projects[0]
+            test_filter = gradle_test_filter(arguments[2])
+            print(f"Testing {test_filter} in {build.gradle_path(project)}")
+            run(build, build.filtered_test_arguments(project, test_filter))
         else:
             project = build.projects[0] if task == "test" else chosen_project(build)
             print(f"Testing {build.gradle_path(project)} and its subprojects")

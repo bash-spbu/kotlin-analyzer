@@ -4,7 +4,8 @@
 //! ```json
 //! {
 //!   "diagnostics": { "disabled": ["unused-import"], "experimental": false },
-//!   "formatting": { "formatter": "ktrs", "style": "kotlinlang", "path": "/path/to/ktrs" }
+//!   "formatting": { "formatter": "ktrs", "style": "kotlinlang", "path": "/path/to/ktrs" },
+//!   "codeLens": { "references": true, "tests": true }
 //! }
 //! ```
 
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use ide::{Check, DiagnosticsConfig};
 use serde_json::Value;
 
+use super::code_lens::CodeLensConfig;
 use super::formatting::{Formatter, FormatterSetup, FormattingConfig, Program, Style};
 
 /// How much the log writes as it happens: `log` in `initializationOptions`
@@ -51,6 +53,29 @@ pub(super) fn diagnostics_config(options: Option<&Value>) -> DiagnosticsConfig {
 pub(super) fn changed_diagnostics_config(settings: &Value) -> Option<DiagnosticsConfig> {
     let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
     ours.get("diagnostics").map(read)
+}
+
+/// The code lens settings in `initializationOptions`.
+pub(super) fn code_lens_config(options: Option<&Value>) -> CodeLensConfig {
+    options
+        .and_then(|options| options.get("codeLens"))
+        .map(read_code_lens)
+        .unwrap_or_default()
+}
+
+/// The code lens settings in a configuration change, if it has them.
+pub(super) fn changed_code_lens_config(settings: &Value) -> Option<CodeLensConfig> {
+    let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
+    ours.get("codeLens").map(read_code_lens)
+}
+
+/// `references` and `tests`, each on unless `false`.
+fn read_code_lens(code_lens: &Value) -> CodeLensConfig {
+    let enabled = |key: &str| code_lens.get(key).and_then(Value::as_bool).unwrap_or(true);
+    CodeLensConfig {
+        references: enabled("references"),
+        tests: enabled("tests"),
+    }
 }
 
 /// The formatting settings in `initializationOptions`.
@@ -166,5 +191,28 @@ mod tests {
             serde_json::json!({ "kotlin-analyzer": { "formatting": { "formatter": "off" } } });
         assert_eq!(changed_formatting_config(&off), Some(FormattingConfig::Off));
         assert_eq!(changed_formatting_config(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn code_lenses_are_each_on_unless_turned_off() {
+        assert_eq!(code_lens_config(None), CodeLensConfig::default());
+        let options = serde_json::json!({ "codeLens": { "tests": false } });
+        assert_eq!(
+            code_lens_config(Some(&options)),
+            CodeLensConfig {
+                references: true,
+                tests: false
+            }
+        );
+        let changed =
+            serde_json::json!({ "kotlin-analyzer": { "codeLens": { "references": false } } });
+        assert_eq!(
+            changed_code_lens_config(&changed),
+            Some(CodeLensConfig {
+                references: false,
+                tests: true
+            })
+        );
+        assert_eq!(changed_code_lens_config(&serde_json::json!({})), None);
     }
 }

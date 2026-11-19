@@ -6,6 +6,7 @@
 //! requests are answered "content modified". Loading the workspace runs in
 //! the background and reports progress.
 
+mod code_lens;
 mod convert;
 mod editing;
 mod formatting;
@@ -92,6 +93,7 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         .map(PathBuf::from);
     let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
     let formatting = settings::formatting_config(params.initialization_options.as_ref());
+    let code_lens_config = settings::code_lens_config(params.initialization_options.as_ref());
     let gradle_export = params
         .initialization_options
         .as_ref()
@@ -142,6 +144,7 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     }
     state.diagnostics_config = Arc::new(diagnostics_config);
     state.formatting = Arc::new(formatting);
+    state.code_lens_config = code_lens_config;
     state.gradle_export = gradle_export;
     state.start_loading();
     state.start_export();
@@ -246,6 +249,10 @@ fn capabilities() -> ServerCapabilities {
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
         })),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
+        code_lens_provider: Some(lsp_types::CodeLensOptions {
+            resolve_provider: Some(true),
+        }),
         semantic_tokens_provider: Some(
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 lsp_types::SemanticTokensOptions {
@@ -391,6 +398,7 @@ fn watches_files(capabilities: &lsp_types::ClientCapabilities) -> bool {
 struct ClientRefreshes {
     semantic_tokens: bool,
     inlay_hints: bool,
+    code_lenses: bool,
 }
 
 impl ClientRefreshes {
@@ -404,6 +412,10 @@ impl ClientRefreshes {
             inlay_hints: workspace
                 .and_then(|workspace| workspace.inlay_hint.as_ref())
                 .and_then(|hints| hints.refresh_support)
+                .unwrap_or(false),
+            code_lenses: workspace
+                .and_then(|workspace| workspace.code_lens.as_ref())
+                .and_then(|lenses| lenses.refresh_support)
                 .unwrap_or(false),
         }
     }
@@ -434,6 +446,8 @@ struct GlobalState {
     diagnostics_config: Arc<ide::DiagnosticsConfig>,
     /// How documents are formatted, from the client's settings.
     formatting: Arc<formatting::FormattingConfig>,
+    /// Which code lenses the client wants.
+    code_lens_config: code_lens::CodeLensConfig,
     /// Whether the server may run Gradle to export the model.
     gradle_export: bool,
     exporting: bool,
@@ -491,6 +505,7 @@ impl GlobalState {
             shutdown_requested: false,
             diagnostics_config: Arc::default(),
             formatting: Arc::default(),
+            code_lens_config: code_lens::CodeLensConfig::default(),
             gradle_export: true,
             exporting: false,
             load_generation: 0,
@@ -1039,6 +1054,13 @@ impl GlobalState {
         if self.refreshes.inlay_hints {
             self.send_request::<request::InlayHintRefreshRequest>(());
         }
+        self.refresh_code_lenses();
+    }
+
+    fn refresh_code_lenses(&mut self) {
+        if self.refreshes.code_lenses {
+            self.send_request::<request::CodeLensRefresh>(());
+        }
     }
 
     fn on_request(&mut self, request: Request) {
@@ -1090,6 +1112,7 @@ impl GlobalState {
             request_file,
             diagnostics_config: self.diagnostics_config.clone(),
             formatting: self.formatting.clone(),
+            code_lens_config: self.code_lens_config,
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
@@ -1348,6 +1371,14 @@ impl GlobalState {
                     if let Some(level) = settings::changed_log_level(&params.settings) {
                         crate::log::set_level(level);
                     }
+                    if let Some(config) = settings::changed_code_lens_config(&params.settings) {
+                        Event::info("code-lens-changed")
+                            .flag("references", config.references)
+                            .flag("tests", config.tests)
+                            .emit();
+                        self.code_lens_config = config;
+                        self.refresh_code_lenses();
+                    }
                     if let Some(config) = settings::changed_formatting_config(&params.settings) {
                         Event::info("formatting-changed")
                             .text("formatter", config.formatter_name())
@@ -1551,6 +1582,9 @@ const KNOWN_METHODS: &[&str] = &[
     "textDocument/documentSymbol",
     "workspace/symbol",
     "textDocument/foldingRange",
+    "textDocument/selectionRange",
+    "textDocument/codeLens",
+    "codeLens/resolve",
     "textDocument/semanticTokens/full",
     "textDocument/semanticTokens/full/delta",
     "textDocument/semanticTokens/range",

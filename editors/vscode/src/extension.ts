@@ -6,6 +6,8 @@ import {
   DidChangeConfigurationNotification,
   LanguageClient,
   type DocumentSelector,
+  type Location,
+  type Position,
   type LanguageClientOptions,
   type ServerOptions,
 } from "vscode-languageclient/node";
@@ -35,6 +37,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Api> {
     vscode.commands.registerCommand(`${SECTION}.restartServer`, () => restart(context)),
     vscode.commands.registerCommand(`${SECTION}.showLogs`, () => output?.show()),
     registerGradleTasks(context),
+    vscode.commands.registerCommand(SHOW_REFERENCES_COMMAND, showReferences),
     vscode.workspace.onDidChangeConfiguration((change) => {
       const needsRestart = RESTART_SETTINGS.some((setting) => change.affectsConfiguration(setting));
       if (needsRestart) {
@@ -81,6 +84,23 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
   };
   client = new LanguageClient(SECTION, "kotlin-analyzer", serverOptions, clientOptions);
   await client.start();
+}
+
+/** The command of the server's reference-count lenses (docs/spec/lsp.md). */
+const SHOW_REFERENCES_COMMAND = `${SECTION}.showReferences`;
+
+/** The references a lens counted, in VS Code's peek view. */
+async function showReferences(uri: string, position: Position, locations: Location[]): Promise<void> {
+  const converter = client?.protocol2CodeConverter;
+  if (converter === undefined) {
+    return;
+  }
+  await vscode.commands.executeCommand(
+    "editor.action.showReferences",
+    converter.asUri(uri),
+    converter.asPosition(position),
+    locations.map((location) => converter.asLocation(location)),
+  );
 }
 
 /**

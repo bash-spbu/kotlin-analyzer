@@ -41,7 +41,10 @@ Features:
 - go-to definition (into library sources), implementation, hover;
 - completion with auto-import, signature help;
 - references and rename;
-- semantic highlighting, inlay type hints, symbols, folding;
+- semantic highlighting, inlay type hints, symbols, folding, expand
+  selection;
+- code lenses: reference counts, and running a test or a test class with
+  Gradle;
 - diagnostics with quick fixes, which report only what they are sure of;
 - formatting by ktrs (ktfmt's output, natively) or ktfmt, which the editor
   extensions download;

@@ -108,6 +108,29 @@ class GradleTaskTest(BuildFixture):
         self.run_task("test", str(self.root / "settings.gradle.kts"))
         self.assertEqual(self.gradle_call(), (self.root, ["test", "--rerun-tasks"]))
 
+    def test_tests_run_the_filter_in_the_nearest_project_only(self) -> None:
+        test_file = self.root / "services/payments/src/test/kotlin/pay/PayTest.kt"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("package pay\n")
+        result = self.run_task("tests", str(test_file), "pay.PayTest.`charges in full`")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Testing pay.PayTest.charges in full in :services:payments", result.stdout)
+        self.assertEqual(
+            self.gradle_call(),
+            (
+                self.root,
+                ["-p", "services/payments", "test", "--tests", "pay.PayTest.charges in full", "--rerun"],
+            ),
+        )
+        # A class in no package, nested: as editors without a `$` write it.
+        self.run_task("tests", str(self.root / "settings.gradle.kts"), ".Outer/Nested.works")
+        self.assertEqual(
+            self.gradle_call(),
+            (self.root, ["test", "--tests", "Outer$Nested.works", "--rerun"]),
+        )
+        missing_filter = self.run_task("tests", str(test_file))
+        self.assertEqual(missing_filter.returncode, 2)
+
     def test_choose_offers_the_project_and_its_parents(self) -> None:
         result = self.run_task("choose", str(self.source), answer="2\n")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -160,21 +183,42 @@ class ZedTasksTest(unittest.TestCase):
 
 
 class ZedTaskRunTest(BuildFixture):
+    # What Zed puts for each variable: the file, and the runnables' captures
+    # of a test function in `pay.PayTest.Refunds` (a missing package capture
+    # leaves its `${…:}` empty).
+    VARIABLES = {
+        "${ZED_CUSTOM_kotlin_package_name:}": "pay",
+        "$ZED_CUSTOM_kotlin_outer_class_name": "PayTest",
+        "$ZED_CUSTOM_kotlin_class_name": "Refunds",
+        "$ZED_CUSTOM_kotlin_method_name": "`refunds in full`",
+    }
+
+    def substituted(self, argument: str) -> str:
+        for variable, value in {**self.VARIABLES, "$ZED_FILE": str(self.source)}.items():
+            argument = argument.replace(variable, value)
+        return argument
+
     def test_each_zed_task_runs_like_the_script(self) -> None:
         tasks = json.loads(zed_tasks.TASKS_FILE.read_text())
+        payments = ["-p", "services/payments", "test", "--tests"]
         expected = {
             "build": ["build", "-x", "test"],
             "clean": ["clean"],
             "test": ["-p", "services/payments", "test", "--rerun-tasks"],
             "choose": ["-p", "services", "test", "--rerun-tasks"],
+            "kotlin-test-method": [*payments, "pay.Refunds.refunds in full", "--rerun"],
+            "kotlin-test-nested-method": [*payments, "pay.PayTest$Refunds.refunds in full", "--rerun"],
+            "kotlin-test-class": [*payments, "pay.Refunds", "--rerun"],
+            "kotlin-test-nested-class": [*payments, "pay.PayTest$Refunds", "--rerun"],
         }
-        self.assertEqual([task["args"][3] for task in tasks], list(expected))
-        for task in tasks:
-            arguments = [argument.replace("$ZED_FILE", str(self.source)) for argument in task["args"]]
+        keys = [task.get("tags", [task["args"][3]])[0] for task in tasks]
+        self.assertEqual(keys, list(expected))
+        for task, key in zip(tasks, keys):
+            arguments = [self.substituted(argument) for argument in task["args"]]
             command = [sys.executable if task["command"] == "python3" else task["command"], *arguments]
             result = self.run_command(command, answer="2\n")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.gradle_call(), (self.root, expected[task["args"][3]]), task["label"])
+            self.assertEqual(self.gradle_call(), (self.root, expected[key]), task["label"])
 
 
 if __name__ == "__main__":

@@ -4122,3 +4122,174 @@ fn a_file_opened_before_the_workspace_loads_is_analysed_without_a_model() {
     analysis.semantic_tokens(file).unwrap();
     analysis.document_symbols(file).unwrap();
 }
+
+/// The ranges "expand selection" grows through from `$0`, one per line.
+fn check_selection(fixture: &str, expected: Expect) {
+    let fixture = Fixture::parse(fixture);
+    let (file, offset) = fixture.cursor();
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let ranges = analysis(&fixture)
+        .selection_ranges(file, &[offset])
+        .unwrap()
+        .remove(0);
+    for pair in ranges.windows(2) {
+        assert!(pair[1].contains_range(pair[0]) && pair[1] != pair[0]);
+    }
+    let described: Vec<String> = ranges
+        .iter()
+        .map(|range| text[range.as_range()].replace('\n', "⏎"))
+        .take_while(|selected| !selected.starts_with("package"))
+        .collect();
+    expected.assert_eq(&described.join("\n"));
+}
+
+#[test]
+fn selection_grows_from_the_word_through_what_brackets_hold_to_the_declaration() {
+    check_selection(
+        r#"
+//- /app/b/Use.kt
+package b
+
+fun total(prices: List<Int>): Int {
+    return prices.sumOf { price -> price * 2 } + 1
+}
+"#
+        .replace("price * 2", "pri$0ce * 2")
+        .as_str(),
+        expect![[r#"
+            price
+            price * 2
+            price -> price * 2
+            { price -> price * 2 }
+            prices.sumOf { price -> price * 2 }
+            prices.sumOf { price -> price * 2 } + 1
+            return prices.sumOf { price -> price * 2 } + 1
+            {⏎    return prices.sumOf { price -> price * 2 } + 1⏎}
+            fun total(prices: List<Int>): Int {⏎    return prices.sumOf { price -> price * 2 } + 1⏎}"#]],
+    );
+}
+
+#[test]
+fn selection_at_a_words_end_starts_with_the_word_and_takes_a_strings_contents() {
+    check_selection(
+        r#"
+//- /app/b/Use.kt
+package b
+
+val greeting = listOf("hello there", name$0)
+"#,
+        expect![[r#"
+            name
+            "hello there", name
+            ("hello there", name)
+            listOf("hello there", name)
+            val greeting = listOf("hello there", name)"#]],
+    );
+    check_selection(
+        r#"
+//- /app/b/Use.kt
+package b
+
+val greeting = "hello th$0ere"
+"#,
+        expect![[r#"
+            there
+            hello there
+            "hello there"
+            val greeting = "hello there""#]],
+    );
+}
+
+/// `line: kind` for each lens of `path`'s file.
+fn lenses_of(fixture: &Fixture, path: &str) -> String {
+    let file = fixture.file(path);
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let lenses = analysis(fixture).code_lenses(file).unwrap();
+    lenses
+        .iter()
+        .map(|lens| {
+            let name = &text[lens.range.as_range()];
+            match &lens.kind {
+                crate::CodeLensKind::References => format!("{name}: references"),
+                crate::CodeLensKind::RunTests { target, filter } => {
+                    format!("{name}: run {target:?} {filter}")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn test_lenses_are_on_functions_annotated_as_tests_and_the_classes_holding_them() {
+    let fixture = Fixture::parse(
+        r#"
+//- /lib/org/junit/jupiter/api/Test.kt
+package org.junit.jupiter.api
+
+annotation class Test
+//- /app/fake/Test.kt
+package app.fake
+
+annotation class Test
+//- /app/orders/OrderTest.kt
+package app.orders
+
+import org.junit.jupiter.api.Test
+
+class OrderTest {
+    @Test
+    fun `creates an order`() {}
+
+    fun helper() {}
+
+    class Refunds {
+        @org.junit.jupiter.api.Test
+        fun refundsInFull() {}
+    }
+}
+
+val shared = 1
+//- /app/orders/Lookalike.kt
+package app.orders
+
+import app.fake.Test
+
+class Lookalike {
+    @Test
+    fun notATest() {}
+}
+//- /app/orders/WithoutJUnit.kt
+package app.orders
+
+import kotlin.test.Test as KotlinTest
+
+class WithoutJUnit {
+    @KotlinTest
+    fun runsWithoutTheLibrary() {}
+}
+"#,
+    );
+    expect![[r#"
+        OrderTest: run Class app.orders.OrderTest
+        OrderTest: references
+        `creates an order`: run Function app.orders.OrderTest.creates an order
+        `creates an order`: references
+        helper: references
+        Refunds: run Class app.orders.OrderTest$Refunds
+        Refunds: references
+        refundsInFull: run Function app.orders.OrderTest$Refunds.refundsInFull
+        refundsInFull: references
+        shared: references"#]]
+    .assert_eq(&lenses_of(&fixture, "/app/orders/OrderTest.kt"));
+    expect![[r#"
+        Lookalike: references
+        notATest: references"#]]
+    .assert_eq(&lenses_of(&fixture, "/app/orders/Lookalike.kt"));
+    expect![[r#"
+        WithoutJUnit: run Class app.orders.WithoutJUnit
+        WithoutJUnit: references
+        runsWithoutTheLibrary: run Function app.orders.WithoutJUnit.runsWithoutTheLibrary
+        runsWithoutTheLibrary: references"#]]
+    .assert_eq(&lenses_of(&fixture, "/app/orders/WithoutJUnit.kt"));
+}

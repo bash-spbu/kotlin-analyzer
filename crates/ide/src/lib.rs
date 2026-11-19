@@ -5,6 +5,7 @@
 //! while a snapshot is still computing, that computation is cancelled and
 //! its call returns `Err(Cancelled)` — the editor asks again.
 
+mod code_lens;
 mod completion;
 mod diagnostics;
 mod document_symbols;
@@ -18,6 +19,7 @@ mod hover;
 mod inlay_hints;
 mod navigation_target;
 mod references;
+mod selection_range;
 mod semantic_tokens;
 mod signature_help;
 mod statistics;
@@ -29,6 +31,7 @@ use std::sync::Arc;
 use hir::{FileChange, FileId, ProjectModel, RootDatabase, SourceDatabase};
 use syntax::{SyntaxError, TextRange};
 
+pub use code_lens::{CodeLens, CodeLensKind, TestTarget};
 pub use completion::{CompletionItem, CompletionKind, Completions};
 pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stability, TextEdit};
 pub use document_symbols::DocumentSymbol;
@@ -177,6 +180,22 @@ impl Analysis {
     /// The regions of `file` an editor can fold.
     pub fn folding_ranges(&self, file: FileId) -> Cancellable<Vec<Fold>> {
         self.with_db(|db| folding::folding_ranges(db, file))
+    }
+
+    /// For each offset, the ranges "expand selection" grows through, from
+    /// the innermost out.
+    pub fn selection_ranges(
+        &self,
+        file: FileId,
+        offsets: &[usize],
+    ) -> Cancellable<Vec<Vec<TextRange>>> {
+        self.with_db(|db| selection_range::selection_ranges(db, file, offsets))
+    }
+
+    /// The lenses over `file`'s declarations: reference counts to resolve,
+    /// test runs.
+    pub fn code_lenses(&self, file: FileId) -> Cancellable<Vec<CodeLens>> {
+        self.with_db(|db| code_lens::code_lenses(db, file))
     }
 
     /// The signatures of the call around `offset`.

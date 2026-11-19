@@ -129,3 +129,79 @@ fn the_extension_queries_compile_and_capture_what_they_are_for() {
     );
     assert!(textobjects.contains("class.inside={"), "{textobjects:?}");
 }
+
+const TEST_SAMPLE: &str = r#"
+package app.orders
+
+import org.junit.jupiter.api.Test
+
+class OrderTest {
+    @Test
+    fun `creates an order`() {}
+
+    @ParameterizedTest(name = "{0}")
+    fun parameterized(value: Int) {}
+
+    @Deprecated("not a test")
+    fun helper() {}
+
+    @Nested
+    inner class Refunds {
+        @org.junit.jupiter.api.Test
+        fun refundsInFull() {}
+    }
+}
+
+class Plain {
+    fun notATest() {}
+}
+"#;
+
+/// Each runnable in `TEST_SAMPLE`: its tag and the captures its task reads.
+fn runnables(language: &Language) -> BTreeSet<String> {
+    let path = queries_directory().join("runnables.scm");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let query =
+        Query::new(language, &text).unwrap_or_else(|error| panic!("runnables.scm: {error}"));
+    let mut parser = Parser::new();
+    parser.set_language(language).unwrap();
+    let tree = parser.parse(TEST_SAMPLE, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), TEST_SAMPLE.as_bytes());
+    let mut found = BTreeSet::new();
+    while let Some(matched) = matches.next() {
+        let tag = query
+            .property_settings(matched.pattern_index)
+            .iter()
+            .find(|setting| &*setting.key == "tag")
+            .and_then(|setting| setting.value.as_deref())
+            .unwrap_or("untagged")
+            .to_owned();
+        let mut variables: Vec<String> = matched
+            .captures
+            .iter()
+            .map(|capture| (query.capture_names()[capture.index as usize], capture.node))
+            .filter(|(name, _)| !name.starts_with('_'))
+            .map(|(name, node)| format!("{name}={}", &TEST_SAMPLE[node.byte_range()]))
+            .collect();
+        variables.sort();
+        found.insert(format!("{tag}: {}", variables.join(" ")));
+    }
+    found
+}
+
+#[test]
+fn the_runnables_find_test_functions_and_the_classes_holding_them() {
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    let found: Vec<String> = runnables(&language).into_iter().collect();
+    assert_eq!(
+        found,
+        [
+            "kotlin-test-class: kotlin_class_name=OrderTest kotlin_package_name=app.orders run=OrderTest",
+            "kotlin-test-method: kotlin_class_name=OrderTest kotlin_method_name=`creates an order` kotlin_package_name=app.orders run=`creates an order`",
+            "kotlin-test-method: kotlin_class_name=OrderTest kotlin_method_name=parameterized kotlin_package_name=app.orders run=parameterized",
+            "kotlin-test-nested-class: kotlin_class_name=Refunds kotlin_outer_class_name=OrderTest kotlin_package_name=app.orders run=Refunds",
+            "kotlin-test-nested-method: kotlin_class_name=Refunds kotlin_method_name=refundsInFull kotlin_outer_class_name=OrderTest kotlin_package_name=app.orders run=refundsInFull",
+        ]
+    );
+}

@@ -38,6 +38,7 @@ printf 'rootProject.name = "demo"\ninclude("app")\n' > "$workspace/settings.grad
 printf 'package app\n\nclass Box(val size: Int)\n' > "$workspace/app/src/main/kotlin/app/Box.kt"
 printf 'package app\n\nfun use(): Int = Box(3).size\n' > "$workspace/app/src/main/kotlin/app/Use.kt"
 printf 'package app\n\nfun broken( {\n' > "$workspace/app/src/main/kotlin/app/Broken.kt"
+printf 'package app\n\nimport org.junit.jupiter.api.Test\n\nclass BoxTest {\n    @Test\n    fun holds() {}\n}\n' > "$workspace/app/src/main/kotlin/app/BoxTest.kt"
 # Records where and how it was called instead of running Gradle.
 printf '#!/bin/sh\n{ pwd; for argument in "$@"; do echo "$argument"; done; } > "$GRADLE_CALL"\n' > "$workspace/gradlew"
 chmod +x "$workspace/gradlew"

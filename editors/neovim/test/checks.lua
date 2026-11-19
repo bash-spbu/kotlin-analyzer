@@ -133,6 +133,39 @@ local function downloads()
     end
   end)
 
+  check("a test's code lens runs it by Gradle", function()
+    vim.cmd.edit(vim.fs.joinpath(sources, "BoxTest.kt"))
+    local buffer = vim.api.nvim_get_current_buf()
+    wait_for("the client to attach", function()
+      return #vim.lsp.get_clients({ bufnr = buffer, name = "kotlin_analyzer" }) > 0 or nil
+    end)
+    local lens = wait_for("a Run test lens", function()
+      local lenses = request(buffer, "textDocument/codeLens", {
+        textDocument = vim.lsp.util.make_text_document_params(buffer),
+      }) or {}
+      for _, candidate in ipairs(lenses) do
+        if candidate.command and candidate.command.title == "▶ Run test" then
+          return candidate
+        end
+      end
+    end)
+    local call_file = vim.env.GRADLE_CALL
+    vim.fn.delete(call_file)
+    local source_window = vim.api.nvim_get_current_win()
+    local client = vim.lsp.get_clients({ bufnr = buffer, name = "kotlin_analyzer" })[1]
+    client:exec_cmd(lens.command, { bufnr = buffer })
+    local lines = wait_for("gradle from the lens", function()
+      local written = vim.uv.fs_stat(call_file) and vim.fn.readfile(call_file) or {}
+      return #written > 0 and written or nil
+    end)
+    vim.cmd("stopinsert")
+    vim.cmd.close()
+    vim.api.nvim_set_current_win(source_window)
+    local arguments = vim.list_slice(lines, 2)
+    local expected = { "-p", "app", "test", "--tests", "app.BoxTest.holds", "--rerun" }
+    assert(vim.deep_equal(arguments, expected), vim.inspect(arguments))
+  end)
+
   check(":KotlinAnalyzerReload runs the server's reload", function()
     local errors_before = #vim.tbl_filter(function(message)
       return message.level == vim.log.levels.ERROR

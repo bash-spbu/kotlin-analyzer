@@ -54,6 +54,13 @@ with its SHA-256 checked and kept in the extension's storage. ktfmt has
 native builds for macOS arm64 and Linux x86_64; elsewhere its jar is
 downloaded, which needs Java (`JAVA_HOME`, else `java` on the `PATH`).
 
+Code lenses show how many references each declaration has (click to peek
+them), and *▶ Run test* / *▶ Run tests* above test functions (JUnit 4 and 5,
+kotlin.test, TestNG) and the classes holding them. Running one starts the
+`kotlin-gradle` task `gradle test --tests <filter> --rerun` in the file's
+project (`"tests"` in `tasks.json` does the same). *Expand Selection*
+(`⌃⇧⌘→`) grows through the server's syntax-aware ranges.
+
 Open the Gradle build's root folder. The server exports the build's model
 in the background, then reloads; until then it works from the directory
 layout.
@@ -79,6 +86,7 @@ In `tasks.json`:
 
 ```json
 { "type": "kotlin-gradle", "task": "test", "path": "${workspaceFolder}/services" }
+{ "type": "kotlin-gradle", "task": "test", "path": "${file}", "tests": "app.OrderTest" }
 ```
 
 ## Settings
@@ -93,12 +101,14 @@ In `tasks.json`:
 | `kotlin-analyzer.formatting.formatter` | `ktrs` (default), `ktfmt` or `off` |
 | `kotlin-analyzer.formatting.style` | `kotlinlang` (default), `meta` or `google` |
 | `kotlin-analyzer.formatting.path` | the formatter's executable, or ktfmt's `.jar` |
+| `kotlin-analyzer.codeLens.references` | reference counts above declarations |
+| `kotlin-analyzer.codeLens.tests` | *▶ Run test* above tests and test classes |
 | `kotlin-analyzer.gradleExport` | export the Gradle model on start |
 | `kotlin-analyzer.projectJson` | a model exported beforehand |
 | `kotlin-analyzer.trace.server` | log LSP traffic to the output |
 
 Changing the server, Java, Gradle or model settings restarts the server.
-Diagnostics and formatting settings apply immediately.
+Diagnostics, formatting and code lens settings apply immediately.
 
 Commands:
 
@@ -114,7 +124,7 @@ Inlay hints follow VS Code's `editor.inlayHints.enabled`.
 ```bash
 npm ci
 npm run check             # types, downloader unit tests, grammar tests
-npm run test:integration  # a real VS Code: download, diagnostics, hover, definition, formatting
+npm run test:integration  # a real VS Code: download, diagnostics, hover, definition, formatting, lenses
 npm run package           # kotlin-analyzer-<version>.vsix
 ```
 

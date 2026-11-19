@@ -24,20 +24,46 @@ TASKS = [
     ("gradle test --rerun-tasks: choose the project or a parent", "choose"),
 ]
 
+# The runnables (languages/kotlin/runnables.scm): (tag, the test filter in
+# its captures). A class in no package has no package capture, and a `/`
+# stands for a nested class's `$` (gradle_task.py's gradle_test_filter).
+PACKAGE = "${ZED_CUSTOM_kotlin_package_name:}"
+TEST_RUNS = [
+    (
+        "kotlin-test-method",
+        PACKAGE + ".$ZED_CUSTOM_kotlin_class_name.$ZED_CUSTOM_kotlin_method_name",
+    ),
+    (
+        "kotlin-test-nested-method",
+        PACKAGE
+        + ".$ZED_CUSTOM_kotlin_outer_class_name/$ZED_CUSTOM_kotlin_class_name"
+        + ".$ZED_CUSTOM_kotlin_method_name",
+    ),
+    ("kotlin-test-class", PACKAGE + ".$ZED_CUSTOM_kotlin_class_name"),
+    (
+        "kotlin-test-nested-class",
+        PACKAGE + ".$ZED_CUSTOM_kotlin_outer_class_name/$ZED_CUSTOM_kotlin_class_name",
+    ),
+]
+
+
+def task(label: str, arguments: list[str]) -> dict:
+    return {
+        "label": label,
+        "command": "python3",
+        "args": ["-I", "-c", SCRIPT.read_text(), *arguments],
+        "use_new_terminal": False,
+        "allow_concurrent_runs": False,
+        "reveal": "always",
+    }
+
 
 def tasks_json() -> str:
-    script = SCRIPT.read_text()
-    tasks = [
-        {
-            "label": label,
-            "command": "python3",
-            "args": ["-I", "-c", script, task, "$ZED_FILE"],
-            "use_new_terminal": False,
-            "allow_concurrent_runs": False,
-            "reveal": "always",
-        }
-        for label, task in TASKS
-    ]
+    tasks = [task(label, [name, "$ZED_FILE"]) for label, name in TASKS]
+    for tag, test_filter in TEST_RUNS:
+        run = task(f"gradle test --tests {test_filter}", ["tests", "$ZED_FILE", test_filter])
+        run["tags"] = [tag]
+        tasks.append(run)
     return json.dumps(tasks, indent=2) + "\n"
 
 

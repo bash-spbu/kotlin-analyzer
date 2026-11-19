@@ -52,6 +52,10 @@
           "path": {
             "type": "string",
             "markdownDescription": "A file or directory in the build, e.g. `${file}` or `${workspaceFolder}/services`. For `test`, the project holding it is tested."
+          },
+          "tests": {
+            "type": "string",
+            "markdownDescription": "For `test`: only the tests this filter names (Gradle's `--tests`, e.g. `app.OrderTest` or `app.OrderTest.creates an order`), in the project holding `path`."
           }
         }
       }
@@ -168,6 +172,16 @@
           "default": null,
           "scope": "machine-overridable",
           "markdownDescription": "The formatter's executable, or ktfmt's `.jar` (run with `java` from `JAVA_HOME` or the `PATH`), instead of the one on the `PATH` or the download."
+        },
+        "kotlin-analyzer.codeLens.references": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show how many references each declaration has above it; clicking one shows them."
+        },
+        "kotlin-analyzer.codeLens.tests": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show *▶ Run test* above test functions and *▶ Run tests* above the classes holding them (JUnit 4 and 5, kotlin.test, TestNG): Gradle's test task with `--tests`, in the file's project."
         },
         "kotlin-analyzer.gradleExport": {
           "type": "boolean",

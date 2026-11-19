@@ -104,6 +104,11 @@ async function writeWorkspace(root: string): Promise<void> {
   await fs.mkdir(path.join(root, "lib/src/main/kotlin/lib"), { recursive: true });
   await fs.writeFile(path.join(root, "lib/build.gradle.kts"), "");
   await fs.writeFile(path.join(root, "lib/src/main/kotlin/lib/Lib.kt"), "package lib\n\nclass Lib\n");
+  await fs.mkdir(path.join(root, "lib/src/test/kotlin/lib"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "lib/src/test/kotlin/lib/LibTest.kt"),
+    "package lib\n\nimport org.junit.jupiter.api.Test\n\nclass LibTest {\n    @Test\n    fun works() { Lib() }\n}\n",
+  );
   // Records where and how it was called instead of running Gradle.
   await fs.writeFile(
     path.join(root, "gradlew"),
