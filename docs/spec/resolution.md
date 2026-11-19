@@ -100,20 +100,39 @@ nor for overloads chosen among several. Such a lambda that always ends by
 jumping (`apply { …; return x }`) makes the call's type `Nothing`: what
 follows isn't reached.
 
-Smart casts follow the data flow within a body:
+Smart casts follow the data flow within a body, kept as K2's analysis
+keeps it: a flow of facts — per local or stable property, its type there,
+or that it can't be told (*unsure*: its declared type, nothing judged of
+it) — and whether any way reaches the point. Facts outlive the block they
+were found in. Every branching construct runs each way on its own copy of
+the flow and merges the ways that go on: per value, the wider of two
+types that fit one another, else their common supertype (unsure when
+none is known, or when type arguments would have to be compared), with
+the widest nullability (`String` and a Java `String!` give `String!`); a
+way that jumps (`return`, `throw`, `break`, `continue`, a call returning
+`Nothing`) doesn't count. So:
+- after an `if`, a `when` or a `?:`, what every way out knows: `if (c) s
+  = Circle() else s = Square()` leaves `s` a `Shape`; `if (x == null) x =
+  Default`; `x ?: return` and `x?.y ?: return` leave `x` not null. A
+  `when` without `else` also has the way where no branch was taken;
+- `x is A || x is B`, and a `when` branch `is A, is B ->`, make `x` what
+  `A` and `B` have in common;
+- after a `try`, the try block's end or a `catch`'s (which starts from
+  what was known before the try block, but nothing it assigns), then
+  `finally` on top;
 - a loop (`while`, `do`-`while`, `for`) forgets on entering what was known
   of each `var` it assigns, as the compiler does (another iteration may
-  come with another value); after a `while` or `do`-`while` without
-  `break`, its condition is false (`while (x == null) x = next()`), and
-  a `do`-`while`'s condition sees what its body narrowed and declared;
+  come with another value). Past it: a `while`'s or `do`-`while`'s
+  condition false (`while (x == null) x = next()`; never for `while
+  (true)`), merged with every `break` to it (by label, or the innermost);
+  a `for`'s entry, body end, `continue`s and `break`s merged. A
+  `do`-`while`'s condition sees what its body (and each `continue`)
+  narrowed and declared;
 - a local `var` assigned a value has that value's type (when it fits the
-  declared one) until assigned again;
-- after an `if`, a `when` or a `try`, what holds is what every way out
-  that doesn't jump (`return`, `throw`, `break`, `continue`, a call
-  returning `Nothing`) knows: `if (x == null) x = Default`, `when { x ==
-  null -> return; else -> … }`, `try { … } catch (…) { return }` (the
-  try block's end, when every `catch` jumps). A `when` without `else`
-  also has the way where no branch was taken;
+  declared one) until assigned again; a `var` a lambda assigns is unsure
+  past the lambda, unless the lambda surely ran in place;
+- `x?.f(…)` evaluates its arguments with `x` not null, and past it the
+  ways where `x` was null and where the call ran merge;
 - a branch of a `when` without a subject sees every earlier condition
   false; with a subject, a `null ->` branch tells later branches the
   subject isn't null, and a branch matching a value that can't be null

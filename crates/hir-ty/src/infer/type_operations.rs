@@ -457,7 +457,9 @@ impl Inferrer<'_> {
                     && self.receivers.iter().any(|receiver| {
                         !self.types.members_named(&receiver.ty, spelled).is_empty()
                     });
-                self.certain_locals.contains(&local) && !shadowing_member
+                // Ways that disagree about it leave its type unjudged.
+                let unsure = self.is_unsure(super::narrowing::Narrowed::Local(local));
+                self.certain_locals.contains(&local) && !shadowing_member && !unsure
             }
             Reference::Declaration(_) => self.receivers_known() && !self.any_local_named(spelled),
             _ => false,

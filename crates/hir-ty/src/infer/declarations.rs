@@ -10,6 +10,7 @@ use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::flow::Flow;
 use super::narrowing::Narrowed;
 use super::type_mismatches::Requirement;
 use syntax::ast::AstNode;
@@ -34,12 +35,15 @@ pub(super) const MAX_DEPTH: u32 = 160;
 /// on one says nothing.
 const PLUGIN_GENERATED_NAMES: &[&str] = &["serializer"];
 
-/// One level of local names, and the smart casts in force there.
+/// One level of local names. What's narrowed isn't kept here but in the
+/// flow (see `flow`), which outlives blocks.
 #[derive(Default)]
 struct Scope {
     kind: ScopeKind,
     names: Vec<(Name, LocalId)>,
-    narrowed: Vec<(Narrowed, Ty)>,
+    /// A declaration's own scope (a function, an initializer): the flow
+    /// outside it, put back when it ends — its smart casts stay inside.
+    outer_flow: Option<Flow>,
 }
 
 /// What a scope belongs to, where that decides what's visible through it.
@@ -105,11 +109,11 @@ pub(crate) struct Inferrer<'db> {
     pub(super) uncertain_calls: FxHashSet<u32>,
     /// The type the value inferred next must have — taken by it.
     pub(super) requirement: Option<super::type_mismatches::Requirement>,
-    /// What the scope popped last had narrowed.
-    last_popped: Vec<(Narrowed, Ty)>,
-    /// What the `when` branch being inferred being false says (its
-    /// conditions, without a subject, all false).
-    pub(super) entry_false: Vec<(Narrowed, Ty)>,
+    /// What the data flow knows here (see `flow`).
+    pub(super) flow: Flow,
+    /// The loops around, innermost last, collecting the ways that leave
+    /// them by `break` and go on by `continue`.
+    pub(super) loops: Vec<super::flow::LoopFrame>,
     /// `val chain = info?.let { … }`: `chain` not null means `info` isn't.
     not_null_implies: FxHashMap<LocalId, Vec<Narrowed>>,
     /// Each stable property path read, by number.
@@ -118,18 +122,14 @@ pub(crate) struct Inferrer<'db> {
         (super::property_paths::PathRoot, ItemLocation),
         super::narrowing::PropertyPathId,
     >,
-    /// The lambdas (by their start) that always end by leaving the function
-    /// around them (`return`, `throw`).
-    pub(super) lambdas_never_ending: FxHashSet<u32>,
     /// `val x: T` declared without a value: its first assignment gives it.
     pub(super) values_without_initializer: FxHashSet<LocalId>,
-    /// What each lambda (by its start) had narrowed where its body ends: what
-    /// holds after a call that surely runs it in place (`run { x!! }`).
-    pub(super) lambda_ends: FxHashMap<u32, Vec<(Narrowed, Ty)>>,
+    /// The flow each lambda (by its start) ends with: what holds after a
+    /// call that surely runs it in place (`run { x!! }`); dead when it
+    /// always leaves the function around (`apply { return x }`).
+    pub(super) lambda_ends: FxHashMap<u32, Flow>,
     /// How the data flow saw each property read, by its name's start.
     pub(super) property_reads: FxHashMap<u32, super::property_paths::PropertyRead>,
-    /// The condition inferred last (where it starts), and what it narrows.
-    pub(super) last_condition: Option<(u32, super::narrowing::Narrowing)>,
     /// `val ready = x != null`: what `ready` being true or false narrows.
     pub(super) condition_aliases: FxHashMap<LocalId, super::narrowing::Narrowing>,
     /// The type each branch of the branching expression inferred next
@@ -178,16 +178,14 @@ impl<'db> Inferrer<'db> {
             uncertain_calls: FxHashSet::default(),
             requirement: None,
             branch_requirement: None,
-            last_popped: Vec::new(),
-            entry_false: Vec::new(),
+            flow: Flow::default(),
+            loops: Vec::new(),
             not_null_implies: FxHashMap::default(),
             property_paths: Vec::new(),
             path_ids: FxHashMap::default(),
             property_reads: FxHashMap::default(),
             lambda_ends: FxHashMap::default(),
             values_without_initializer: FxHashSet::default(),
-            lambdas_never_ending: FxHashSet::default(),
-            last_condition: None,
             condition_aliases: FxHashMap::default(),
         }
     }
@@ -307,7 +305,7 @@ impl<'db> Inferrer<'db> {
     ) {
         let follows_smart_casts = self
             .narrowable(value)
-            .is_some_and(|narrowed| self.is_stable(narrowed));
+            .is_some_and(|narrowed| self.is_stable(narrowed) && !self.is_unsure(narrowed));
         let declared = if follows_smart_casts {
             inferred.clone()
         } else {
@@ -471,43 +469,34 @@ impl<'db> Inferrer<'db> {
         self.scopes.push(Scope::default());
     }
 
+    /// A function's or constructor's scope: a declaration of its own,
+    /// whose smart casts stay inside.
     pub(super) fn push_scope_of(&mut self, kind: ScopeKind) {
+        let isolated = kind != ScopeKind::Block;
         self.scopes.push(Scope {
             kind,
+            outer_flow: isolated.then(|| self.flow.clone()),
+            ..Scope::default()
+        });
+    }
+
+    /// A block scope whose smart casts stay inside: a member property's
+    /// initializer.
+    pub(super) fn push_isolated_scope(&mut self) {
+        self.scopes.push(Scope {
+            outer_flow: Some(self.flow.clone()),
             ..Scope::default()
         });
     }
 
     pub(super) fn pop_scope(&mut self) {
-        self.pop_scope_narrowings();
-    }
-
-    /// Pops the innermost scope and gives what was narrowed in it, in the
-    /// order narrowed — what a branch ending there knows.
-    pub(super) fn pop_scope_narrowings(&mut self) -> Vec<(Narrowed, Ty)> {
-        let popped = self
-            .scopes
-            .pop()
-            .map(|scope| scope.narrowed)
-            .unwrap_or_default();
+        let popped = self.scopes.pop();
+        if let Some(outer) = popped.and_then(|scope| scope.outer_flow) {
+            self.flow = outer;
+        }
         if self.scopes.is_empty() {
             self.scopes.push(Scope::default());
         }
-        self.last_popped = popped.clone();
-        popped
-    }
-
-    /// What the innermost scope has narrowed so far.
-    pub(super) fn scope_narrowings(&self) -> Vec<(Narrowed, Ty)> {
-        self.scopes
-            .last()
-            .map(|scope| scope.narrowed.clone())
-            .unwrap_or_default()
-    }
-
-    /// What the scope popped last narrowed (a branch body's block).
-    pub(super) fn take_last_popped(&mut self) -> Vec<(Narrowed, Ty)> {
-        std::mem::take(&mut self.last_popped)
     }
 
     pub(super) fn declare(
@@ -716,31 +705,9 @@ impl<'db> Inferrer<'db> {
         self.narrowed_type(Narrowed::Local(local))
     }
 
-    /// A local's or a stable property's type here: as last narrowed, or as
-    /// declared.
-    pub(super) fn narrowed_type(&self, subject: Narrowed) -> Ty {
-        self.scopes
-            .iter()
-            .rev()
-            .flat_map(|scope| scope.narrowed.iter().rev())
-            .find(|(narrowed, _)| *narrowed == subject)
-            .map(|(_, ty)| ty.clone())
-            .unwrap_or_else(|| match subject {
-                Narrowed::Local(local) => self.result.locals[local.0 as usize].ty.clone(),
-                Narrowed::Property(path) => self.property_paths[path.0 as usize].ty.clone(),
-            })
-    }
-
-    pub(super) fn narrow(&mut self, narrowings: &[(Narrowed, Ty)]) {
-        let implied = self.implied_not_null(narrowings);
-        let scope = self.scopes.last_mut().expect("there's always a scope");
-        scope.narrowed.extend(narrowings.iter().cloned());
-        scope.narrowed.extend(implied);
-    }
-
     /// The values a local narrowed to not null vouches for: what its
     /// initializer's safe chain went through, transitively.
-    fn implied_not_null(&self, narrowings: &[(Narrowed, Ty)]) -> Vec<(Narrowed, Ty)> {
+    pub(super) fn implied_not_null(&self, narrowings: &[(Narrowed, Ty)]) -> Vec<(Narrowed, Ty)> {
         if self.not_null_implies.is_empty() {
             return Vec::new();
         }
@@ -768,13 +735,7 @@ impl<'db> Inferrer<'db> {
     /// Remembers what `local`, a `val` initialized by a condition, narrows
     /// where it's used as one (`val ready = x != null; if (ready) x.f()`):
     /// of a `var`, until it's assigned again (see `forget_aliased`).
-    fn remember_condition_alias(&mut self, local: LocalId, initializer: SyntaxNode<'_>) {
-        let Some((start, narrowing)) = self.last_condition.take() else {
-            return;
-        };
-        if start != initializer.start_byte() as u32 {
-            return;
-        }
+    fn remember_condition_alias(&mut self, local: LocalId, narrowing: super::narrowing::Narrowing) {
         let kept = |narrowings: Vec<(Narrowed, Ty)>, inferrer: &Self| -> Vec<(Narrowed, Ty)> {
             narrowings
                 .into_iter()
@@ -1327,8 +1288,10 @@ impl<'db> Inferrer<'db> {
             self.push_receiver(receiver, None);
         }
         // Smart casts in one member's initializer stay there.
-        self.push_scope();
-        let initialized = self.property_initializer(node, written.as_ref());
+        self.push_isolated_scope();
+        let initialized = self
+            .property_initializer(node, written.as_ref())
+            .map(|initialized| initialized.ty);
         self.pop_scope();
         let stored = written.clone().or(initialized.clone());
         let mut from_getter = None;
@@ -1402,7 +1365,11 @@ impl<'db> Inferrer<'db> {
 
     /// The type an initializer (`= value`) or delegate (`by lazy { … }`)
     /// gives a property.
-    fn property_initializer(&mut self, node: SyntaxNode<'_>, written: Option<&Ty>) -> Option<Ty> {
+    fn property_initializer(
+        &mut self,
+        node: SyntaxNode<'_>,
+        written: Option<&Ty>,
+    ) -> Option<Initialized> {
         let mut after_variable = false;
         for child in named_children(node) {
             match child.kind() {
@@ -1410,9 +1377,17 @@ impl<'db> Inferrer<'db> {
                 "property_delegate" => {
                     let delegate = named_children(child).last()?;
                     let delegate_type = self.expression(delegate, None);
-                    return Some(self.delegated_type(&delegate_type));
+                    return Some(Initialized::value(self.delegated_type(&delegate_type)));
                 }
                 "getter" | "setter" | "modifiers" | "type_constraints" | "binding_pattern_kind" => {
+                }
+                // `val ready = (x != null)`: a condition, and what it narrows.
+                _ if after_variable && written.is_none() && is_condition(child) => {
+                    let narrowing = self.condition(child);
+                    return Some(Initialized {
+                        ty: self.types.builtin("Boolean"),
+                        condition: Some(narrowing),
+                    });
                 }
                 _ if after_variable => {
                     let ty = match written {
@@ -1423,7 +1398,7 @@ impl<'db> Inferrer<'db> {
                         ),
                         None => self.expression(child, None),
                     };
-                    return Some(ty);
+                    return Some(Initialized::value(ty));
                 }
                 _ => {}
             }
@@ -1465,7 +1440,15 @@ impl<'db> Inferrer<'db> {
         last
     }
 
+    /// A statement; when it never completes (`return`, `throw`, a call
+    /// returning `Nothing`), no way goes on past it.
     pub(super) fn statement(&mut self, node: SyntaxNode<'_>) -> Ty {
+        let ty = self.statement_of_kind(node);
+        self.end_way(&ty);
+        ty
+    }
+
+    fn statement_of_kind(&mut self, node: SyntaxNode<'_>) -> Ty {
         match node.kind() {
             "property_declaration" => {
                 self.local_property(node);
@@ -1493,6 +1476,10 @@ impl<'db> Inferrer<'db> {
     fn local_property(&mut self, node: SyntaxNode<'_>) {
         let (_, written) = self.property_types(node);
         let initialized = self.property_initializer(node, written.as_ref());
+        let (initialized, condition) = match initialized {
+            Some(initialized) => (Some(initialized.ty), initialized.condition),
+            None => (None, None),
+        };
         let mutable = named_children(node)
             .find(|child| child.kind() == "binding_pattern_kind")
             .is_some_and(|kind| has_token(kind, "var"));
@@ -1522,7 +1509,9 @@ impl<'db> Inferrer<'db> {
                         let initializer = initializer_of(node).filter(|_| kind == LocalKind::Value);
                         if let Some(initializer) = initializer {
                             self.remember_not_null_implication(local, initializer);
-                            self.remember_condition_alias(local, initializer);
+                        }
+                        if let (LocalKind::Value, Some(condition)) = (kind, condition.clone()) {
+                            self.remember_condition_alias(local, condition);
                         }
                     }
                 }
@@ -1722,4 +1711,35 @@ enum BlockEnd {
     Unreachable,
     /// A statement's type isn't known.
     Unknown,
+}
+
+/// What a property's initializer gave: its type, and — when it's a
+/// condition (`val ready = x != null`) — what its being true or false
+/// narrows.
+struct Initialized {
+    ty: Ty,
+    condition: Option<super::narrowing::Narrowing>,
+}
+
+impl Initialized {
+    fn value(ty: Ty) -> Initialized {
+        Initialized {
+            ty,
+            condition: None,
+        }
+    }
+}
+
+/// An expression that is a condition in itself: a comparison, a type
+/// check, `&&`, `||`, `!`, in parentheses or not.
+fn is_condition(node: SyntaxNode<'_>) -> bool {
+    match node.kind() {
+        "parenthesized_expression" => named_children(node).next().is_some_and(is_condition),
+        "equality_expression"
+        | "check_expression"
+        | "conjunction_expression"
+        | "disjunction_expression" => true,
+        "prefix_expression" => has_token(node, "!"),
+        _ => false,
+    }
 }

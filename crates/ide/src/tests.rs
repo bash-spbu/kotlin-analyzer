@@ -2607,6 +2607,94 @@ fun empty(): Int {
 }
 
 #[test]
+fn the_flow_merges_ways_as_the_compiler_does() {
+    // Each way of a branch runs on its own copy of the flow; past it, what
+    // every way that goes on knows — their common supertype — and ways
+    // that jump don't count. Each case here compiles: nothing is reported.
+    check_diagnostics(
+        r#"
+//- /app/a/Reader.java
+package a;
+public class Reader {
+    public String readLine() { return null; }
+}
+//- /app/b/Use.kt lang=2.3
+package b
+import a.Reader
+interface Shape { fun area(): Int }
+class Circle : Shape { override fun area() = 1 }
+class Square : Shape { override fun area() = 2 }
+open class Failure
+fun joined(c: Boolean) {
+    var shape: Shape?
+    if (c) shape = Circle() else shape = Square()
+    shape.area()
+}
+fun either(x: Any) {
+    if (x is Circle || x is Square) x.area()
+}
+fun eitherInWhen(x: Any) {
+    when (x) {
+        is Circle, is Square -> x.area()
+        else -> {}
+    }
+}
+fun tryFinally(p: String?) {
+    try {
+        if (p == null) return
+    } finally {
+        println("done")
+    }
+    p.length
+}
+fun emptyElse(p: String?) {
+    if (p != null) {
+        println(p)
+    } else {
+    }
+    p?.length
+}
+fun parenthesized(x: String?) {
+    val ready = (x != null)
+    if (ready) x.length
+}
+fun broken(items: List<String?>): Int {
+    var found: String? = null
+    for (item in items) {
+        if (item == null) continue
+        found = item
+        break
+    }
+    return found?.length ?: 0
+}
+fun caught(p: String?) {
+    try {
+        println(1)
+    } catch (exception: Failure) {
+        return
+    }
+    p?.length
+}
+fun javaValue(lines: Reader) {
+    val line = lines.readLine()
+    if (line != null) println(line)
+    if (line == null) return
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![
+                crate::Check::UnsafeCall,
+                crate::Check::UnresolvedReference,
+                crate::Check::UnnecessarySafeCall,
+                crate::Check::SenselessComparison,
+            ],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![""],
+    );
+}
+
+#[test]
 fn diagnostics_for_calls_nullability_and_when() {
     check_diagnostics(
         r#"

@@ -22,6 +22,7 @@ mod declarations;
 mod exhaustiveness;
 mod expressions;
 mod fit;
+mod flow;
 mod local_usage;
 mod member_scope;
 mod narrowing;

@@ -9,6 +9,7 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
+use super::flow::Flow;
 use super::narrowing::{CallEnd, Narrowed};
 use super::property_paths::{PathRoot, ReceiverRoot};
 use super::reassociation::{self, Operation};
@@ -31,6 +32,16 @@ struct WhenSubject<'subject> {
     /// What a branch matching a value that can't be null says isn't null
     /// (`existedOrder` of `when (existedOrder?.status)`).
     not_null_when_matched: &'subject [(Narrowed, Ty)],
+}
+
+/// One branch of a `when`: its value's type, whether it is `else`, the
+/// flow it ends with, and what the branches after it know (its conditions
+/// were false).
+struct WhenBranch {
+    ty: Ty,
+    is_else: bool,
+    end: Flow,
+    when_false: Vec<(Narrowed, Ty)>,
 }
 
 /// What an expression denotes: a value, or — as the qualifier before a
@@ -166,8 +177,7 @@ impl Inferrer<'_> {
             | "comparison_expression"
             | "conjunction_expression"
             | "disjunction_expression" => {
-                let narrowing = self.condition(node);
-                self.last_condition = Some((node.start_byte() as u32, narrowing));
+                self.condition(node);
                 self.types.builtin("Boolean")
             }
             "additive_expression" | "multiplicative_expression" | "range_expression" => {
@@ -855,10 +865,6 @@ impl Inferrer<'_> {
         };
         let nullable_expected = expected.map(|expected| expected.clone().nullable());
         let left_type = self.expression(left, nullable_expected.as_ref());
-        let right_type = match requirement {
-            Some(requirement) => self.required(right, expected, requirement),
-            None => self.expression(right, expected),
-        };
         if let Some(operator) = syntax::token(node, "?:") {
             let removable = TextRange::new(left.end_byte(), node.end_byte());
             self.check_null_check(
@@ -868,12 +874,18 @@ impl Inferrer<'_> {
                 TextRange::of(operator),
             );
         }
-        let right_jumps = matches!(right_type, Ty::Nothing { nullable: false });
-        // `x ?: return`, `x?.y ?: return`: from here on `x` isn't null.
-        if right_jumps {
-            let not_null = self.not_null_chain(left);
-            self.narrow(&not_null);
-        }
+        // Two ways on: the left side wasn't null (nor what its safe chain
+        // went through), or the right side ran — `x ?: return` leaves the
+        // first only.
+        let not_null = self.not_null_chain(left);
+        let ((), left_way) = self.fork(|this| this.narrow(&not_null));
+        let right_type = match requirement {
+            Some(requirement) => self.required(right, expected, requirement),
+            None => self.expression(right, expected),
+        };
+        self.end_way(&right_type);
+        let right_way = std::mem::take(&mut self.flow);
+        self.flow = self.merge(vec![left_way, right_way]);
         self.types.common_type(&[left_type.non_null(), right_type])
     }
 
@@ -1110,86 +1122,36 @@ impl Inferrer<'_> {
         let narrowing = self.condition(condition);
         let then_branch = branches.first().copied();
         let else_branch = branches.get(1).copied();
-        self.push_scope();
-        self.narrow(&narrowing.when_true);
         let receiver_narrowed = narrowing.receiver_when_true.clone();
-        if let Some(receiver) = &receiver_narrowed {
-            self.push_receiver(receiver.clone(), None);
-        }
-        self.take_last_popped();
-        let then_type = match then_branch {
-            Some(branch) => self.body_required(branch, expected, requirement.clone()),
-            None => self.types.builtin("Unit"),
-        };
-        let then_body = self.take_last_popped();
-        if receiver_narrowed.is_some() {
-            self.pop_receiver();
-        }
-        let mut then_end = self.pop_scope_narrowings();
-        then_end.extend(then_body);
-        self.push_scope();
+        let (then_type, then_end) = self.fork(|this| {
+            this.narrow(&narrowing.when_true);
+            if let Some(receiver) = &receiver_narrowed {
+                this.push_receiver(receiver.clone(), None);
+            }
+            let ty = match then_branch {
+                Some(branch) => this.body_required(branch, expected, requirement.clone()),
+                None => this.types.builtin("Unit"),
+            };
+            if receiver_narrowed.is_some() {
+                this.pop_receiver();
+            }
+            this.end_way(&ty);
+            ty
+        });
         self.narrow(&narrowing.when_false);
         let else_type =
             else_branch.map(|branch| self.body_required(branch, expected, requirement.clone()));
-        let else_body = self.take_last_popped();
-        let mut else_end = self.pop_scope_narrowings();
-        if else_branch.is_some() {
-            else_end.extend(else_body);
+        if let Some(else_type) = &else_type {
+            self.end_way(else_type);
         }
         // What follows knows what both ways it can come from know; a way
-        // that jumps (`return`, `throw`) doesn't come: `if (x == null)
-        // return`, `if (x == null) x = Default`.
-        let then_jumps = matches!(then_type, Ty::Nothing { nullable: false });
-        let else_jumps = else_type
-            .as_ref()
-            .is_some_and(|ty| matches!(ty, Ty::Nothing { nullable: false }));
-        let after = match (then_jumps, else_jumps) {
-            (true, true) => Vec::new(),
-            (true, false) => else_end,
-            (false, true) => then_end,
-            (false, false) => self.joined(&then_end, &else_end),
-        };
-        self.narrow(&after);
+        // that jumps (`return`, `throw`) doesn't come.
+        let else_end = std::mem::take(&mut self.flow);
+        self.flow = self.merge(vec![then_end, else_end]);
         match else_type {
             Some(else_type) => self.types.common_type(&[then_type, else_type]),
             None => self.types.builtin("Unit"),
         }
-    }
-
-    /// The narrowings both ways know: a local narrowed on both, to the
-    /// wider of the two types (one must fit the other).
-    pub(super) fn joined(
-        &self,
-        first: &[(Narrowed, Ty)],
-        second: &[(Narrowed, Ty)],
-    ) -> Vec<(Narrowed, Ty)> {
-        let latest = |narrowings: &[(Narrowed, Ty)], local: Narrowed| {
-            narrowings
-                .iter()
-                .rev()
-                .find(|(narrowed, _)| *narrowed == local)
-                .map(|(_, ty)| ty.clone())
-        };
-        let mut joined: Vec<(Narrowed, Ty)> = Vec::new();
-        for (local, _) in first {
-            if joined.iter().any(|(known, _)| known == local) {
-                continue;
-            }
-            let (Some(one), Some(other)) = (latest(first, *local), latest(second, *local)) else {
-                continue;
-            };
-            let wider = if one == other || self.types.fits(&other, &one) == super::Fit::Yes {
-                Some(one)
-            } else if self.types.fits(&one, &other) == super::Fit::Yes {
-                Some(other)
-            } else {
-                None
-            };
-            if let Some(wider) = wider {
-                joined.push((*local, wider));
-            }
-        }
-        joined
     }
 
     fn when_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
@@ -1234,38 +1196,25 @@ impl Inferrer<'_> {
                         examinable: subject_examinable,
                         not_null_when_matched: &not_null_when_matched,
                     };
-                    let before = self.scope_narrowings();
-                    let (ty, is_else, mut entry_end) =
-                        self.when_entry(child, subject, expected, requirement.clone());
-                    has_else |= is_else;
-                    if !matches!(ty, Ty::Nothing { nullable: false }) {
-                        let mut branch_end = before;
-                        branch_end.append(&mut entry_end);
-                        branch_ends.push(branch_end);
-                    }
-                    branches.push(ty);
-                    // Later branches run only when this one's condition
-                    // was false.
+                    let branch = self.when_entry(child, subject, expected, requirement.clone());
+                    has_else |= branch.is_else;
+                    branches.push(branch.ty);
+                    branch_ends.push(branch.end);
+                    // Later branches run only when this one's conditions
+                    // were false.
                     let mut when_false = self.narrowed_when_entry_false(child, subject);
-                    when_false.append(&mut self.entry_false);
+                    when_false.extend(branch.when_false);
                     self.narrow(&when_false);
                 }
                 _ => {}
             }
         }
-        let no_branch_taken = self.pop_scope_narrowings();
         if !has_else {
-            branch_ends.push(no_branch_taken);
+            branch_ends.push(self.flow.clone());
         }
+        self.pop_scope();
         // What follows knows what every way it can come from knows.
-        let after = branch_ends
-            .split_first()
-            .map(|(first, rest)| {
-                rest.iter()
-                    .fold(first.clone(), |known, end| self.joined(&known, end))
-            })
-            .unwrap_or_default();
-        self.narrow(&after);
+        self.flow = self.merge(branch_ends);
         if let (false, Some(subject_type)) = (has_else, &subject_type) {
             self.check_exhaustive(node, subject_type);
         }
@@ -1319,46 +1268,59 @@ impl Inferrer<'_> {
         subject: WhenSubject<'_>,
         expected: Option<&Ty>,
         requirement: Option<super::type_mismatches::Requirement>,
-    ) -> (Ty, bool, Vec<(Narrowed, Ty)>) {
-        let mut each_condition = Vec::new();
+    ) -> WhenBranch {
+        let mut conditions: Vec<super::narrowing::Narrowing> = Vec::new();
         let mut receivers = Vec::new();
         let mut body = None;
-        self.entry_false.clear();
         for child in named_children(node) {
             match child.kind() {
                 "when_condition" => {
-                    each_condition.push(self.when_condition(child, subject, &mut receivers));
+                    conditions.push(self.when_condition(child, subject, &mut receivers));
                 }
                 "control_structure_body" => body = Some(child),
                 _ => {}
             }
         }
-        let is_else = each_condition.is_empty();
-        // Kept past the body, whose own `when`s use it too.
-        let entry_false = std::mem::take(&mut self.entry_false);
-        self.push_scope();
-        self.narrow(&narrowed_by_every(each_condition));
+        let is_else = conditions.is_empty();
+        // The branch runs when any condition holds: what they all say. The
+        // branches after it see every condition false.
+        let when_true = conditions
+            .iter()
+            .map(|condition| condition.when_true.clone())
+            .reduce(|known, next| self.join_narrowings(&known, &next))
+            .unwrap_or_default();
+        let when_false: Vec<(Narrowed, Ty)> = conditions
+            .iter()
+            .flat_map(|condition| condition.when_false.iter().cloned())
+            .collect();
         // A branch with one `is T` of `this` sees `this` as a `T`.
         let narrowed_receiver = match &receivers[..] {
             [only] => Some(only.clone()),
             _ => None,
         };
-        if let Some(receiver) = &narrowed_receiver {
-            self.push_receiver(receiver.clone(), None);
+        let (ty, end) = self.fork(|this| {
+            this.push_scope();
+            this.narrow(&when_true);
+            if let Some(receiver) = &narrowed_receiver {
+                this.push_receiver(receiver.clone(), None);
+            }
+            let ty = match body {
+                Some(body) => this.body_required(body, expected, requirement),
+                None => this.types.builtin("Unit"),
+            };
+            if narrowed_receiver.is_some() {
+                this.pop_receiver();
+            }
+            this.pop_scope();
+            this.end_way(&ty);
+            ty
+        });
+        WhenBranch {
+            ty,
+            is_else,
+            end,
+            when_false,
         }
-        self.take_last_popped();
-        let ty = match body {
-            Some(body) => self.body_required(body, expected, requirement),
-            None => self.types.builtin("Unit"),
-        };
-        let body_end = self.take_last_popped();
-        if narrowed_receiver.is_some() {
-            self.pop_receiver();
-        }
-        let mut entry_end = self.pop_scope_narrowings();
-        entry_end.extend(body_end);
-        self.entry_false = entry_false;
-        (ty, is_else, entry_end)
     }
 
     /// What a branch whose one condition is `!is T` tells the branches
@@ -1426,9 +1388,9 @@ impl Inferrer<'_> {
         node: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
         receivers: &mut Vec<Ty>,
-    ) -> Vec<(Narrowed, Ty)> {
+    ) -> super::narrowing::Narrowing {
         let subject_type = subject.ty;
-        let mut narrowings = Vec::new();
+        let mut outcome = super::narrowing::Narrowing::default();
         for child in named_children(node) {
             match child.kind() {
                 "type_test" => {
@@ -1443,7 +1405,7 @@ impl Inferrer<'_> {
                     }
                     if let Some(local) = subject.local {
                         let narrowed = self.smart_cast(&self.narrowed_type(local), target_type);
-                        narrowings.push((local, narrowed));
+                        outcome.when_true.push((local, narrowed));
                     } else if subject.is_this {
                         receivers.push(target_type);
                     }
@@ -1457,52 +1419,69 @@ impl Inferrer<'_> {
                     if subject_type.is_some() {
                         let matched = self.expression(child, subject_type);
                         if self.excludes_null(&matched) {
-                            narrowings.extend(subject.not_null_when_matched.iter().cloned());
+                            outcome
+                                .when_true
+                                .extend(subject.not_null_when_matched.iter().cloned());
                         }
                     } else {
                         // Without a subject a branch is a condition: the
                         // branches after it see it false.
                         let narrowing = self.condition(child);
-                        narrowings.extend(narrowing.when_true);
-                        self.entry_false.extend(narrowing.when_false);
+                        outcome.when_true.extend(narrowing.when_true);
+                        outcome.when_false.extend(narrowing.when_false);
                     }
                 }
             }
         }
-        narrowings
+        outcome
     }
 
     fn try_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
         let requirement = self.branch_requirement.take();
         let mut branches = Vec::new();
-        let mut try_end = Vec::new();
-        let mut catches_jump = true;
+        // A `catch` may start anywhere in the try block: with what was
+        // known before it, but of nothing the block assigns.
+        let catch_start = {
+            let mut start = self.flow.clone();
+            let block =
+                named_children(node).find(|child| matches!(child.kind(), "statements" | "block"));
+            for variable in block
+                .map(|block| self.reassigned_in(block))
+                .unwrap_or_default()
+            {
+                start.forget(Narrowed::Local(variable));
+            }
+            start
+        };
+        let mut ends: Vec<Flow> = Vec::new();
+        let mut finally = None;
         for child in named_children(node) {
             match child.kind() {
                 "statements" | "block" => {
-                    self.take_last_popped();
-                    branches.push(self.block_required(child, requirement.clone()));
-                    try_end = self.take_last_popped();
+                    let ty = self.block_required(child, requirement.clone());
+                    self.end_way(&ty);
+                    branches.push(ty);
+                    ends.push(self.flow.clone());
                 }
                 "catch_block" => {
+                    self.flow = catch_start.clone();
                     let caught = self.catch_block(child, requirement.clone());
-                    catches_jump &= matches!(caught, Ty::Nothing { nullable: false });
+                    self.end_way(&caught);
+                    ends.push(self.flow.clone());
                     branches.push(caught);
                 }
-                "finally_block" => {
-                    for part in named_children(child) {
-                        self.block(part);
-                    }
-                }
+                "finally_block" => finally = Some(child),
                 _ => {
                     self.expression(child, expected);
                 }
             }
         }
-        // `try { … if (x == null) return … } catch (…) { return }`: only the
-        // try block's end leads on.
-        if catches_jump && branches.len() > 1 {
-            self.narrow(&try_end);
+        // Past the `try`, one of its ways went on; then `finally` ran.
+        self.flow = self.merge(ends);
+        if let Some(finally) = finally {
+            for part in named_children(finally) {
+                self.block(part);
+            }
         }
         if branches.is_empty() {
             return self.types.builtin("Unit");
@@ -1565,6 +1544,10 @@ impl Inferrer<'_> {
         let element = self.element_type(&iterated_type);
         let reassigned = self.reassigned_in(node);
         self.forget_reassigned(&reassigned);
+        // The body may run no time, or many: past the loop, what the entry
+        // and every way out of an iteration know.
+        let entry = self.flow.clone();
+        self.enter_loop(node);
         self.push_scope();
         match variable {
             Some(variable) if variable.kind() == "multi_variable_declaration" => {
@@ -1589,6 +1572,12 @@ impl Inferrer<'_> {
             self.body(*body, None);
         }
         self.pop_scope();
+        let frame = self.leave_loop();
+        let body_end = std::mem::take(&mut self.flow);
+        let mut ways = vec![entry, body_end];
+        ways.extend(frame.continues);
+        ways.extend(frame.breaks);
+        self.flow = self.merge(ways);
     }
 
     /// What iterating a value gives: `iterator().next()`.
@@ -1616,35 +1605,44 @@ impl Inferrer<'_> {
             .copied();
         let reassigned = self.reassigned_in(node);
         self.forget_reassigned(&reassigned);
-        let ends_by_condition = !body.is_some_and(|body| self.breaks_out(body));
-        // `while (true)` without `break` never ends: what follows it isn't
-        // reached.
-        let endless = ends_by_condition
-            && condition.is_some_and(|condition| {
-                condition.kind() == "boolean_literal" && self.text(condition) == "true"
-            });
-        let ty = if endless {
+        self.enter_loop(node);
+        // `while (true)`: the condition is never false, the loop ends by a
+        // `break` only.
+        let endless = condition.is_some_and(|condition| {
+            condition.kind() == "boolean_literal" && self.text(condition) == "true"
+        });
+        let by_condition = if node.kind() == "do_while_statement" {
+            self.do_while(body, condition)
+        } else {
+            let narrowing = condition.map(|condition| self.condition(condition));
+            // Each iteration starts as the first did: what the loop assigns
+            // was forgotten on entering.
+            let entry = self.flow.clone();
+            if let Some(body) = body {
+                self.push_scope();
+                if let Some(narrowing) = &narrowing {
+                    self.narrow(&narrowing.when_true);
+                }
+                self.body(body, None);
+                self.pop_scope();
+            }
+            self.flow = entry;
+            if let Some(narrowing) = narrowing {
+                self.narrow(&narrowing.when_false);
+            }
+            std::mem::take(&mut self.flow)
+        };
+        let frame = self.leave_loop();
+        let mut ways = frame.breaks;
+        if !endless {
+            ways.push(by_condition);
+        }
+        self.flow = self.merge(ways);
+        if self.flow.is_dead() {
             Ty::Nothing { nullable: false }
         } else {
             self.types.builtin("Unit")
-        };
-        if node.kind() == "do_while_statement" {
-            self.do_while(body, condition, ends_by_condition);
-            return ty;
         }
-        let narrowing = condition.map(|condition| self.condition(condition));
-        if let Some(body) = body {
-            self.push_scope();
-            if let Some(narrowing) = &narrowing {
-                self.narrow(&narrowing.when_true);
-            }
-            self.body(body, None);
-            self.pop_scope();
-        }
-        if let (true, Some(narrowing)) = (ends_by_condition, narrowing) {
-            self.narrow(&narrowing.when_false);
-        }
-        ty
     }
 
     /// `do body while (c)`: the body runs once at least, and the condition
@@ -1653,8 +1651,7 @@ impl Inferrer<'_> {
         &mut self,
         body: Option<SyntaxNode<'_>>,
         condition: Option<SyntaxNode<'_>>,
-        ends_by_condition: bool,
-    ) {
+    ) -> Flow {
         self.push_scope();
         if let Some(body) = body {
             // The body's own locals are the condition's too.
@@ -1662,21 +1659,18 @@ impl Inferrer<'_> {
                 self.statements(statement);
             }
         }
+        // The condition is reached from the body's end and every `continue`.
+        let continues =
+            std::mem::take(&mut self.loops.last_mut().expect("inside the loop").continues);
+        let mut reaching = vec![std::mem::take(&mut self.flow)];
+        reaching.extend(continues);
+        self.flow = self.merge(reaching);
         let narrowing = condition.map(|condition| self.condition(condition));
-        let body_end = self.pop_scope_narrowings();
-        if !ends_by_condition {
-            return;
-        }
-        self.narrow(&body_end);
+        self.pop_scope();
         if let Some(narrowing) = narrowing {
             self.narrow(&narrowing.when_false);
         }
-    }
-
-    /// Whether a loop's body can leave it but by its condition: a `break`.
-    fn breaks_out(&self, body: SyntaxNode<'_>) -> bool {
-        syntax::descendants(body)
-            .any(|part| part.kind() == "jump_expression" && self.text(part).starts_with("break"))
+        std::mem::take(&mut self.flow)
     }
 
     /// The `var`s `loop` assigns, as named where it starts.
@@ -1714,8 +1708,7 @@ impl Inferrer<'_> {
     fn forget_reassigned(&mut self, variables: &[super::LocalId]) {
         for variable in variables {
             self.forget_aliased(*variable);
-            let declared = self.local_declared_type(*variable);
-            self.narrow(&[(Narrowed::Local(*variable), declared)]);
+            self.forget(Narrowed::Local(*variable));
         }
     }
 
@@ -1739,6 +1732,10 @@ impl Inferrer<'_> {
         if shape_unknown {
             self.enter_uncertain_scope();
         }
+        // The body runs on its own copy of the flow: when, and how often,
+        // is the called function's to say (see `narrow_after_contract`).
+        let outer_flow = self.flow.clone();
+        let outer_loops = std::mem::take(&mut self.loops);
         self.push_scope();
         let receiver = expected_function
             .as_ref()
@@ -1815,7 +1812,20 @@ impl Inferrer<'_> {
         if shape_unknown {
             self.leave_uncertain_scope();
         }
-        let end = self.pop_scope_narrowings();
+        self.pop_scope();
+        let mut end = std::mem::replace(&mut self.flow, outer_flow);
+        self.loops = outer_loops;
+        // `apply { …; return x }`: a `return` or `throw` it always ends
+        // with leaves the function around.
+        if body_jumps {
+            end.kill();
+        }
+        // A `var` the lambda assigns may change whenever it runs: nothing
+        // known of it holds past here.
+        for variable in self.reassigned_in(node) {
+            self.forget_aliased(variable);
+            self.make_unsure(Narrowed::Local(variable));
+        }
         // A `return@label` leaves the lambda before its end.
         let leaves_early = body.is_some_and(|body| {
             syntax::descendants(body).any(|part| {
@@ -1824,11 +1834,6 @@ impl Inferrer<'_> {
         });
         if !leaves_early {
             self.lambda_ends.insert(node.start_byte() as u32, end);
-            // `apply { …; return x }`: a `return` or `throw` it always
-            // ends with leaves the function around.
-            if body_jumps {
-                self.lambdas_never_ending.insert(node.start_byte() as u32);
-            }
         }
         Ty::Function(Box::new(FunctionType {
             receiver,
@@ -1887,6 +1892,21 @@ impl Inferrer<'_> {
     /// what a plain `return` returns from, when that's a function writing
     /// its type.
     fn jump(&mut self, node: SyntaxNode<'_>) {
+        let keyword = self.text(node);
+        if keyword.starts_with("break") || keyword.starts_with("continue") {
+            let label = named_children(node)
+                .find(|child| child.kind() == "label")
+                .map(|label| Name::new(self.text(label).trim_matches('@')));
+            let way = self.flow.clone();
+            if let Some(frame) = self.loop_frame(label) {
+                if keyword.starts_with("break") {
+                    frame.breaks.push(way);
+                } else {
+                    frame.continues.push(way);
+                }
+            }
+            return;
+        }
         let is_plain_return =
             has_token(node, "return") && !named_children(node).any(|child| child.kind() == "label");
         let expected = match self.return_targets.last() {
@@ -1994,18 +2014,6 @@ impl Inferrer<'_> {
                 !overrides
             })
     }
-}
-
-/// A branch's conditions are alternatives (`is A, is B ->`): a local is
-/// narrowed in the branch only to what every one of them narrows it to.
-fn narrowed_by_every(mut each_condition: Vec<Vec<(Narrowed, Ty)>>) -> Vec<(Narrowed, Ty)> {
-    let Some(first) = each_condition.pop() else {
-        return Vec::new();
-    };
-    first
-        .into_iter()
-        .filter(|narrowing| each_condition.iter().all(|other| other.contains(narrowing)))
-        .collect()
 }
 
 /// Whether `test` is a condition of the last of two or more branches of a

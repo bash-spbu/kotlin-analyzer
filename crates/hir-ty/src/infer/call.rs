@@ -242,9 +242,10 @@ impl<'db> Inferrer<'db> {
         let safe = has_token(suffix, "?.");
         // `x?.let { … x … }`: past the receiver, the call runs only when
         // `x` isn't null.
+        // `x?.f(…)`: two ways on — `x` was null, or the call ran with it not.
         let safely_called = safe.then(|| self.not_null_chain(receiver_node));
+        let null_way = safely_called.as_ref().map(|_| self.flow.clone());
         if let Some(not_null) = &safely_called {
-            self.push_scope();
             self.narrow(not_null);
         }
         let ty = self.qualified_call_on(
@@ -256,8 +257,9 @@ impl<'db> Inferrer<'db> {
             type_arguments,
             expected,
         );
-        if safely_called.is_some() {
-            self.pop_scope();
+        if let Some(null_way) = null_way {
+            let call_way = std::mem::take(&mut self.flow);
+            self.flow = self.merge(vec![null_way, call_way]);
         }
         ty
     }

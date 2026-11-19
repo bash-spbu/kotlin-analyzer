@@ -106,13 +106,14 @@ impl Inferrer<'_> {
                     return Narrowing::default();
                 };
                 let left = self.condition(left);
-                self.push_scope();
-                self.narrow(&left.when_true);
-                let right = self.condition(right);
-                self.pop_scope();
+                // The right side runs only where the left held.
+                let (right, _) = self.fork(|this| {
+                    this.narrow(&left.when_true);
+                    this.condition(right)
+                });
                 Narrowing {
+                    when_false: self.join_narrowings(&left.when_false, &right.when_false),
                     when_true: left.when_true.into_iter().chain(right.when_true).collect(),
-                    when_false: Vec::new(),
                     receiver_when_true: right.receiver_when_true.or(left.receiver_when_true),
                 }
             }
@@ -122,12 +123,13 @@ impl Inferrer<'_> {
                     return Narrowing::default();
                 };
                 let left = self.condition(left);
-                self.push_scope();
-                self.narrow(&left.when_false);
-                let right = self.condition(right);
-                self.pop_scope();
+                // The right side runs only where the left didn't hold.
+                let (right, _) = self.fork(|this| {
+                    this.narrow(&left.when_false);
+                    this.condition(right)
+                });
                 Narrowing {
-                    when_true: Vec::new(),
+                    when_true: self.join_narrowings(&left.when_true, &right.when_true),
                     when_false: left
                         .when_false
                         .into_iter()
@@ -390,20 +392,20 @@ impl Inferrer<'_> {
         let Some(called) = self.called_contract(value) else {
             return CallEnd::Returns;
         };
-        let mut narrowings =
-            self.contract_narrowings(&called, |returns| returns == Returns::Normally);
-        let mut end = CallEnd::Returns;
+        let narrowings = self.contract_narrowings(&called, |returns| returns == Returns::Normally);
+        // A lambda run in place ran on the flow here: where it ended is
+        // where the call returns.
         for lambda in called.lambdas_surely_run() {
-            let start = lambda.start_byte() as u32;
-            if let Some(narrowed) = self.lambda_ends.get(&start) {
-                narrowings.extend(narrowed.iter().cloned());
-            }
-            if self.lambdas_never_ending.contains(&start) {
-                end = CallEnd::Never;
+            if let Some(end) = self.lambda_ends.get(&(lambda.start_byte() as u32)) {
+                self.flow = end.clone();
             }
         }
         self.narrow(&narrowings);
-        end
+        if self.flow.is_dead() {
+            CallEnd::Never
+        } else {
+            CallEnd::Returns
+        }
     }
 
     /// What a condition known to hold says, read without inferring it again
@@ -613,7 +615,11 @@ impl Inferrer<'_> {
         let is_judged_property = property_name
             .and_then(|name| self.property_read_at(name))
             .is_some_and(|read| matches!(read, PropertyRead::Stable(_) | PropertyRead::Unstable));
+        let unsure = self
+            .narrowable(value)
+            .is_some_and(|narrowed| self.is_unsure(narrowed));
         let followed = (is_local || is_call || is_judged_property)
+            && !unsure
             && hir_def::def_map::classpath_complete(self.db, self.file)
             && self.examinable(value);
         if followed {
