@@ -13,6 +13,7 @@ use super::flow::Flow;
 use super::narrowing::{CallEnd, Narrowed};
 use super::property_paths::{PathRoot, ReceiverRoot};
 use super::reassociation::{self, Operation};
+use super::type_mismatches::{Expectation, Requirement};
 use super::{LocalKind, NameSite, NullCheckKind, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
@@ -72,17 +73,43 @@ impl Inferrer<'_> {
     }
 
     pub(super) fn typed(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
+        self.typed_with(node, Expectation::hint(expected))
+    }
+
+    /// `node`, given what the place it goes says of it.
+    pub(super) fn typed_with(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expectation: Expectation<'_>,
+    ) -> Typed {
         if self.depth >= super::declarations::MAX_DEPTH {
             return Typed::Value(Ty::Unknown);
         }
-        let requirement = self.requirement.take();
         self.depth += 1;
-        let typed = match requirement {
-            Some(requirement) => self.typed_required(node, expected, requirement),
-            None => self.typed_inner(node, expected),
+        let typed = match expectation.requirement {
+            Some(requirement) => self.typed_required(node, expectation.hint, requirement),
+            None => self.typed_inner(node, expectation.hint),
         };
         self.depth -= 1;
         typed
+    }
+
+    /// A branching expression whose branches' values must meet
+    /// `requirement`: each is checked where it ends.
+    pub(super) fn branching(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: &Requirement,
+    ) -> Ty {
+        let requirement = Some(requirement.clone());
+        match node.kind() {
+            "if_expression" => self.if_expression(node, expected, requirement),
+            "when_expression" => self.when_expression(node, expected, requirement),
+            "try_expression" => self.try_expression(node, expected, requirement),
+            "elvis_expression" => self.elvis(node, expected, requirement),
+            _ => self.expression(node, expected),
+        }
     }
 
     pub(super) fn typed_inner(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Typed {
@@ -182,11 +209,11 @@ impl Inferrer<'_> {
                 self.binary_operator(node)
             }
             "infix_expression" => self.infix(node),
-            "elvis_expression" => self.elvis(node, expected),
+            "elvis_expression" => self.elvis(node, expected, None),
             "indexing_expression" => self.indexing(node),
-            "if_expression" => self.if_expression(node, expected),
-            "when_expression" => self.when_expression(node, expected),
-            "try_expression" => self.try_expression(node, expected),
+            "if_expression" => self.if_expression(node, expected, None),
+            "when_expression" => self.when_expression(node, expected, None),
+            "try_expression" => self.try_expression(node, expected, None),
             "jump_expression" => {
                 self.jump(node);
                 Ty::Nothing { nullable: false }
@@ -859,8 +886,12 @@ impl Inferrer<'_> {
         self.infix_call(receiver, function, right)
     }
 
-    fn elvis(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
-        let requirement = self.branch_requirement.take();
+    fn elvis(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
         let mut children = named_children(node);
         let (Some(left), Some(right)) = (children.next(), children.next()) else {
             return Ty::Unknown;
@@ -1110,12 +1141,16 @@ impl Inferrer<'_> {
 
     // --- control flow ---------------------------------------------------
 
-    fn if_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
+    fn if_expression(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
         let children: Vec<SyntaxNode<'_>> = named_children(node).collect();
         let Some((&condition, branches)) = children.split_first() else {
             return Ty::Unknown;
         };
-        let requirement = self.branch_requirement.take();
         let narrowing = self.condition(condition);
         let then_branch = branches.first().copied();
         let else_branch = branches.get(1).copied();
@@ -1144,8 +1179,12 @@ impl Inferrer<'_> {
         }
     }
 
-    fn when_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
-        let requirement = self.branch_requirement.take();
+    fn when_expression(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
         self.push_scope();
         let mut subject_local = None;
         let mut subject_type = None;
@@ -1415,8 +1454,12 @@ impl Inferrer<'_> {
         outcome
     }
 
-    fn try_expression(&mut self, node: SyntaxNode<'_>, expected: Option<&Ty>) -> Ty {
-        let requirement = self.branch_requirement.take();
+    fn try_expression(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&Ty>,
+        requirement: Option<Requirement>,
+    ) -> Ty {
         let mut branches = Vec::new();
         // A `catch` may start anywhere in the try block: with what was
         // known before it, but of nothing the block assigns.

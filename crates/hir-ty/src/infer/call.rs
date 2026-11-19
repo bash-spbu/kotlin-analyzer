@@ -1107,12 +1107,14 @@ impl<'db> Inferrer<'db> {
                     ty,
                 };
             }
+            // Against the declared `T`, not `T` as an earlier argument
+            // bound it: each argument is a lower bound (`listOf(circle,
+            // square)` makes `T` a `Shape`).
             if let ArgumentValue::Typed { ty, .. } = &argument.value
                 && !argument.spread
             {
-                let declared = parameter.ty.substitute(&substitution);
                 self.types
-                    .unify(&declared, ty, parameters, &mut substitution);
+                    .unify(&parameter.ty, ty, parameters, &mut substitution);
             }
         }
         if self.arguments_fit_with(shaped, arguments, &substitution) == Fit::No {

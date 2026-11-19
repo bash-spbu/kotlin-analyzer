@@ -360,6 +360,12 @@ fun use() {
 }
 fun lengths() = listOf("a").map { it.length }
 fun written(): Int = 1
+interface Shape
+class Circle : Shape
+class Square : Shape
+fun shapes() {
+    val both = listOf(Circle(), Square())
+}
 "#,
     );
     let file = fixture.file("/app/a/Use.kt");
@@ -382,7 +388,8 @@ fun written(): Int = 1
         it: String
         name: String
         : List<Int>
-        it: String"#]]
+        it: String
+        both: List<Shape>"#]]
     .assert_eq(&rendered.join("\n"));
 }
 
@@ -2750,6 +2757,32 @@ inline fun <reified T> Any.expect(): T {
 "#,
         crate::DiagnosticsConfig {
             only: vec![crate::Check::UselessCast, crate::Check::UselessIsCheck],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![""],
+    );
+}
+
+#[test]
+fn values_passed_as_a_type_parameter_join_and_lambdas_dont_widen_it() {
+    // `listOf(circle, square)`: each value is a lower bound, `T` is what
+    // they share. A lambda's receiver (`apply` given a `Base.() -> Unit`)
+    // is an upper bound: `T` stays the receiver's own class.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+interface Shape { fun area(): Int }
+class Circle : Shape { override fun area() = 1 }
+class Square : Shape { override fun area() = 2 }
+fun total() = listOf(Circle(), Square()).first().area()
+open class Base
+class Derived : Base() { val own = 1 }
+fun build(block: Base.() -> Unit): Int = Derived().apply(block).own
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::UnresolvedReference],
+            experimental: true,
             ..crate::DiagnosticsConfig::default()
         },
         expect![""],

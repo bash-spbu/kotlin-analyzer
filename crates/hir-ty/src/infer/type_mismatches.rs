@@ -47,6 +47,25 @@ impl Requirement {
     }
 }
 
+/// What the place a value goes says of it — rust-analyzer's
+/// `Expectation`: a type to guide inference (`hint`), and, where the value
+/// must have a type rather than may, the requirement it's checked against.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Expectation<'a> {
+    pub(super) hint: Option<&'a Ty>,
+    pub(super) requirement: Option<&'a Requirement>,
+}
+
+impl<'a> Expectation<'a> {
+    /// Only a type to guide inference.
+    pub(super) fn hint(hint: Option<&'a Ty>) -> Expectation<'a> {
+        Expectation {
+            hint,
+            requirement: None,
+        }
+    }
+}
+
 /// How an expression meets a requirement.
 enum Meets {
     /// Its value is checked.
@@ -91,10 +110,12 @@ impl Inferrer<'_> {
         hint: Option<&Ty>,
         requirement: Requirement,
     ) -> Ty {
-        let outer = self.requirement.replace(requirement);
-        let ty = self.expression(value, hint);
-        self.requirement = outer;
-        ty
+        let expectation = Expectation {
+            hint,
+            requirement: Some(&requirement),
+        };
+        let typed = self.typed_with(value, expectation);
+        self.value_of(typed)
     }
 
     /// `node` inferred where `requirement` holds: checked itself, or
@@ -103,21 +124,20 @@ impl Inferrer<'_> {
         &mut self,
         node: SyntaxNode<'_>,
         expected: Option<&Ty>,
-        requirement: Requirement,
+        requirement: &Requirement,
     ) -> Typed {
         match meets(node) {
-            Meets::Inner => {
-                self.requirement = Some(requirement);
-                let typed = self.typed_inner(node, expected);
-                self.requirement = None;
-                typed
-            }
-            Meets::Branches => {
-                self.branch_requirement = Some(requirement);
-                let typed = self.typed_inner(node, expected);
-                self.branch_requirement = None;
-                typed
-            }
+            Meets::Inner => match named_children(node).next() {
+                Some(inner) => self.typed_with(
+                    inner,
+                    Expectation {
+                        hint: expected,
+                        requirement: Some(requirement),
+                    },
+                ),
+                None => Typed::Value(Ty::Unknown),
+            },
+            Meets::Branches => Typed::Value(self.branching(node, expected, requirement)),
             Meets::Itself => {
                 let typed = self.typed_inner(node, expected);
                 let ty = self.value_of(typed.clone());
@@ -184,9 +204,8 @@ impl Inferrer<'_> {
         if !is_value_statement(last) {
             return self.statement(last);
         }
-        self.requirement = Some(requirement);
-        let ty = self.statement(last);
-        self.requirement = None;
+        let ty = self.required(last, None, requirement);
+        self.end_way(&ty);
         ty
     }
 

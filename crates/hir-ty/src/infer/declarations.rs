@@ -107,8 +107,6 @@ pub(crate) struct Inferrer<'db> {
     /// Where a call was resolved without every argument known to fit, or
     /// chosen among several: by the start of its name.
     pub(super) uncertain_calls: FxHashSet<u32>,
-    /// The type the value inferred next must have — taken by it.
-    pub(super) requirement: Option<super::type_mismatches::Requirement>,
     /// What the data flow knows here (see `flow`).
     pub(super) flow: Flow,
     /// The loops around, innermost last, collecting the ways that leave
@@ -132,9 +130,6 @@ pub(crate) struct Inferrer<'db> {
     pub(super) property_reads: FxHashMap<u32, super::property_paths::PropertyRead>,
     /// `val ready = x != null`: what `ready` being true or false narrows.
     pub(super) condition_aliases: FxHashMap<LocalId, super::narrowing::Narrowing>,
-    /// The type each branch of the branching expression inferred next
-    /// (`if`, `when`, `try`, `?:`) must give — taken by it.
-    pub(super) branch_requirement: Option<super::type_mismatches::Requirement>,
 }
 
 /// What a plain `return` (no label) inside it returns from.
@@ -176,8 +171,6 @@ impl<'db> Inferrer<'db> {
             return_targets: Vec::new(),
             certain_locals: FxHashSet::default(),
             uncertain_calls: FxHashSet::default(),
-            requirement: None,
-            branch_requirement: None,
             flow: Flow::default(),
             loops: Vec::new(),
             not_null_implies: FxHashMap::default(),
