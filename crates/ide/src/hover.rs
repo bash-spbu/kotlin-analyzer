@@ -114,8 +114,8 @@ fn push_documentation_and_place(db: &RootDatabase, location: ItemLocation, markd
 /// Signatures longer than this get one parameter per line.
 const SIGNATURE_WIDTH: usize = 60;
 
-/// The signature in a `kotlin` code block; a long one with a parameter
-/// per line, as Kotlin's style writes it:
+/// The signature in a `kotlin` code block; a long one with several
+/// parameters with a parameter per line, as Kotlin's style writes it:
 ///
 /// ```text
 /// fun addAuditLog(
@@ -136,7 +136,8 @@ fn wrapped_signature(signature: &str) -> String {
     };
     let inside = &signature[parameters.start + 1..parameters.end];
     let split = top_level_parts(inside);
-    if split.is_empty() {
+    // One parameter stays on the line, however long.
+    if split.len() < 2 {
         return signature.to_owned();
     }
     let mut wrapped = signature[..=parameters.start].to_owned();
@@ -324,6 +325,9 @@ mod tests {
             wrapped_signature(class),
             "class Money(\n    val amount: Long,\n    val currency: Currency,\n    val scale: Int,\n)"
         );
+        let one_parameter =
+            "fun register(handler: (AuditLogOperation, AuditLogOperationResult) -> Unit): Unit";
+        assert_eq!(wrapped_signature(one_parameter), one_parameter);
         let long_without_parameters =
             "val someVeryLongPropertyName: Map<String, List<SomeVeryLongTypeName>>";
         assert_eq!(
