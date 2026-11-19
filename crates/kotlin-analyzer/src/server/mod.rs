@@ -637,7 +637,7 @@ impl GlobalState {
         self.progress_on(
             &token,
             WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                title: "Loading workspace".to_owned(),
+                title: progress::title("Loading workspace"),
                 cancellable: Some(false),
                 message: Some(self.root.display().to_string()),
                 percentage: None,
@@ -756,7 +756,7 @@ impl GlobalState {
         self.progress_on(
             EXPORT_TOKEN,
             WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                title: "Exporting the Gradle model".to_owned(),
+                title: progress::title("Exporting the Gradle model"),
                 cancellable: Some(false),
                 message: Some("gradle kotlinAnalyzerModel".to_owned()),
                 percentage: None,
@@ -1017,7 +1017,7 @@ impl GlobalState {
         self.progress_on(
             &token,
             WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                title: "All set".to_owned(),
+                title: progress::title("All set"),
                 cancellable: Some(false),
                 message: Some(format!(
                     "{} files, nothing left to wait for",

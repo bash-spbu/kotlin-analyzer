@@ -1269,6 +1269,18 @@ fn loading_reports_each_step_in_the_status_bar() {
         "the loading's steps: {steps:?}"
     );
     assert!(steps[0].starts_with("begin: "), "{steps:?}");
+    let begin = client
+        .unread
+        .iter()
+        .find(|notification| {
+            notification.params["token"] == token && notification.params["value"]["kind"] == "begin"
+        })
+        .unwrap();
+    // Named after the server: the status bar shows a title as it is.
+    assert_eq!(
+        begin.params["value"]["title"],
+        "kotlin-analyzer: Loading workspace"
+    );
     // No libraries: no step for them (the end was read waiting for it).
     assert_eq!(steps.len(), 3, "{steps:?}");
     client.shut_down();
@@ -1297,7 +1309,7 @@ fn once_loading_and_checking_are_over_the_status_bar_says_all_is_set_for_a_momen
         notification.method == "$/progress" && notification.params["token"] == token
     });
     assert_eq!(begin.params["value"]["kind"], "begin");
-    assert_eq!(begin.params["value"]["title"], "All set");
+    assert_eq!(begin.params["value"]["title"], "kotlin-analyzer: All set");
     assert_eq!(
         begin.params["value"]["message"],
         "1 files, nothing left to wait for"

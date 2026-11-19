@@ -13,7 +13,9 @@ not answered yet with `RequestCancelled` at once: its work is skipped when
 it hasn't started, and its result dropped when it comes (a computation
 already running goes on until done or an edit cancels it). While the workspace is being loaded, `$/progress` reports it under
 the token `kotlin-analyzer/loading/<n>`, created (`window/workDoneProgress/create`)
-right after `initialize` returns, step by step: reading the project model,
+right after `initialize` returns — every progress title starts with
+`kotlin-analyzer: `, as Zed shows a title without the server's name —
+step by step: reading the project model,
 reading the files (how many), indexing the libraries (how many of how many,
 with a percentage), ending with how many files there are. The Gradle export
 reports under `kotlin-analyzer/gradle`. `workspace/diagnostic` runs on a pool
@@ -22,7 +24,7 @@ completion) never queue behind it; one that runs longer than 0.5 s shows
 `Checking files` with how many of how many under
 `kotlin-analyzer/checking/<n>`. Once a load has applied, the Gradle export
 is done and no workspace check runs — for 0.3 s, as a client asks for the
-workspace's diagnostics just after a load — `All set` (`N files, nothing
+workspace's diagnostics just after a load — `kotlin-analyzer: All set` (`N files, nothing
 left to wait for`) shows for 3 s under `kotlin-analyzer/ready/<n>`, once
 per load. Requests that need the workspace answer
 empty until it has loaded; once it has, the client is asked to refresh

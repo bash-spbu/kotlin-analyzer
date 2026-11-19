@@ -13,6 +13,13 @@ use lsp_types::{
 
 use super::Task;
 
+/// A progress's title as the status bar shows it: named after the server,
+/// as an editor with several language servers shows theirs side by side
+/// (Zed shows a title as it is).
+pub(super) fn title(title: &str) -> String {
+    format!("kotlin-analyzer: {title}")
+}
+
 /// A counter's reports more often than this are dropped: the status bar
 /// can't show them anyway.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -89,7 +96,7 @@ impl Progress {
             self.send(
                 true,
                 WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                    title: self.title.unwrap_or_default().to_owned(),
+                    title: title(self.title.unwrap_or_default()),
                     cancellable: Some(false),
                     message: Some(message),
                     percentage,
@@ -214,7 +221,7 @@ mod tests {
         assert_eq!(
             sent(&receiver),
             [
-                "create, begin Checking: 1/3 files",
+                "create, begin kotlin-analyzer: Checking: 1/3 files",
                 "report 3/3 files",
                 "end done"
             ]
