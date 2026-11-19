@@ -3273,7 +3273,7 @@ fun use(account: Long) {
         documentation.as_deref(),
         Some(
             "```kotlin\nfun charge(\n    amount: Long,\n    currency: String,\n    note: String = \"\",\n)\n```\n\n\
-             ---\n\nCharges [amount] to an account.\n\n---\n\nin `b`"
+             ---\n\nCharges `amount` to an account.\n\n---\n\nin `b`"
         )
     );
     let documentation = analysis(&fixture)

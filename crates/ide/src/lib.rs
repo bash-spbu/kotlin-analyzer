@@ -8,6 +8,7 @@
 mod code_lens;
 mod completion;
 mod diagnostics;
+mod doc_markdown;
 mod document_symbols;
 mod file_rename;
 mod folding;

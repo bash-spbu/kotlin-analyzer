@@ -410,7 +410,8 @@ fn doc_comment(parse: &syntax::Parse, node: SyntaxNode<'_>) -> Option<String> {
         let text = parse.text_of(sibling);
         let is_comment = sibling.kind().contains("comment");
         if is_comment && text.starts_with("/**") {
-            return Some(clean(text));
+            let markdown = crate::doc_markdown::to_markdown(text, parse.language());
+            return (!markdown.is_empty()).then_some(markdown);
         }
         // Only annotations may stand between a declaration and its doc.
         if !is_comment && sibling.kind() != "annotation" && sibling.kind() != "file_annotation" {
@@ -434,48 +435,6 @@ fn node_with_range(root: SyntaxNode<'_>, range: TextRange) -> Option<SyntaxNode<
         node = parent;
     }
     Some(node)
-}
-
-/// `/** … */` without its delimiters and leading `*`s, with Javadoc's
-/// inline tags as Markdown.
-fn clean(comment: &str) -> String {
-    let body = comment.trim_start_matches("/**").trim_end_matches("*/");
-    let lines: Vec<&str> = body
-        .lines()
-        .map(|line| {
-            let line = line.trim();
-            line.strip_prefix('*').map(str::trim_start).unwrap_or(line)
-        })
-        .collect();
-    let text = lines.join("\n").trim().to_owned();
-    inline_tags(&text)
-}
-
-/// `{@code x}` / `{@literal x}` → `` `x` ``, `{@link A#b}` → `` `A.b` ``.
-fn inline_tags(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("{@") {
-        output.push_str(&rest[..start]);
-        let tag = &rest[start + 2..];
-        let Some(end) = tag.find('}') else {
-            output.push_str(&rest[start..]);
-            return output;
-        };
-        let (kind, argument) = tag[..end].split_once(' ').unwrap_or((&tag[..end], ""));
-        let argument = argument.trim();
-        match kind {
-            "code" | "literal" => output.push_str(&format!("`{argument}`")),
-            "link" | "linkplain" => {
-                let target = argument.split_whitespace().next().unwrap_or("");
-                output.push_str(&format!("`{}`", target.replace('#', ".")));
-            }
-            _ => output.push_str(argument),
-        }
-        rest = &tag[end + 1..];
-    }
-    output.push_str(rest);
-    output
 }
 
 #[cfg(test)]
@@ -540,15 +499,6 @@ mod tests {
         assert_eq!(
             wrapped_signature(long_without_parameters, CodeLanguage::Kotlin),
             long_without_parameters
-        );
-    }
-
-    #[test]
-    fn comments_lose_their_frame_and_javadoc_tags_become_markdown() {
-        let comment = "/**\n     * Returns {@code true} when {@link java.util.List#isEmpty} says so.\n     *\n     * @param list the list\n     */";
-        assert_eq!(
-            clean(comment),
-            "Returns `true` when `java.util.List.isEmpty` says so.\n\n@param list the list"
         );
     }
 }
