@@ -6,18 +6,20 @@ use std::sync::Arc;
 use ide::{CompletionKind, FoldKind, TokenKind};
 use lsp_server::Request;
 use lsp_types::request::{
-    Completion, FoldingRangeRequest, PrepareRenameRequest, References, Rename, Request as _,
-    SemanticTokensFullRequest, SignatureHelpRequest,
+    Completion, DocumentHighlightRequest, FoldingRangeRequest, PrepareRenameRequest, References,
+    Rename, Request as _, ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use vfs::{FileId, LineIndex};
 
 use super::convert;
 use super::handlers::Snapshot;
 
-const METHODS: [&str; 7] = [
+const METHODS: [&str; 9] = [
     Completion::METHOD,
+    ResolveCompletionItem::METHOD,
     SignatureHelpRequest::METHOD,
     References::METHOD,
+    DocumentHighlightRequest::METHOD,
     PrepareRenameRequest::METHOD,
     Rename::METHOD,
     SemanticTokensFullRequest::METHOD,
@@ -35,11 +37,17 @@ pub(super) fn handle(snapshot: &Snapshot, request: Request) -> Answer {
         Completion::METHOD => {
             params::<Completion>(request).map(|params| completion(snapshot, params))
         }
+        ResolveCompletionItem::METHOD => {
+            params::<ResolveCompletionItem>(request).map(|item| resolve_completion(snapshot, item))
+        }
         SignatureHelpRequest::METHOD => {
             params::<SignatureHelpRequest>(request).map(|params| signature_help(snapshot, params))
         }
         References::METHOD => {
             params::<References>(request).map(|params| references(snapshot, params))
+        }
+        DocumentHighlightRequest::METHOD => {
+            params::<DocumentHighlightRequest>(request).map(|params| highlights(snapshot, params))
         }
         PrepareRenameRequest::METHOD => {
             params::<PrepareRenameRequest>(request).map(|params| prepare_rename(snapshot, params))
@@ -80,6 +88,7 @@ fn completion(
     };
     let offset = convert::offset(&text, params.text_document_position.position);
     let completions = snapshot.analysis.completions(file, offset)?;
+    let document = params.text_document_position.text_document;
     let items: Vec<lsp_types::CompletionItem> = completions
         .items
         .iter()
@@ -100,6 +109,13 @@ fn completion(
                     new_text: edit.new_text.clone(),
                 }]
             }),
+            // What `completionItem/resolve` needs to find the item again.
+            data: item.declaration.map(|_| {
+                serde_json::json!({
+                    "textDocument": { "uri": document.uri },
+                    "offset": offset,
+                })
+            }),
             ..lsp_types::CompletionItem::default()
         })
         .collect();
@@ -108,6 +124,32 @@ fn completion(
         items,
     };
     Ok(serde_json::to_value(list).unwrap_or_default())
+}
+
+/// `completionItem/resolve`: the item with its declaration's documentation.
+fn resolve_completion(
+    snapshot: &Snapshot,
+    mut item: lsp_types::CompletionItem,
+) -> ide::Cancellable<serde_json::Value> {
+    let offset = item
+        .data
+        .as_ref()
+        .and_then(|data| data.get("offset"))
+        .and_then(serde_json::Value::as_u64);
+    let file = snapshot.request_file.filter(|_| snapshot.loaded);
+    if let (Some(file), Some(offset)) = (file, offset) {
+        let documentation =
+            snapshot
+                .analysis
+                .completion_documentation(file, offset as usize, &item.label)?;
+        item.documentation = documentation.map(|value| {
+            lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value,
+            })
+        });
+    }
+    Ok(serde_json::to_value(item).unwrap_or_default())
 }
 
 fn completion_kind(kind: CompletionKind) -> lsp_types::CompletionItemKind {
@@ -125,6 +167,7 @@ fn completion_kind(kind: CompletionKind) -> lsp_types::CompletionItemKind {
         CompletionKind::Object => Lsp::MODULE,
         CompletionKind::TypeAlias => Lsp::CLASS,
         CompletionKind::Package => Lsp::MODULE,
+        CompletionKind::NamedArgument => Lsp::VARIABLE,
     }
 }
 
@@ -208,6 +251,29 @@ fn references(
         locations.extend(location(snapshot, found)?);
     }
     Ok(serde_json::to_value(locations).unwrap_or_default())
+}
+
+fn highlights(
+    snapshot: &Snapshot,
+    params: lsp_types::DocumentHighlightParams,
+) -> ide::Cancellable<serde_json::Value> {
+    let Some((file, text, index)) = document(snapshot)? else {
+        return Ok(serde_json::Value::Null);
+    };
+    let offset = convert::offset(&text, params.text_document_position_params.position);
+    let highlights: Vec<lsp_types::DocumentHighlight> = snapshot
+        .analysis
+        .highlights(file, offset)?
+        .into_iter()
+        .map(|highlight| lsp_types::DocumentHighlight {
+            range: convert::range(&index, &text, highlight.range),
+            kind: Some(match highlight.access {
+                ide::Access::Read => lsp_types::DocumentHighlightKind::READ,
+                ide::Access::Write => lsp_types::DocumentHighlightKind::WRITE,
+            }),
+        })
+        .collect();
+    Ok(serde_json::to_value(highlights).unwrap_or_default())
 }
 
 fn prepare_rename(

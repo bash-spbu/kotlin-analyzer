@@ -97,7 +97,7 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
 }
 
 /// The KDoc or Javadoc comment just before the declaration, cleaned up.
-fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
+pub(crate) fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
     match location.container {
         ItemContainer::File(file) => {
             let parse = hir::parse(db, file);

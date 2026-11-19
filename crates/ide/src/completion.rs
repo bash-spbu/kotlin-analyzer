@@ -36,13 +36,21 @@ pub struct CompletionItem {
     pub import_edit: Option<crate::TextEdit>,
     /// Lower sorts first.
     pub relevance: u32,
+    /// The declaration it names, whose documentation resolving it gives.
+    pub declaration: Option<ItemLocation>,
+    /// What accepting it writes when that isn't its label (`count = ` of
+    /// a named argument).
+    pub text: Option<String>,
 }
 
 impl CompletionItem {
     /// What accepting it writes: the name, in backticks where Kotlin needs
     /// them (`` `in` ``).
     pub fn insert_text(&self) -> std::borrow::Cow<'_, str> {
-        syntax::names::escaped(&self.label)
+        match &self.text {
+            Some(text) => std::borrow::Cow::Borrowed(text),
+            None => syntax::names::escaped(&self.label),
+        }
     }
 }
 
@@ -60,6 +68,8 @@ pub enum CompletionKind {
     Object,
     TypeAlias,
     Package,
+    /// `count = ` inside a call's parentheses.
+    NamedArgument,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -72,6 +82,8 @@ pub struct Completions {
 /// Where among the levels an item comes from, for ordering.
 #[derive(Clone, Copy)]
 enum Source {
+    /// A parameter of the call the cursor is an argument of, by name.
+    NamedArgument,
     Local,
     Member(MemberRank),
     /// An extension the qualifier can use: after its members.
@@ -97,7 +109,7 @@ impl Source {
     /// Lower sorts first.
     fn relevance(self) -> u32 {
         match self {
-            Source::Local => 0,
+            Source::NamedArgument | Source::Local => 0,
             Source::Member(rank) => 10 + rank as u32,
             Source::Extension => 20,
             Source::Scope => 30,
@@ -170,12 +182,50 @@ pub(crate) fn completions(db: &RootDatabase, file: FileId, offset: usize) -> Com
             builder.importable(true);
         }
         Context::Expression => {
+            if let Some(named) = node.and_then(|node| argument_names(&parse, node)) {
+                builder.named_arguments(file, offset, &named);
+            }
             let scope = hir::completion_scope(db, source, probed, probe_offset, inserted)
                 .unwrap_or_default();
             builder.expression(&scope);
         }
     }
     builder.finish()
+}
+
+/// When `node` is a whole argument of a call not given by name (`pay(am|`),
+/// the names of the call's arguments that are.
+fn argument_names(parse: &syntax::Parse, node: SyntaxNode<'_>) -> Option<Vec<String>> {
+    let argument = node
+        .parent()
+        .filter(|parent| parent.kind() == "value_argument")?;
+    let alone = syntax::named_children(argument).count() == 1;
+    if !alone || syntax::has_token(argument, "=") {
+        return None;
+    }
+    let arguments = argument.parent()?;
+    Some(
+        syntax::named_children(arguments)
+            .filter(|other| syntax::has_token(*other, "="))
+            .filter_map(|other| syntax::named_children(other).next())
+            .map(|name| parse.text_of(name).trim_matches('`').to_owned())
+            .collect(),
+    )
+}
+
+/// The documentation of the declaration the item `label` at `offset`
+/// names.
+pub(crate) fn documentation(
+    db: &RootDatabase,
+    file: FileId,
+    offset: usize,
+    label: &str,
+) -> Option<String> {
+    let item = completions(db, file, offset)
+        .items
+        .into_iter()
+        .find(|item| item.label == label)?;
+    crate::hover::documentation(db, item.declaration?)
 }
 
 enum Context {
@@ -222,6 +272,8 @@ impl<'db> Builder<'db> {
         match_quality(name, self.prefix).filter(|quality| *quality != MatchQuality::Subsequence)
     }
 
+    /// Adds an item when the name typed matches it and no item has its
+    /// label yet; whether it did.
     fn push(
         &mut self,
         label: String,
@@ -229,12 +281,12 @@ impl<'db> Builder<'db> {
         detail: Option<String>,
         source: Source,
         import: Option<String>,
-    ) {
+    ) -> bool {
         let Some(quality) = self.matches(&label) else {
-            return;
+            return false;
         };
         if !self.seen.insert(label.clone()) {
-            return;
+            return false;
         }
         self.items.push((
             quality,
@@ -246,8 +298,38 @@ impl<'db> Builder<'db> {
                 import,
                 import_edit: None,
                 relevance: source.relevance(),
+                declaration: None,
+                text: None,
             },
         ));
+        true
+    }
+
+    /// `name = ` for each parameter of the call at `offset` not passed by
+    /// name yet (`named`).
+    fn named_arguments(&mut self, file: FileId, offset: usize, named: &[String]) {
+        let Some(help) = crate::signature_help::signature_help(self.db, file, offset) else {
+            return;
+        };
+        for signature in &help.signatures {
+            for name in signature.parameter_names() {
+                if named.contains(name) {
+                    continue;
+                }
+                let label = format!("{name} =");
+                let detail = Some(signature.label.clone());
+                if self.push(
+                    label,
+                    CompletionKind::NamedArgument,
+                    detail,
+                    Source::NamedArgument,
+                    None,
+                ) && let Some((_, item)) = self.items.last_mut()
+                {
+                    item.text = Some(format!("{} = ", syntax::names::escaped(name)));
+                }
+            }
+        }
     }
 
     fn push_declaration(&mut self, location: ItemLocation, source: Source, import: Option<String>) {
@@ -257,13 +339,16 @@ impl<'db> Builder<'db> {
             return;
         }
         let kind = kind_of(item.kind, item.parent.is_some());
-        self.push(
+        let pushed = self.push(
             item.name.to_string(),
             kind,
             Some(tree.signature(location.item)),
             source,
             import,
         );
+        if pushed && let Some((_, pushed_item)) = self.items.last_mut() {
+            pushed_item.declaration = Some(location);
+        }
     }
 
     fn expression(&mut self, scope: &CompletionScope) {
@@ -517,6 +602,8 @@ impl<'db> Builder<'db> {
                     import_edit: Some(self.imports.edit(&qualified)),
                     import: Some(qualified),
                     relevance: Source::Import.relevance(),
+                    declaration: Some(location),
+                    text: None,
                 },
             ));
         }

@@ -173,6 +173,14 @@ counts as none or one). A Java parameter of a mutable collection type also
 takes the read-only collection. An argument breaking a callee type
 parameter's bounds makes the overload inapplicable.
 
+A member whose result is its class's type parameter, which a star in the
+type it's called on binds, gets that type when the parameter is the
+class's own type (`SELF : AbstractStringAssert<SELF>`): AssertJ's
+`assertThat(x).isEqualTo(y)` on `AbstractStringAssert<?>` stays an
+`AbstractStringAssert<*>`, as the compiler's capture of the star
+approximates it. Another bound isn't used: a star and a type that didn't
+resolve are both unknown.
+
 Java declarations have platform types (`String!`); Java getters and setters
 read as properties (`user.name`, `user.active` for `isActive()`). The compiler
 generates `copy` of data classes, `valueOf`, `values` and `entries` of enums,

@@ -125,12 +125,118 @@ pub(crate) fn references(
     let Some((target, range)) = Target::at(db, file, offset) else {
         return Vec::new();
     };
-    target_references(
-        db,
-        &target.with_counterparts(db),
-        &written_name(db, file, range),
-        include_declaration,
-    )
+    let target = target.with_counterparts(db);
+    let names = searched_names(db, file, &target, written_name(db, file, range));
+    target_references(db, &target, &names, include_declaration)
+}
+
+/// The names the target is written by: the one at the cursor, and for a
+/// Java getter both its own and its property's (`getTitle()`, `title`).
+fn searched_names(
+    db: &RootDatabase,
+    file: FileId,
+    target: &Target,
+    written: String,
+) -> Vec<String> {
+    let mut names = vec![written];
+    let (Target::Declarations(declarations), Some(source)) = (target, db.source_file(file)) else {
+        return names;
+    };
+    let types = hir::Types::new(db, source);
+    for declaration in declarations {
+        let Some(property) = types.java_property_name(*declaration) else {
+            continue;
+        };
+        let getter = hir::item_tree(db, declaration.container)
+            .item(declaration.item)
+            .name
+            .to_string();
+        for name in [getter, property] {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// An occurrence of a name in its file, and whether it writes the value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Highlight {
+    pub range: TextRange,
+    pub access: Access,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    Read,
+    /// The declaration, an assignment's target, `x++`.
+    Write,
+}
+
+/// The occurrences in `file` of what the name at `offset` means.
+pub(crate) fn highlights(db: &RootDatabase, file: FileId, offset: usize) -> Vec<Highlight> {
+    let Some((target, range)) = Target::at(db, file, offset) else {
+        return Vec::new();
+    };
+    let target = target.with_counterparts(db);
+    let name = written_name(db, file, range);
+    let declared: Vec<TextRange> = declaration_ranges(db, &target)
+        .into_iter()
+        .filter(|declaration| declaration.file == file)
+        .map(|declaration| declaration.range)
+        .collect();
+    let mut ranges: Vec<TextRange> = occurrences_in(db, &target, &name, file)
+        .into_iter()
+        .map(|found| found.range)
+        .chain(declared.iter().copied())
+        .collect();
+    ranges.sort();
+    ranges.dedup();
+    let Some(source) = db.source_file(file) else {
+        return Vec::new();
+    };
+    let parse = hir::parse(db, source);
+    ranges
+        .into_iter()
+        .map(|range| {
+            let written = declared.contains(&range) || is_written(&parse, range);
+            Highlight {
+                range,
+                access: if written { Access::Write } else { Access::Read },
+            }
+        })
+        .collect()
+}
+
+/// Whether the name at `range` is what an assignment (`x = …`, `this.x +=
+/// …`) or an increment (`x++`, `--x`) writes.
+fn is_written(parse: &syntax::Parse, range: TextRange) -> bool {
+    let Some(mut node) = parse
+        .root()
+        .descendant_for_byte_range(range.start as usize, range.end as usize)
+    else {
+        return false;
+    };
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            // `x` of `x.y = …` is read: only the last name is written.
+            "navigation_expression" if syntax::named_children(parent).next() == Some(node) => {
+                return false;
+            }
+            "navigation_suffix" | "navigation_expression" | "directly_assignable_expression" => {
+                node = parent;
+            }
+            "assignment" => {
+                return syntax::named_children(parent).next() == Some(node);
+            }
+            "postfix_expression" | "prefix_expression" => {
+                return syntax::has_token(parent, "++") || syntax::has_token(parent, "--");
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The name written at `range` of `file`, without backticks.
@@ -147,10 +253,13 @@ fn written_name(db: &RootDatabase, file: FileId, range: TextRange) -> String {
 fn target_references(
     db: &RootDatabase,
     target: &Target,
-    name: &str,
+    names: &[String],
     include_declaration: bool,
 ) -> Vec<FileRange> {
-    let mut found = occurrences(db, target, name);
+    let mut found: Vec<FileRange> = names
+        .iter()
+        .flat_map(|name| occurrences(db, target, name))
+        .collect();
     let declarations = declaration_ranges(db, target);
     if include_declaration {
         found.extend(declarations.iter().copied());
@@ -190,7 +299,7 @@ pub(crate) fn rename(
     }
     let mut by_file: Vec<(FileId, Vec<TextEdit>)> = Vec::new();
     let name = written_name(db, file, range);
-    for occurrence in target_references(db, &target, &name, true) {
+    for occurrence in target_references(db, &target, std::slice::from_ref(&name), true) {
         let edit = TextEdit {
             range: occurrence.range,
             new_text: new_name.to_owned(),

@@ -110,10 +110,12 @@ fn capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         definition_provider: Some(OneOf::Left(true)),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(lsp_types::CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
+            resolve_provider: Some(true),
             ..lsp_types::CompletionOptions::default()
         }),
         signature_help_provider: Some(lsp_types::SignatureHelpOptions {
@@ -122,6 +124,7 @@ fn capabilities() -> ServerCapabilities {
             ..lsp_types::SignatureHelpOptions::default()
         }),
         references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
@@ -651,9 +654,14 @@ impl GlobalState {
     /// The file a request is about, resolved on the main thread where the
     /// file system view lives.
     fn request_file_of(&self, request: &Request) -> Option<FileId> {
-        let uri: lsp_types::Uri = request
-            .params
-            .get("textDocument")
+        // `completionItem/resolve` carries it in the item's `data`.
+        let document = request.params.get("textDocument").or_else(|| {
+            request
+                .params
+                .get("data")
+                .and_then(|data| data.get("textDocument"))
+        });
+        let uri: lsp_types::Uri = document
             .and_then(|document| document.get("uri"))
             .and_then(|uri| serde_json::from_value(uri.clone()).ok())?;
         let path = convert::path_of(&uri)?;

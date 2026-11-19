@@ -342,7 +342,7 @@ fun use() {
 }
 
 #[test]
-fn inlay_hints_show_inferred_local_types_but_not_written_or_constructed_ones() {
+fn inlay_hints_show_inferred_types_but_not_written_or_constructed_ones() {
     let fixture = Fixture::with_mini_stdlib(
         r#"
 //- /app/a/Use.kt
@@ -355,7 +355,11 @@ fun use() {
     var count = names.first().length
     val (number, word) = 1 to "one"
     names.map { it }
+    names.map { name -> name.length }
+    names.map { name: String -> name }
 }
+fun lengths() = listOf("a").map { it.length }
+fun written(): Int = 1
 "#,
     );
     let file = fixture.file("/app/a/Use.kt");
@@ -374,7 +378,11 @@ fun use() {
         names: List<String>
         count: Int
         number: Int
-        word: String"#]]
+        word: String
+        it: String
+        name: String
+        : List<Int>
+        it: String"#]]
     .assert_eq(&rendered.join("\n"));
 }
 
@@ -2235,6 +2243,139 @@ fun fromTest(holder: Holder) {
 }
 
 #[test]
+fn references_to_a_java_getter_count_its_property_uses() {
+    // `getTitle()` read as `store.title` or called as `store.getTitle()`:
+    // both are references, found from either name.
+    let fixture = r#"
+//- /app/a/Store.java
+package a;
+public class Store {
+    public String getTitle() { return null; }
+}
+//- /app/b/Use.kt
+package b
+import a.Store
+fun use(store: Store) {
+    println(store.title)
+    println(store.getTitle())
+}
+"#;
+    let references = |marker: &str, marked: &str| {
+        let fixture = Fixture::parse(&fixture.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        let mut lines: Vec<String> = analysis(&fixture)
+            .references(file, offset, true)
+            .unwrap()
+            .iter()
+            .map(|found| {
+                let text = fixture.vfs.contents(found.file).unwrap();
+                let line = text[..found.range.start as usize].matches('\n').count() + 1;
+                let name = &text[found.range.start as usize..found.range.end as usize];
+                format!("{}:{line} {name}", fixture.vfs.path(found.file).display())
+            })
+            .collect();
+        lines.sort();
+        lines.join("\n")
+    };
+    expect![[r#"
+        /app/a/Store.java:3 getTitle
+        /app/b/Use.kt:4 title
+        /app/b/Use.kt:5 getTitle"#]]
+    .assert_eq(&references("store.title", "store.ti$0tle"));
+    expect![[r#"
+        /app/a/Store.java:3 getTitle
+        /app/b/Use.kt:4 title
+        /app/b/Use.kt:5 getTitle"#]]
+    .assert_eq(&references("String getTitle", "String getTi$0tle"));
+}
+
+#[test]
+fn highlights_tell_writes_from_reads() {
+    // A local and a property: the declaration, assignments (`=`, `+=`),
+    // increments and a qualified target write; the rest reads — the
+    // receiver of `box.count = …` included.
+    let fixture = r#"
+//- /app/b/Use.kt
+package b
+class Box(var count: Int)
+fun use(box: Box) {
+    var total = 0
+    total = box.count
+    total += 1
+    total++
+    println(total)
+    box.count = total
+}
+"#;
+    let highlights = |marker: &str, marked: &str| {
+        let fixture = Fixture::parse(&fixture.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        let text = fixture.vfs.contents(file).unwrap();
+        analysis(&fixture)
+            .highlights(file, offset)
+            .unwrap()
+            .iter()
+            .map(|highlight| {
+                let line = text[..highlight.range.start as usize].matches('\n').count() + 1;
+                let name = &text[highlight.range.start as usize..highlight.range.end as usize];
+                format!("{line} {name} {:?}", highlight.access)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    expect![[r#"
+        4 total Write
+        5 total Write
+        6 total Write
+        7 total Write
+        8 total Read
+        9 total Read"#]]
+    .assert_eq(&highlights("println(total)", "println(to$0tal)"));
+    expect![[r#"
+        2 count Write
+        5 count Read
+        9 count Write"#]]
+    .assert_eq(&highlights("box.count = total", "box.cou$0nt = total"));
+}
+
+#[test]
+fn type_definitions_are_the_classes_of_the_type() {
+    // A local's, a parameter's and a property's type: its class, then its
+    // type arguments' (a library's, `List`, isn't shown here).
+    let fixture = r#"
+//- /app/b/Use.kt
+package b
+class Order(val id: Int)
+class Holder(val orders: List<Order>)
+fun use(holder: Holder) {
+    val first = holder.orders
+    println(first)
+}
+"#;
+    let classes = |marker: &str, marked: &str| {
+        let fixture = Fixture::with_mini_stdlib(&fixture.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        analysis(&fixture)
+            .goto_type_definition(file, offset)
+            .unwrap()
+            .iter()
+            .map(|target| match target.file {
+                crate::NavigationFile::Workspace(file) => {
+                    let text = fixture.vfs.contents(file).unwrap();
+                    text[target.focus_range.start as usize..target.focus_range.end as usize]
+                        .to_owned()
+                }
+                crate::NavigationFile::Library { .. } => format!("library {}", target.name),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    expect!["List, Order"].assert_eq(&classes("println(first)", "println(fir$0st)"));
+    expect!["Holder"].assert_eq(&classes("fun use(holder", "fun use(hol$0der"));
+    expect!["List, Order"].assert_eq(&classes("val orders", "val ord$0ers"));
+}
+
+#[test]
 fn implementations_are_subclasses_and_overrides() {
     // A class's or interface's subclasses at any depth, Java ones too; a
     // member's overrides in them — not a namesake in an unrelated class
@@ -2513,6 +2654,54 @@ fn check_completions(fixture: &str, take: usize, expected: Expect) {
         })
         .collect();
     expected.assert_eq(&rendered.join("\n"));
+}
+
+#[test]
+fn completion_in_an_argument_offers_the_parameters_by_name_and_resolves_documentation() {
+    // `name = ` first for each parameter not passed by name yet; then what
+    // the scope has. Resolving an item gives its declaration's KDoc.
+    let fixture = r#"
+//- /app/b/Use.kt
+package b
+/** Charges [amount] to an account. */
+fun charge(amount: Long, currency: String, note: String = "") {}
+fun use(account: Long) {
+    charge(currency = "EUR", a$0)
+}
+"#;
+    check_completions(
+        fixture,
+        4,
+        expect![[r#"
+            amount = NamedArgument
+            account Variable
+            Any Class
+            Array Class"#]],
+    );
+    let fixture = Fixture::with_mini_stdlib(fixture);
+    let (file, offset) = fixture.cursor();
+    let completions = analysis(&fixture).completions(file, offset).unwrap();
+    let named = completions
+        .items
+        .iter()
+        .find(|item| item.label == "amount =")
+        .unwrap();
+    assert_eq!(named.insert_text(), "amount = ");
+    // Before the `a`, nothing is typed: `charge` is offered too.
+    let documentation = analysis(&fixture)
+        .completion_documentation(file, offset - 1, "charge")
+        .unwrap();
+    assert_eq!(
+        documentation.as_deref(),
+        Some("Charges [amount] to an account.")
+    );
+    let documentation = analysis(&fixture)
+        .completion_documentation(file, offset - 1, "account")
+        .unwrap();
+    assert_eq!(
+        documentation, None,
+        "a local has no declaration to document"
+    );
 }
 
 #[test]

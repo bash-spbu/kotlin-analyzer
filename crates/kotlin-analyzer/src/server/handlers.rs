@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, GotoImplementation, HoverRequest,
-    InlayHintRequest, Request as _, WorkspaceSymbolRequest,
+    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, GotoImplementation,
+    GotoTypeDefinition, HoverRequest, InlayHintRequest, Request as _, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -34,36 +34,38 @@ const WORKSPACE_SYMBOL_LIMIT: usize = 128;
 
 pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
     let id = request.id.clone();
-    let result = match request.method.as_str() {
-        GotoDefinition::METHOD => {
-            params::<GotoDefinition>(request).map(|params| definition(&snapshot, params))
-        }
-        GotoImplementation::METHOD => {
-            params::<GotoImplementation>(request).map(|params| implementation(&snapshot, params))
-        }
-        HoverRequest::METHOD => {
-            params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
-        }
-        CodeActionRequest::METHOD => {
-            params::<CodeActionRequest>(request).map(|params| code_actions(&snapshot, params))
-        }
-        InlayHintRequest::METHOD => {
-            params::<InlayHintRequest>(request).map(|params| inlay_hints(&snapshot, params))
-        }
-        DocumentSymbolRequest::METHOD => {
-            params::<DocumentSymbolRequest>(request).map(|_| document_symbols(&snapshot))
-        }
-        WorkspaceSymbolRequest::METHOD => params::<WorkspaceSymbolRequest>(request)
-            .map(|params| workspace_symbols(&snapshot, &params.query)),
-        method if editing::handles(method) => editing::handle(&snapshot, request),
-        method => {
-            return Response::new_err(
-                id,
-                ErrorCode::MethodNotFound as i32,
-                format!("unknown request {method}"),
-            );
-        }
-    };
+    let result =
+        match request.method.as_str() {
+            GotoDefinition::METHOD => {
+                params::<GotoDefinition>(request).map(|params| definition(&snapshot, params))
+            }
+            GotoImplementation::METHOD => params::<GotoImplementation>(request)
+                .map(|params| implementation(&snapshot, params)),
+            GotoTypeDefinition::METHOD => params::<GotoTypeDefinition>(request)
+                .map(|params| type_definition(&snapshot, params)),
+            HoverRequest::METHOD => {
+                params::<HoverRequest>(request).map(|params| hover(&snapshot, params))
+            }
+            CodeActionRequest::METHOD => {
+                params::<CodeActionRequest>(request).map(|params| code_actions(&snapshot, params))
+            }
+            InlayHintRequest::METHOD => {
+                params::<InlayHintRequest>(request).map(|params| inlay_hints(&snapshot, params))
+            }
+            DocumentSymbolRequest::METHOD => {
+                params::<DocumentSymbolRequest>(request).map(|_| document_symbols(&snapshot))
+            }
+            WorkspaceSymbolRequest::METHOD => params::<WorkspaceSymbolRequest>(request)
+                .map(|params| workspace_symbols(&snapshot, &params.query)),
+            method if editing::handles(method) => editing::handle(&snapshot, request),
+            method => {
+                return Response::new_err(
+                    id,
+                    ErrorCode::MethodNotFound as i32,
+                    format!("unknown request {method}"),
+                );
+            }
+        };
     match result {
         Ok(Ok(value)) => Response::new_ok(id, value),
         Ok(Err(_cancelled)) => Response::new_err(
@@ -87,6 +89,17 @@ fn definition(
         snapshot,
         params.text_document_position_params.position,
         |file, offset| snapshot.analysis.goto_definition(file, offset),
+    )
+}
+
+fn type_definition(
+    snapshot: &Snapshot,
+    params: lsp_types::request::GotoTypeDefinitionParams,
+) -> Cancellable<serde_json::Value> {
+    navigation(
+        snapshot,
+        params.text_document_position_params.position,
+        |file, offset| snapshot.analysis.goto_type_definition(file, offset),
     )
 }
 

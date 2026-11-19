@@ -24,6 +24,13 @@ pub struct SignatureInformation {
     vararg: Option<usize>,
 }
 
+impl SignatureInformation {
+    /// The parameters' names, in order.
+    pub(crate) fn parameter_names(&self) -> &[String] {
+        &self.parameter_names
+    }
+}
+
 pub(crate) fn signature_help(
     db: &RootDatabase,
     file: FileId,

@@ -200,11 +200,17 @@ pub struct BodyStatistics {
     pub resolved: usize,
     /// Of those, the ones whose value's type is known.
     pub typed: usize,
+    /// Of those, classes named as qualifiers and named arguments' labels:
+    /// no value, no type.
+    pub qualifiers: usize,
     /// Names with several candidates left (ambiguous, or none fitting).
     pub candidates: usize,
     pub unresolved: usize,
     pub unresolved_names: FxHashMap<String, usize>,
     pub candidate_names: FxHashMap<String, usize>,
+    /// Resolved names whose type isn't known, by what they name (`fun
+    /// map`, `local it`, `class Order`).
+    pub untyped_names: FxHashMap<String, usize>,
     /// Where each unsettled name first occurs.
     pub examples: FxHashMap<String, (hir::FileId, u32)>,
     /// How long each file's inference took.
@@ -215,6 +221,7 @@ impl BodyStatistics {
     pub fn merge(&mut self, other: BodyStatistics) {
         self.files += other.files;
         self.resolved += other.resolved;
+        self.qualifiers += other.qualifiers;
         self.typed += other.typed;
         self.candidates += other.candidates;
         self.unresolved += other.unresolved;
@@ -223,6 +230,9 @@ impl BodyStatistics {
         }
         for (name, count) in other.candidate_names {
             *self.candidate_names.entry(name).or_default() += count;
+        }
+        for (name, count) in other.untyped_names {
+            *self.untyped_names.entry(name).or_default() += count;
         }
         for (name, example) in other.examples {
             self.examples.entry(name).or_insert(example);
@@ -265,9 +275,49 @@ pub(crate) fn body_statistics(db: &RootDatabase, files: &[hir::FileId]) -> BodyS
             match resolved.reference {
                 hir::Reference::Local(_) | hir::Reference::Declaration(_) => {
                     statistics.resolved += 1;
+                    // A class named as a qualifier (`UUID.randomUUID()`,
+                    // `Status.ACTIVE`) is no value: it has no type to know.
+                    let qualifier = match resolved.reference {
+                        hir::Reference::Declaration(location) => matches!(
+                            hir::item_tree(db, location.container)
+                                .item(location.item)
+                                .kind,
+                            hir::ItemKind::Class(_) | hir::ItemKind::TypeAlias
+                        ),
+                        _ => false,
+                    };
+                    // A named argument's label (`required = false`) names a
+                    // parameter, not a value.
+                    let name = name_at(start);
+                    let after = text[start as usize + name.len()..].trim_start();
+                    let label = after.starts_with('=') && !after.starts_with("==");
+                    if (qualifier || label) && resolved.ty.is_unknown() {
+                        statistics.qualifiers += 1;
+                        continue;
+                    }
                     if !resolved.ty.is_unknown() {
                         statistics.typed += 1;
+                        continue;
                     }
+                    let what = match resolved.reference {
+                        hir::Reference::Declaration(location) => {
+                            let tree = hir::item_tree(db, location.container);
+                            let kind = match tree.item(location.item).kind {
+                                hir::ItemKind::Class(_) | hir::ItemKind::TypeAlias => "class",
+                                hir::ItemKind::Function => "fun",
+                                hir::ItemKind::Property { .. } => "val",
+                                hir::ItemKind::EnumEntry => "entry",
+                                hir::ItemKind::Constructor => "constructor",
+                            };
+                            format!("{kind} {}", name_at(start))
+                        }
+                        _ => format!("local {}", name_at(start)),
+                    };
+                    statistics
+                        .examples
+                        .entry(what.clone())
+                        .or_insert((*file_id, start));
+                    *statistics.untyped_names.entry(what).or_default() += 1;
                 }
                 hir::Reference::Candidates(_) => {
                     statistics.candidates += 1;

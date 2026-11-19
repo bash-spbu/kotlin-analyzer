@@ -71,6 +71,8 @@ struct Candidate {
     substitution: Substitution,
     /// The value an extension is called on (explicit or implicit).
     receiver: Option<Ty>,
+    /// The value a member is called on.
+    dispatch: Option<Ty>,
 }
 
 /// A candidate whose parameters the arguments can be matched to: for each
@@ -606,6 +608,7 @@ impl<'db> Inferrer<'db> {
                                 signature,
                                 substitution: substitution.clone(),
                                 receiver: None,
+                                dispatch: None,
                             });
                         }
                     }
@@ -637,6 +640,7 @@ impl<'db> Inferrer<'db> {
                             signature: signature.clone(),
                             substitution: member.substitution,
                             receiver: Some(receiver.clone()),
+                            dispatch: None,
                         });
                     }
                 }
@@ -687,6 +691,7 @@ impl<'db> Inferrer<'db> {
                         signature,
                         substitution: Substitution::default(),
                         receiver: None,
+                        dispatch: None,
                     });
                 }
                 candidates.extend(self.invoke_candidates(*class));
@@ -711,6 +716,7 @@ impl<'db> Inferrer<'db> {
                             signature,
                             substitution: Substitution::default(),
                             receiver: None,
+                            dispatch: None,
                         });
                     }
                 }
@@ -742,6 +748,7 @@ impl<'db> Inferrer<'db> {
                         signature,
                         substitution: Substitution::default(),
                         receiver: None,
+                        dispatch: None,
                     });
                 }
                 kind if kind.is_classifier() => {
@@ -773,6 +780,7 @@ impl<'db> Inferrer<'db> {
             signature,
             substitution: member.substitution,
             receiver: None,
+            dispatch: Some(receiver.clone()),
         })
     }
 
@@ -799,6 +807,7 @@ impl<'db> Inferrer<'db> {
             signature,
             substitution: Substitution::default(),
             receiver: Some(value),
+            dispatch: None,
         })
     }
 
@@ -854,6 +863,7 @@ impl<'db> Inferrer<'db> {
                     signature: self.types.signature(callable)?,
                     substitution: Substitution::default(),
                     receiver: None,
+                    dispatch: None,
                 })
             })
             .collect()
@@ -1144,10 +1154,69 @@ impl<'db> Inferrer<'db> {
                 substitution.forget(*parameter);
             }
         }
-        Some(erase(
+        let result = erase(
             &candidate.signature.result.substitute(&substitution),
             parameters,
-        ))
+        );
+        if !result.is_unknown() {
+            return Some(result);
+        }
+        Some(
+            self.approximated_result(candidate, &substitution)
+                .unwrap_or(result),
+        )
+    }
+
+    /// A member's result that is a type parameter a star in the type it's
+    /// called on binds (`isEqualTo(…)`'s `SELF` on AssertJ's
+    /// `AbstractStringAssert<?>`), approximated as the compiler captures
+    /// the star when the receiver's class's parameter is that class's own
+    /// type (`SELF : AbstractStringAssert<SELF>`): the type it's called on.
+    fn approximated_result(
+        &self,
+        candidate: &Candidate,
+        substitution: &Substitution,
+    ) -> Option<Ty> {
+        let Ty::TypeParameter {
+            parameter,
+            nullability,
+        } = &candidate.signature.result
+        else {
+            return None;
+        };
+        let bound_to_star = substitution.get(*parameter).is_some_and(Ty::is_unknown);
+        let Some(Ty::Class(receiver)) = candidate.dispatch.as_ref().filter(|_| bound_to_star)
+        else {
+            return None;
+        };
+        // Which of the receiver's class's own parameters the result's is.
+        let own = self.types.self_type(receiver.class);
+        let as_declaring = self.types.as_supertype(&Ty::Class(own), parameter.owner)?;
+        let Ty::TypeParameter {
+            parameter: receiver_parameter,
+            ..
+        } = as_declaring.arguments.get(parameter.index as usize)?
+        else {
+            return None;
+        };
+        let starred = receiver
+            .arguments
+            .get(receiver_parameter.index as usize)
+            .is_some_and(Ty::is_unknown);
+        if receiver_parameter.owner != receiver.class || !starred {
+            return None;
+        }
+        let bound = self
+            .types
+            .type_parameter_bounds(*receiver_parameter)
+            .into_iter()
+            .next()?;
+        // Only a class's own type: a star and a type that didn't resolve
+        // are both unknown here, and another bound (`Any`) would say less
+        // than nothing.
+        bound
+            .mentions(*receiver_parameter)
+            .then(|| Ty::Class(receiver.clone()).with_nullability(*nullability))
     }
 
     /// What each `name =` of the chosen call names: a constructor's

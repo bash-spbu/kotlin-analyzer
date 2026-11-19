@@ -11,6 +11,7 @@ mod document_symbols;
 mod folding;
 mod goto_definition;
 mod goto_implementation;
+mod goto_type_definition;
 mod hover;
 mod inlay_hints;
 mod navigation_target;
@@ -34,7 +35,7 @@ pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
 pub use inlay_hints::InlayHint;
 pub use navigation_target::{NavigationFile, NavigationTarget, SymbolKind};
-pub use references::{FileRange, RenameError, SourceChange};
+pub use references::{Access, FileRange, Highlight, RenameError, SourceChange};
 pub use semantic_tokens::{SemanticToken, TokenKind, TokenModifiers};
 pub use signature_help::{SignatureHelp, SignatureInformation};
 pub use statistics::{BodyStatistics, DeclarationStatistics, UnsettledName};
@@ -122,6 +123,12 @@ impl Analysis {
         self.with_db(|db| references::references(db, file, offset, include_declaration))
     }
 
+    /// The occurrences in `file` of what the name at `offset` means, writes
+    /// told apart.
+    pub fn highlights(&self, file: FileId, offset: usize) -> Cancellable<Vec<Highlight>> {
+        self.with_db(|db| references::highlights(db, file, offset))
+    }
+
     /// The range of the name at `offset` when it can be renamed.
     pub fn prepare_rename(
         &self,
@@ -205,6 +212,26 @@ impl Analysis {
         offset: usize,
     ) -> Cancellable<Vec<NavigationTarget>> {
         self.with_db(|db| goto_definition::goto_definition(db, file, offset))
+    }
+
+    /// The documentation of what the completion item `label` offered at
+    /// `offset` names (`completionItem/resolve`).
+    pub fn completion_documentation(
+        &self,
+        file: FileId,
+        offset: usize,
+        label: &str,
+    ) -> Cancellable<Option<String>> {
+        self.with_db(|db| completion::documentation(db, file, offset, label))
+    }
+
+    /// The classes of the type of what's named at `offset`.
+    pub fn goto_type_definition(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Vec<NavigationTarget>> {
+        self.with_db(|db| goto_type_definition::goto_type_definition(db, file, offset))
     }
 
     /// What implements the declaration named at `offset`: a class's

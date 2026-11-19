@@ -169,11 +169,13 @@ fn report_bodies(host: &AnalysisHost, vfs: &Vfs, files: &[vfs::FileId]) {
     let names = statistics.resolved + statistics.candidates + statistics.unresolved;
     let percent = |count: usize| count as f64 * 100.0 / names.max(1) as f64;
     println!("names in bodies : {names}");
+    let values = statistics.resolved - statistics.qualifiers;
     println!(
-        "  resolved      : {} ({:.1}%), type known for {:.1}% of them",
+        "  resolved      : {} ({:.1}%), type known for {:.1}% of the {values} values (classes as qualifiers and argument labels: {})",
         statistics.resolved,
         percent(statistics.resolved),
-        statistics.typed as f64 * 100.0 / statistics.resolved.max(1) as f64
+        statistics.typed as f64 * 100.0 / values.max(1) as f64,
+        statistics.qualifiers,
     );
     println!(
         "  candidates    : {} ({:.1}%)",
@@ -206,6 +208,22 @@ fn report_bodies(host: &AnalysisHost, vfs: &Vfs, files: &[vfs::FileId]) {
         .take(10)
     {
         println!("    {count:>7}  {name:<20} e.g. {}", example(name));
+    }
+    let mut by_kind: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (what, count) in &statistics.untyped_names {
+        let kind = what.split(' ').next().unwrap_or_default().to_owned();
+        *by_kind.entry(kind).or_default() += count;
+    }
+    println!("  type not known, by what is named:");
+    for (kind, count) in ide::BodyStatistics::ranked(&by_kind) {
+        println!("    {count:>7}  {kind}");
+    }
+    println!("  most common names whose type isn't known:");
+    for (name, count) in ide::BodyStatistics::ranked(&statistics.untyped_names)
+        .iter()
+        .take(30)
+    {
+        println!("    {count:>7}  {name:<28} e.g. {}", example(name));
     }
     let mut durations = statistics.durations;
     durations.sort_by_key(|(_, duration)| *duration);
