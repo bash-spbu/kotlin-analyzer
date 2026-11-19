@@ -48,7 +48,9 @@ tells the user, on their machine, which file a hash stands for.
   dropped, each formatting (`formatted`: the formatter, the style, whether
   it ran from the `PATH`, an executable or a jar, how it ended —
   `formatted`, `not-found`, `not-started`, `timed-out`, `rejected` and the
-  exit code, `not-utf8` —, how long, how many bytes the edit replaced).
+  exit code, `not-utf8` —, how long, how many bytes the edit replaced), each agent's query
+  (`agent-query`: which query, whether its file is the workspace's, answered
+  or refused, how long).
 
 The flight recorder keeps the last 1000 events below the level written; a
 warning or an error writes them first (marked `recent`), so the steps that

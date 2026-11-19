@@ -52,6 +52,21 @@ The server binary is the first of:
    downloads are removed. Releases exist for macOS and Linux on arm64 and
    x86_64.
 
+## Agents
+
+The extension adds an MCP server, `kotlin-analyzer` (*Settings → AI → MCP
+Servers*), for the Agent Panel: Zed's agent and external agents (Claude
+Code, Codex, … over ACP) get tools `symbols`, `definition`, `references`,
+`hover`, `implementations`, `outline` and `diagnostics`. It runs
+`kotlin-analyzer mcp` with the language server's binary, and answers from
+the language server already analysing the project — the editor's view,
+unsaved text included — through its socket; a project no language server
+analyses (an agent's git worktree) gets one of its own, kept current with
+the agent's edits on disk. Zed asks before each tool call unless
+`agent.tool_permissions` allows `mcp:kotlin-analyzer:*`. The released
+1.0.1 binary has no `mcp`: use a newer server (`binary.path`, or on the
+`PATH`). `context_servers.kotlin-analyzer.command` sets another command.
+
 ## Running tests
 
 Test functions (`@Test`, `@ParameterizedTest`, `@RepeatedTest`,

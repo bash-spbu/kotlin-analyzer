@@ -16,3 +16,7 @@ rev = "1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1"
 [language_servers.kotlin-analyzer]
 name = "kotlin-analyzer"
 languages = ["Kotlin", "Java"]
+
+# `kotlin-analyzer mcp`: the analysis for the Agent Panel's agents (see
+# README.md).
+[context_servers.kotlin-analyzer]

@@ -55,6 +55,17 @@ pub(super) fn changed_diagnostics_config(settings: &Value) -> Option<Diagnostics
     ours.get("diagnostics").map(read)
 }
 
+/// Where the server listens for agents (see `crate::agent`):
+/// `agentSockets` in `initializationOptions` — `false` for nowhere, a
+/// directory, or (the default) the cache's.
+pub(super) fn agent_socket_directory(options: Option<&Value>) -> Option<PathBuf> {
+    match options.and_then(|options| options.get("agentSockets")) {
+        Some(Value::Bool(false)) => None,
+        Some(Value::String(directory)) if !directory.is_empty() => Some(PathBuf::from(directory)),
+        _ => crate::agent::protocol::default_socket_directory(),
+    }
+}
+
 /// The code lens settings in `initializationOptions`.
 pub(super) fn code_lens_config(options: Option<&Value>) -> CodeLensConfig {
     options

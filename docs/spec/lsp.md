@@ -69,6 +69,8 @@ Settings in `initializationOptions`: `diagnostics.disabled`,
 `formatting.path` (the formatter's executable or ktfmt's `.jar`, run with
 `$JAVA_HOME/bin/java` or `java`; else the formatter's name on the `PATH`),
 `codeLens.references`, `codeLens.tests` (booleans, `true` by default),
+`agentSockets` (`false`, or the directory of the sockets agents ask on —
+see agents.md),
 `gradleExport`, `projectJson`, and `log` (`"info"`, `"debug"`; see
 logging.md). A value not understood is the default. `diagnostics`,
 `formatting`, `codeLens` and `log` may also change in `workspace/didChangeConfiguration`

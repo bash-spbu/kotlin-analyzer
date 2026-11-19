@@ -39,6 +39,11 @@ impl Client {
         initialization_options: Value,
         offered: Value,
     ) -> (Client, Value) {
+        // Agents' sockets only where a test asks for them.
+        let mut initialization_options = initialization_options;
+        if let Some(options) = initialization_options.as_object_mut() {
+            options.entry("agentSockets").or_insert(Value::Bool(false));
+        }
         let (server, connection) = Connection::memory();
         let thread = std::thread::spawn(move || super::run_on(&server));
         let mut client = Client {
@@ -101,7 +106,7 @@ impl Client {
                 "rootUri": uri(folders[0]),
                 "workspaceFolders": workspace_folders,
                 "capabilities": {},
-                "initializationOptions": { "gradleExport": false },
+                "initializationOptions": { "gradleExport": false, "agentSockets": false },
             }),
         );
         client.notify("initialized", json!({}));
@@ -1148,5 +1153,83 @@ fn code_lenses_run_tests_and_count_references_when_resolved_and_selection_grows(
         json!({ "start": { "line": 9, "character": 25 }, "end": { "line": 9, "character": 35 } })
     );
     client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_agent_asks_the_editors_server_on_its_socket_and_sees_unsaved_text() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+
+    use crate::agent::protocol::{self, AgentQuery, AgentReply, AgentRequest, SourcePosition};
+
+    let root = workspace("agent-socket");
+    let sockets = std::env::temp_dir().join(format!("ka-sockets-{}", std::process::id()));
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("Ledger.kt");
+    std::fs::write(&file, "package app\nfun total() = 1\nfun use() = total()\n").unwrap();
+    let client = Client::start_with(
+        &root,
+        json!({ "gradleExport": false, "agentSockets": sockets }),
+    );
+    let socket = protocol::socket_path(&sockets, &root);
+    // Opened right after `initialize` is answered.
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The socket's directory is only its owner's.
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&sockets).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    // Unsaved in the editor: a second use.
+    client.open(
+        &file,
+        "package app\nfun total() = 1\nfun use() = total()\nfun again() = total()\n",
+    );
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut ask = |id: u64, query: AgentQuery| -> AgentReply {
+        protocol::write_line(&mut writer, &AgentRequest { id, query }).unwrap();
+        protocol::read_line::<AgentReply>(&mut reader)
+            .unwrap()
+            .unwrap()
+    };
+    // Asked before the load ends, answered after it.
+    let references = ask(
+        1,
+        AgentQuery::References {
+            at: SourcePosition {
+                file: file.clone(),
+                line: 2,
+                symbol: Some("total".to_owned()),
+                column: None,
+            },
+        },
+    );
+    assert_eq!(references.id, 1);
+    let answer = references.answer.unwrap();
+    assert!(answer.starts_with("2 references\n"), "{answer}");
+    assert!(
+        answer.contains("src/main/kotlin/app/Ledger.kt:4:15: fun again() = total()"),
+        "{answer}"
+    );
+    let outside = ask(
+        2,
+        AgentQuery::Outline {
+            file: std::env::temp_dir().join("Elsewhere.kt"),
+        },
+    );
+    assert!(
+        outside
+            .error
+            .unwrap()
+            .contains("isn't a Kotlin or Java file of the project")
+    );
+    client.shut_down();
+    // Gone with the server.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!socket.exists());
     std::fs::remove_dir_all(&root).unwrap();
 }

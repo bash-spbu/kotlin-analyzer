@@ -14,7 +14,7 @@ mod formatter;
 mod labels;
 mod release;
 
-use zed_extension_api::settings::LspSettings;
+use zed_extension_api::settings::{ContextServerSettings, LspSettings};
 use zed_extension_api::{
     self as zed, Architecture, DownloadedFileType, LanguageServerId,
     LanguageServerInstallationStatus, Os, Result, Worktree,
@@ -31,11 +31,17 @@ const SERVER: &str = "kotlin-analyzer";
 struct KotlinAnalyzer {
     /// The downloaded release, once found or installed this session.
     downloaded: Option<String>,
+    /// The binary the language server runs this session: the MCP server
+    /// runs the same.
+    server_binary: Option<String>,
 }
 
 impl zed::Extension for KotlinAnalyzer {
     fn new() -> Self {
-        KotlinAnalyzer { downloaded: None }
+        KotlinAnalyzer {
+            downloaded: None,
+            server_binary: None,
+        }
     }
 
     fn language_server_command(
@@ -49,8 +55,9 @@ impl zed::Extension for KotlinAnalyzer {
         let configured = binary.as_ref().and_then(|binary| binary.path.clone());
         let command = match configured.or_else(|| worktree.which(SERVER)) {
             Some(command) => command,
-            None => self.downloaded_release(language_server_id)?,
+            None => self.downloaded_release(Some(language_server_id))?,
         };
+        self.server_binary = Some(absolute(&command));
         let arguments = binary
             .as_ref()
             .and_then(|binary| binary.arguments.clone())
@@ -77,6 +84,37 @@ impl zed::Extension for KotlinAnalyzer {
             .and_then(|settings| settings.initialization_options.clone());
         let options = with_code_lenses_off_by_default(options);
         Ok(self.with_formatter(options, settings.as_ref(), language_server_id, worktree))
+    }
+
+    /// The MCP server for agents (`kotlin-analyzer mcp`): the language
+    /// server's binary — `context_servers.kotlin-analyzer.command` in the
+    /// settings, else the one the language server runs, else the release.
+    fn context_server_command(
+        &mut self,
+        _context_server_id: &zed::ContextServerId,
+        project: &zed::Project,
+    ) -> Result<zed::Command> {
+        let configured = ContextServerSettings::for_project(SERVER, project)
+            .ok()
+            .and_then(|settings| settings.command);
+        let configured_path = configured.as_ref().and_then(|command| command.path.clone());
+        let command = match configured_path.or_else(|| self.server_binary.clone()) {
+            Some(command) => command,
+            None => absolute(&self.downloaded_release(None)?),
+        };
+        let arguments = configured
+            .as_ref()
+            .and_then(|command| command.arguments.clone())
+            .unwrap_or_else(|| vec!["mcp".to_owned()]);
+        let environment = configured
+            .and_then(|command| command.env)
+            .map(|environment| environment.into_iter().collect())
+            .unwrap_or_default();
+        Ok(zed::Command {
+            command,
+            args: arguments,
+            env: environment,
+        })
     }
 
     fn label_for_completion(
@@ -150,7 +188,13 @@ impl zed::Extension for KotlinAnalyzer {
 
 impl KotlinAnalyzer {
     /// The release binary's path, downloading it first if it isn't there.
-    fn downloaded_release(&mut self, language_server_id: &LanguageServerId) -> Result<String> {
+    /// The release binary's path, downloaded first if it isn't there — with
+    /// the download shown as the language server's status when it's for
+    /// one.
+    fn downloaded_release(
+        &mut self,
+        language_server_id: Option<&LanguageServerId>,
+    ) -> Result<String> {
         if let Some(path) = &self.downloaded {
             if is_file(path) {
                 return Ok(path.clone());
@@ -159,22 +203,18 @@ impl KotlinAnalyzer {
         let asset = this_machines_asset()?;
         let binary = asset.binary();
         if !is_file(&binary) {
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &LanguageServerInstallationStatus::Downloading,
-            );
+            let status = |status: &LanguageServerInstallationStatus| {
+                if let Some(language_server_id) = language_server_id {
+                    zed::set_language_server_installation_status(language_server_id, status);
+                }
+            };
+            status(&LanguageServerInstallationStatus::Downloading);
             let installed = install(&asset);
             if let Err(error) = &installed {
-                zed::set_language_server_installation_status(
-                    language_server_id,
-                    &LanguageServerInstallationStatus::Failed(error.clone()),
-                );
+                status(&LanguageServerInstallationStatus::Failed(error.clone()));
             }
             installed?;
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &LanguageServerInstallationStatus::None,
-            );
+            status(&LanguageServerInstallationStatus::None);
             remove_other_versions("kotlin-analyzer-", &asset.directory());
         }
         self.downloaded = Some(binary.clone());
@@ -389,6 +429,18 @@ fn remove_other_versions(prefix: &str, current: &str) {
         if is_other_release {
             let _ = std::fs::remove_dir_all(entry.path());
         }
+    }
+}
+
+/// `path` from the extension's work directory: what a process Zed starts
+/// elsewhere can run.
+fn absolute(path: &str) -> String {
+    let is_relative = std::path::Path::new(path).is_relative() && path.contains('/');
+    match std::env::current_dir() {
+        Ok(work_directory) if is_relative => {
+            work_directory.join(path).to_string_lossy().into_owned()
+        }
+        _ => path.to_owned(),
     }
 }
 

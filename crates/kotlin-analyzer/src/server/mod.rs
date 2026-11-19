@@ -6,6 +6,7 @@
 //! requests are answered "content modified". Loading the workspace runs in
 //! the background and reports progress.
 
+mod agent;
 mod code_lens;
 mod convert;
 mod editing;
@@ -42,6 +43,7 @@ use vfs::{FileId, Vfs};
 use crate::load::{self, LoadedFiles};
 use crate::log::{Context, Event, FileRef, Hashed, SafeToken};
 
+pub(crate) use convert::uri_of;
 pub(crate) use library_sources::cache_directory;
 
 /// The progress token of workspace loading (one per load: a reload may
@@ -94,6 +96,7 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
     let formatting = settings::formatting_config(params.initialization_options.as_ref());
     let code_lens_config = settings::code_lens_config(params.initialization_options.as_ref());
+    let agent_sockets = settings::agent_socket_directory(params.initialization_options.as_ref());
     let gradle_export = params
         .initialization_options
         .as_ref()
@@ -145,6 +148,9 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     state.diagnostics_config = Arc::new(diagnostics_config);
     state.formatting = Arc::new(formatting);
     state.code_lens_config = code_lens_config;
+    if let Some(directory) = agent_sockets {
+        state.agent_sockets = agent::listen(&directory, &state.folders, &state.task_sender);
+    }
     state.gradle_export = gradle_export;
     state.start_loading();
     state.start_export();
@@ -372,6 +378,11 @@ enum Task {
         exports: Vec<gradle_export::Export>,
         took: Duration,
     },
+    /// An agent's query, from a socket (see `agent`).
+    Agent {
+        request: crate::agent::protocol::AgentRequest,
+        replier: agent::Replier,
+    },
     Diagnostics {
         file: FileId,
         version: i32,
@@ -448,6 +459,11 @@ struct GlobalState {
     formatting: Arc<formatting::FormattingConfig>,
     /// Which code lenses the client wants.
     code_lens_config: code_lens::CodeLensConfig,
+    /// The sockets agents ask on, one per workspace folder no other host
+    /// listens for.
+    agent_sockets: Vec<agent::ListeningSocket>,
+    /// Agents' queries that came before the workspace loaded.
+    pending_agent_requests: Vec<(crate::agent::protocol::AgentRequest, agent::Replier)>,
     /// Whether the server may run Gradle to export the model.
     gradle_export: bool,
     exporting: bool,
@@ -506,6 +522,8 @@ impl GlobalState {
             diagnostics_config: Arc::default(),
             formatting: Arc::default(),
             code_lens_config: code_lens::CodeLensConfig::default(),
+            agent_sockets: Vec::new(),
+            pending_agent_requests: Vec::new(),
             gradle_export: true,
             exporting: false,
             load_generation: 0,
@@ -722,6 +740,13 @@ impl GlobalState {
                 }
             }
             Task::ModelExported { exports, took } => self.on_exports(exports, took),
+            Task::Agent { request, replier } => {
+                if self.loaded {
+                    self.answer_agent(request, replier);
+                } else {
+                    self.pending_agent_requests.push((request, replier));
+                }
+            }
             Task::Loaded { generation, loaded } => {
                 if generation != self.load_generation {
                     Event::info("load-superseded")
@@ -873,6 +898,9 @@ impl GlobalState {
         );
         self.update_diagnostics(self.open_documents.keys().copied().collect());
         self.ask_for_refreshes();
+        for (request, replier) in std::mem::take(&mut self.pending_agent_requests) {
+            self.answer_agent(request, replier);
+        }
     }
 
     /// Asks the client to report changes to sources, build files and the
@@ -1105,18 +1133,7 @@ impl GlobalState {
         let id = request_number(&request.id);
         let file = request_file.map(|file| self.file_ref(file));
         log_request(&request, id, method, file);
-        let snapshot = handlers::Snapshot {
-            analysis: self.host.analysis(),
-            paths: self.paths.clone(),
-            loaded: self.loaded,
-            request_file,
-            diagnostics_config: self.diagnostics_config.clone(),
-            formatting: self.formatting.clone(),
-            code_lens_config: self.code_lens_config,
-            sent_tokens: self.sent_tokens.clone(),
-            encoding: self.encoding,
-            revision: self.revision,
-        };
+        let snapshot = self.snapshot(request_file);
         let sender = self.task_sender.clone();
         let received = Instant::now();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1145,6 +1162,70 @@ impl GlobalState {
             };
             log_response(&response, id, method, file, timing);
             let _ = sender.send(Task::Response(response));
+        });
+    }
+
+    fn snapshot(&self, request_file: Option<FileId>) -> handlers::Snapshot {
+        handlers::Snapshot {
+            analysis: self.host.analysis(),
+            paths: self.paths.clone(),
+            loaded: self.loaded,
+            request_file,
+            diagnostics_config: self.diagnostics_config.clone(),
+            formatting: self.formatting.clone(),
+            code_lens_config: self.code_lens_config,
+            sent_tokens: self.sent_tokens.clone(),
+            encoding: self.encoding,
+            revision: self.revision,
+        }
+    }
+
+    /// Answers an agent's query on a worker, against a snapshot; a query
+    /// an edit cancelled says to ask again.
+    fn answer_agent(
+        &mut self,
+        request: crate::agent::protocol::AgentRequest,
+        replier: agent::Replier,
+    ) {
+        let path = request.query.file().map(std::path::Path::to_path_buf);
+        let file = path.as_deref().and_then(|path| {
+            self.vfs.file_id(path).or_else(|| {
+                path.canonicalize()
+                    .ok()
+                    .and_then(|path| self.vfs.file_id(&path))
+            })
+        });
+        let root = path
+            .as_deref()
+            .and_then(|path| self.folders.iter().find(|folder| path.starts_with(folder)))
+            .unwrap_or(&self.root)
+            .clone();
+        let snapshot = self.snapshot(file);
+        let kind = request.query.kind();
+        self.pool.spawn(move || {
+            let started = Instant::now();
+            let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                agent::answer(&snapshot, &root, &request.query)
+            }));
+            let reply = match answered {
+                Ok(Ok(answer)) => answer,
+                Ok(Err(_cancelled)) => {
+                    Err("the project changed while answering; ask again".to_owned())
+                }
+                Err(_) => {
+                    Err("kotlin-analyzer failed on this query; its log says where".to_owned())
+                }
+            };
+            Event::debug("agent-query")
+                .text("query", kind)
+                .flag("file-known", file.is_some())
+                .text(
+                    "outcome",
+                    if reply.is_ok() { "answered" } else { "refused" },
+                )
+                .duration("took", started.elapsed())
+                .emit();
+            replier.send(&crate::agent::protocol::AgentReply::of(request.id, reply));
         });
     }
 

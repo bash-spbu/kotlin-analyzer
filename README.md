@@ -48,6 +48,9 @@ Features:
 - diagnostics with quick fixes, which report only what they are sure of;
 - formatting by ktrs (ktfmt's output, natively) or ktfmt, which the editor
   extensions download;
+- an MCP server for coding agents (`kotlin-analyzer mcp`): definitions,
+  references, types, outlines and diagnostics from the editor's own
+  analysis, in git worktrees too;
 - Gradle tasks in every editor (build, clean, test a module).
 
 ### Compared with other Kotlin language servers

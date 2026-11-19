@@ -1,6 +1,7 @@
 //! `kotlin-analyzer`: the language server (LSP over stdio) and its command
 //! line tools for measuring it on a real workspace.
 
+mod agent;
 mod analysis_stats;
 mod anonymize;
 mod diagnostics;
@@ -23,6 +24,11 @@ USAGE:
                                 [--experimental] [--limit <n>]
                                 run every check over every workspace file; exits 1
                                 on any error or warning
+    kotlin-analyzer mcp [--socket-directory <dir>]
+                                an MCP server on stdin/stdout for coding agents:
+                                definitions, references, types, outlines and
+                                diagnostics from the analysis of the file's
+                                project (the editor's server when it runs)
     kotlin-analyzer parse <file>
                                 print a Kotlin or Java file's syntax tree
     kotlin-analyzer log-whois <root> <hash>…
@@ -43,6 +49,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("parse") => parse_command(arguments.get(1)),
+        Some("mcp") => agent::mcp::command(&arguments[1..]),
         Some("log-whois") => log::whois::command(&arguments[1..]),
         Some("anonymize") => anonymize::command(&arguments[1..]),
         Some("analysis-stats") => analysis_stats_command(&arguments[1..]),
