@@ -47,7 +47,9 @@ Test functions (`@Test`, `@ParameterizedTest`, `@RepeatedTest`,
 classes holding them, top-level or nested one level
 (`languages/kotlin/runnables.scm`). It runs `gradle test --tests <filter>
 --rerun` in the file's project — `app.OrderTest.creates an order`,
-`app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py tests`.
+`app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py zed-tests`, which
+reads the test's names from the environment Zed gives the task (they never
+pass through the shell; the script itself goes in base64).
 
 The server's code lenses are off in Zed (`codeLens` defaults to
 `{ "references": false, "tests": false }`): Zed doesn't run their commands,

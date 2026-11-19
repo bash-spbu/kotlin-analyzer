@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -122,8 +121,8 @@ class GradleTaskTest(BuildFixture):
                 ["-p", "services/payments", "test", "--tests", "pay.PayTest.charges in full", "--rerun"],
             ),
         )
-        # A class in no package, nested: as editors without a `$` write it.
-        self.run_task("tests", str(self.root / "settings.gradle.kts"), ".Outer/Nested.works")
+        # A class in no package, nested.
+        self.run_task("tests", str(self.root / "settings.gradle.kts"), ".Outer$Nested.works")
         self.assertEqual(
             self.gradle_call(),
             (self.root, ["test", "--tests", "Outer$Nested.works", "--rerun"]),
@@ -168,6 +167,18 @@ class GradleTaskTest(BuildFixture):
         self.assertFalse(self.call_file.exists())
 
 
+class ZedTestFilterTest(unittest.TestCase):
+    def test_a_runnable_outside_a_package_or_without_its_captures(self) -> None:
+        sys.path.insert(0, str(HERE))
+        import gradle_task
+
+        self.assertEqual(
+            gradle_task.zed_test_filter({"ZED_CUSTOM_kotlin_class_name": "Loose"}), "Loose"
+        )
+        with self.assertRaises(gradle_task.NotABuild):
+            gradle_task.zed_test_filter({})
+
+
 class ZedTasksTest(unittest.TestCase):
     def test_tasks_json_embeds_the_current_script(self) -> None:
         self.assertEqual(
@@ -176,27 +187,42 @@ class ZedTasksTest(unittest.TestCase):
             "tasks.json is stale: run python3 editors/gradle/zed_tasks.py",
         )
 
-    def test_zed_substitutes_nothing_in_the_script_but_its_file_variable(self) -> None:
-        # Zed expands $NAME and ${NAME} in a task's arguments; the script
-        # must have none of its own.
-        self.assertIsNone(re.search(r"\$\{?[A-Za-z_]", SCRIPT.read_text()))
+    def test_zed_and_the_shell_find_nothing_to_read_in_the_arguments_but_the_file(self) -> None:
+        # Zed expands variables in a task's arguments and gives them to the
+        # user's shell (`zsh -i -c`): no quote, backtick, `$` or line break
+        # may reach either, whatever the script holds.
+        for task in json.loads(zed_tasks.TASKS_FILE.read_text()):
+            for argument in task["args"]:
+                if argument != "$ZED_FILE":
+                    self.assertRegex(argument, r"^[A-Za-z0-9+/=.,;() _-]*$", task["label"])
 
 
 class ZedTaskRunTest(BuildFixture):
-    # What Zed puts for each variable: the file, and the runnables' captures
-    # of a test function in `pay.PayTest.Refunds` (a missing package capture
-    # leaves its `${…:}` empty).
-    VARIABLES = {
-        "${ZED_CUSTOM_kotlin_package_name:}": "pay",
-        "$ZED_CUSTOM_kotlin_outer_class_name": "PayTest",
-        "$ZED_CUSTOM_kotlin_class_name": "Refunds",
-        "$ZED_CUSTOM_kotlin_method_name": "`refunds in full`",
+    # What a runnable in `pay.PayTest.Refunds` captured, by tag, as Zed puts
+    # it in the task's environment.
+    CAPTURES = {
+        "kotlin-test-method": {"class": "Refunds", "method": "`refunds in full`"},
+        "kotlin-test-nested-method": {
+            "outer_class": "PayTest",
+            "class": "Refunds",
+            "method": "`refunds in full`",
+        },
+        "kotlin-test-class": {"class": "Refunds"},
+        "kotlin-test-nested-class": {"outer_class": "PayTest", "class": "Refunds"},
     }
 
-    def substituted(self, argument: str) -> str:
-        for variable, value in {**self.VARIABLES, "$ZED_FILE": str(self.source)}.items():
-            argument = argument.replace(variable, value)
-        return argument
+    def captured(self, key: str) -> dict[str, str]:
+        captures = {"package": "pay", **self.CAPTURES.get(key, {})}
+        if key not in self.CAPTURES:
+            return {}
+        return {f"ZED_CUSTOM_kotlin_{name}_name": value for name, value in captures.items()}
+
+    def run_command(self, command: list[str], answer: str = "", path: str | None = None,
+                    extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        environment = {"GRADLE_CALL": str(self.call_file), "PATH": path or os.defpath, **(extra or {})}
+        return subprocess.run(
+            command, input=answer, capture_output=True, text=True, env=environment, timeout=30
+        )
 
     def test_each_zed_task_runs_like_the_script(self) -> None:
         tasks = json.loads(zed_tasks.TASKS_FILE.read_text())
@@ -211,12 +237,12 @@ class ZedTaskRunTest(BuildFixture):
             "kotlin-test-class": [*payments, "pay.Refunds", "--rerun"],
             "kotlin-test-nested-class": [*payments, "pay.PayTest$Refunds", "--rerun"],
         }
-        keys = [task.get("tags", [task["args"][3]])[0] for task in tasks]
+        keys = [task.get("tags", [task["args"][4]])[0] for task in tasks]
         self.assertEqual(keys, list(expected))
         for task, key in zip(tasks, keys):
-            arguments = [self.substituted(argument) for argument in task["args"]]
+            arguments = [argument.replace("$ZED_FILE", str(self.source)) for argument in task["args"]]
             command = [sys.executable if task["command"] == "python3" else task["command"], *arguments]
-            result = self.run_command(command, answer="2\n")
+            result = self.run_command(command, answer="2\n", extra=self.captured(key))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.gradle_call(), (self.root, expected[key]), task["label"])
 

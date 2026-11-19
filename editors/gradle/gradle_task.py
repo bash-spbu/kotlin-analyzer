@@ -13,8 +13,13 @@ in its tasks.json (see zed_tasks.py).
     gradle_task.py tests <path> <filter>
                                     gradle test --tests <filter> --rerun in
                                     the project holding <path>: a test class
-                                    (`app.OrderTest`, a nested one as `app.Outer/Nested`) or
+                                    (`app.OrderTest`, `app.Outer$Nested`) or
                                     function (`app.OrderTest.creates order`)
+    gradle_task.py zed-tests <path> the same, for the test Zed's runnable
+                                    names in the environment
+                                    (ZED_CUSTOM_kotlin_package_name,
+                                    …_outer_class_name, …_class_name,
+                                    …_method_name)
     gradle_task.py projects <path>  prints those projects, nearest first, as
                                     JSON: [{"path": ":app", "directory": …}]
 
@@ -35,7 +40,7 @@ from pathlib import Path
 
 BUILD_SCRIPTS = ("build.gradle.kts", "build.gradle")
 SETTINGS_SCRIPTS = ("settings.gradle.kts", "settings.gradle")
-TASKS = ("build", "clean", "test", "choose", "projects", "tests")
+TASKS = ("build", "clean", "test", "choose", "projects", "tests", "zed-tests")
 
 
 class NotABuild(Exception):
@@ -74,11 +79,24 @@ class Build:
 
 def gradle_test_filter(written: str) -> str:
     """A test filter as Gradle takes it: no backticks around Kotlin names,
-    no empty segments (a class in no package: `.OrderTest`), and a `/`
-    between class names — which editors write where a `$` would be expanded
-    — as the `$` of a nested class."""
+    no empty segments (a class in no package: `.OrderTest`)."""
     segments = [segment for segment in written.replace("`", "").split(".") if segment != ""]
-    return ".".join(segments).replace("/", "$")
+    return ".".join(segments)
+
+
+def zed_test_filter(environment: dict[str, str]) -> str:
+    """The filter for the test a Zed runnable (runnables.scm) captured: Zed
+    puts its captures in the task's environment, where no shell parses them."""
+    class_name = environment.get("ZED_CUSTOM_kotlin_class_name")
+    if not class_name:
+        raise NotABuild("run this task from the gutter next to a test")
+    outer = environment.get("ZED_CUSTOM_kotlin_outer_class_name")
+    classes = f"{outer}${class_name}" if outer else class_name
+    method = environment.get("ZED_CUSTOM_kotlin_method_name")
+    parts = [environment.get("ZED_CUSTOM_kotlin_package_name", ""), classes]
+    if method:
+        parts.append(method)
+    return gradle_test_filter(".".join(parts))
 
 
 def has_any(directory: Path, names: tuple[str, ...]) -> bool:
@@ -152,9 +170,12 @@ def main(arguments: list[str]) -> int:
             run(build, ["build", "-x", "test"])
         elif task == "clean":
             run(build, ["clean"])
-        elif task == "tests":
+        elif task in ("tests", "zed-tests"):
             project = build.projects[0]
-            test_filter = gradle_test_filter(arguments[2])
+            if task == "tests":
+                test_filter = gradle_test_filter(arguments[2])
+            else:
+                test_filter = zed_test_filter(dict(os.environ))
             print(f"Testing {test_filter} in {build.gradle_path(project)}")
             run(build, build.filtered_test_arguments(project, test_filter))
         else:
