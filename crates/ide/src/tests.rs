@@ -228,6 +228,65 @@ fun rateOf() {}
 }
 
 #[test]
+fn hover_shows_the_default_values_the_source_writes() {
+    let fixture = Fixture::parse(
+        r#"
+//- /app/x/Audit.kt
+package x
+data class Entry(val id: Long = 0, val note: String = "a, (b)")
+fun log(
+    entry: Entry,
+    tags: List<String> = listOf(
+        "audit",
+        "money",
+    ),
+    retries: Int = 3,
+    onDone: (Entry) -> Unit = {},
+    describe: (Entry) -> String = { entry -> "an entry numbered ${entry.id} with a long description" },
+) {}
+//- /app/x/Use.kt
+package x
+fun use() { log(Entry()) }
+"#,
+    );
+    let file = fixture.file("/app/x/Use.kt");
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let hover_of = |name: &str| {
+        let offset = text.find(name).unwrap() + 1;
+        analysis(&fixture)
+            .hover(file, offset)
+            .unwrap()
+            .unwrap()
+            .markdown
+    };
+    // On one line each; one too long to show is `…`.
+    expect![[r#"
+        ```kotlin
+        fun log(
+            entry: Entry,
+            tags: List<String> = listOf("audit", "money"),
+            retries: Int = 3,
+            onDone: (Entry) -> Unit = {},
+            describe: (Entry) -> String = …,
+        )
+        ```
+
+        ---
+
+        in `x`"#]]
+    .assert_eq(&hover_of("log("));
+    expect![[r#"
+        ```kotlin
+        data class Entry(id: Long = 0, note: String = "a, (b)")
+        ```
+
+        ---
+
+        in `x`"#]]
+    .assert_eq(&hover_of("Entry("));
+}
+
+#[test]
 fn hover_shows_signature_documentation_and_place() {
     let fixture = Fixture::parse(
         r#"
@@ -3213,7 +3272,7 @@ fun use(account: Long) {
     assert_eq!(
         documentation.as_deref(),
         Some(
-            "```kotlin\nfun charge(\n    amount: Long,\n    currency: String,\n    note: String = …,\n)\n```\n\n\
+            "```kotlin\nfun charge(\n    amount: Long,\n    currency: String,\n    note: String = \"\",\n)\n```\n\n\
              ---\n\nCharges [amount] to an account.\n\n---\n\nin `b`"
         )
     );

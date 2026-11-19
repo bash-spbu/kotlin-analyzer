@@ -26,7 +26,7 @@ pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<Ho
     };
     let tree = hir::item_tree(db, location.container);
     let item = tree.item(location.item);
-    let mut markdown = signature_block(&tree.signature(location.item));
+    let mut markdown = signature_block(&declaration_signature(db, location));
     if let Some(ty) = name.ty.as_ref().filter(|ty| !ty.is_unknown())
         && type_depends_on_use(&tree, location)
     {
@@ -82,10 +82,77 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
 /// A declaration as completion documents it: its whole signature, its
 /// KDoc or Javadoc, where it's declared.
 pub(crate) fn declaration_markdown(db: &RootDatabase, location: ItemLocation) -> String {
-    let tree = hir::item_tree(db, location.container);
-    let mut markdown = signature_block(&tree.signature(location.item));
+    let mut markdown = signature_block(&declaration_signature(db, location));
     push_documentation_and_place(db, location, &mut markdown);
     markdown
+}
+
+/// The declaration's signature with the default values its source writes
+/// (`currency: String = "EUR"`); `…` for one too long to show, and for all
+/// of a compiled library's without sources.
+fn declaration_signature(db: &RootDatabase, location: ItemLocation) -> String {
+    let signature = hir::item_tree(db, location.container).signature(location.item);
+    let Some(defaults) = with_declaration_node(db, location, written_defaults) else {
+        return signature;
+    };
+    let placeholders = signature.matches(DEFAULT_PLACEHOLDER).count();
+    if placeholders != defaults.len() {
+        return signature;
+    }
+    let mut parts = signature.split(DEFAULT_PLACEHOLDER);
+    let mut written = parts.next().unwrap_or_default().to_owned();
+    for (default, rest) in defaults.iter().zip(parts) {
+        written.push_str(" = ");
+        written.push_str(default);
+        written.push_str(rest);
+    }
+    written
+}
+
+/// How a signature shows that a parameter has a default value.
+const DEFAULT_PLACEHOLDER: &str = " = …";
+
+/// A default value longer than this is shown as `…`.
+const DEFAULT_WIDTH: usize = 40;
+
+/// The default values of the declaration's parameters, in order, each on
+/// one line: `fun f(a: Int = 1)`'s parameters, or a class's primary
+/// constructor's.
+fn written_defaults(parse: &syntax::Parse, declaration: SyntaxNode<'_>) -> Option<Vec<String>> {
+    let parameters = syntax::named_children(declaration).find(|child| {
+        matches!(
+            child.kind(),
+            "function_value_parameters" | "primary_constructor"
+        )
+    })?;
+    // A function's default follows its parameter; a class parameter holds
+    // its own.
+    let holders: Vec<SyntaxNode<'_>> = if parameters.kind() == "primary_constructor" {
+        syntax::named_children(parameters)
+            .filter(|child| child.kind() == "class_parameter")
+            .collect()
+    } else {
+        vec![parameters]
+    };
+    let mut defaults = Vec::new();
+    for holder in holders {
+        let mut after_equals = false;
+        for child in syntax::children(holder) {
+            if child.kind() == "=" {
+                after_equals = true;
+            } else if after_equals && child.is_named() {
+                let one_line = on_one_line(parse.text_of(child));
+                let shown = if one_line.chars().count() > DEFAULT_WIDTH {
+                    "…".to_owned()
+                } else {
+                    one_line
+                };
+                defaults.push(shown);
+                after_equals = false;
+            }
+        }
+    }
+    Some(defaults)
 }
 
 /// Adds the declaration's documentation, then `in package.Class`.
@@ -206,27 +273,65 @@ fn top_level_parts(text: &str) -> Vec<&str> {
     parts
 }
 
+/// An expression written over several lines on one: its line breaks and
+/// indents a space, none just inside brackets, no trailing comma
+/// (`listOf(\n    "a",\n)` is `listOf("a")`).
+fn on_one_line(expression: &str) -> String {
+    let joined = expression.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut one_line = joined.clone();
+    for (spaced, tight) in [
+        (", )", ")"),
+        (",)", ")"),
+        (", ]", "]"),
+        ("( ", "("),
+        ("[ ", "["),
+        (" )", ")"),
+        (" ]", "]"),
+    ] {
+        one_line = one_line.replace(spaced, tight);
+    }
+    // A string's own spaces stay: only an expression without one is tidied.
+    if expression.contains('"') && one_line != joined {
+        let in_string_changed = joined.split('"').skip(1).step_by(2).collect::<String>()
+            != one_line.split('"').skip(1).step_by(2).collect::<String>();
+        if in_string_changed {
+            return joined;
+        }
+    }
+    one_line
+}
+
 /// The KDoc or Javadoc comment just before the declaration, cleaned up.
 pub(crate) fn documentation(db: &RootDatabase, location: ItemLocation) -> Option<String> {
-    match location.container {
+    with_declaration_node(db, location, doc_comment)
+}
+
+/// `read` of the declaration's syntax node: in its workspace file, or in
+/// its library's sources (none for a compiled library without them).
+fn with_declaration_node<T>(
+    db: &RootDatabase,
+    location: ItemLocation,
+    read: impl FnOnce(&syntax::Parse, SyntaxNode<'_>) -> Option<T>,
+) -> Option<T> {
+    let (parse, range) = match location.container {
         ItemContainer::File(file) => {
-            let parse = hir::parse(db, file);
             let range = hir::file_item_source_map(db, file)
                 .ranges(location.item)
                 .range;
-            doc_comment(&parse, range)
+            (hir::parse(db, file), range)
         }
         ItemContainer::Library(_) => {
             let source = hir::library_declaration_source(db, location)?;
             let language = Language::of_path(std::path::Path::new(&source.entry))?;
             let parse = syntax::parse(source.text.clone(), language);
-            doc_comment(&parse, source.full_range)
+            (std::sync::Arc::new(parse), source.full_range)
         }
-    }
+    };
+    let node = node_with_range(parse.root(), range)?;
+    read(&parse, node)
 }
 
-fn doc_comment(parse: &syntax::Parse, range: TextRange) -> Option<String> {
-    let node = node_with_range(parse.root(), range)?;
+fn doc_comment(parse: &syntax::Parse, node: SyntaxNode<'_>) -> Option<String> {
     let mut previous = node.prev_sibling();
     while let Some(sibling) = previous {
         let text = parse.text_of(sibling);
@@ -303,6 +408,20 @@ fn inline_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_written_over_lines_is_tidied_onto_one() {
+        assert_eq!(
+            on_one_line("listOf(\n    \"audit\",\n    \"money\",\n)"),
+            "listOf(\"audit\", \"money\")"
+        );
+        assert_eq!(on_one_line("mapOf(\n  1 to 2 )"), "mapOf(1 to 2)");
+        // Spaces in a string are its own.
+        assert_eq!(
+            on_one_line("format(\"( x )\",\n 1)"),
+            "format(\"( x )\", 1)"
+        );
+    }
 
     #[test]
     fn a_long_signature_gets_a_parameter_per_line_and_a_short_one_stays() {
