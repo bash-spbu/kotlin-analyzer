@@ -53,6 +53,9 @@ pub struct Types<'db> {
     hierarchies: RefCell<FxHashMap<ItemLocation, Arc<[ClassType]>>>,
     complete_hierarchies: RefCell<FxHashMap<ItemLocation, bool>>,
     qualified_names: RefCell<FxHashMap<ItemLocation, QualifiedName>>,
+    /// What `members_named` found, by receiver and name: an unqualified
+    /// call asks it of every receiver for every level.
+    members_by_name: RefCell<FxHashMap<(Ty, Name), Vec<Member>>>,
     pub(crate) signatures: RefCell<
         FxHashMap<crate::signature::Callable, Option<Arc<crate::signature::CallableSignature>>>,
     >,
@@ -70,6 +73,7 @@ impl<'db> Types<'db> {
             hierarchies: RefCell::default(),
             complete_hierarchies: RefCell::default(),
             qualified_names: RefCell::default(),
+            members_by_name: RefCell::default(),
             signatures: RefCell::default(),
             builtins: RefCell::default(),
             read_only_collections: RefCell::default(),
@@ -168,7 +172,7 @@ impl<'db> Types<'db> {
 
     /// The supertypes of `class` (not itself) in terms of its own type
     /// parameters, breadth first.
-    fn hierarchy(&self, class: ItemLocation) -> Arc<[ClassType]> {
+    pub(crate) fn hierarchy(&self, class: ItemLocation) -> Arc<[ClassType]> {
         if let Some(known) = self.hierarchies.borrow().get(&class) {
             return known.clone();
         }
@@ -235,10 +239,21 @@ impl<'db> Types<'db> {
     /// `ty`'s supertype instance of `class`: `ArrayList<String>` seen as
     /// `List` is `List<String>`.
     pub fn as_supertype(&self, ty: &Ty, class: ItemLocation) -> Option<ClassType> {
-        self.member_holders(ty)
-            .iter()
-            .flat_map(|holder| self.all_supertypes(holder))
-            .find(|supertype| supertype.class == class)
+        // Only the supertype found is substituted, not the whole hierarchy.
+        self.member_holders(ty).iter().find_map(|holder| {
+            if holder.class == class {
+                return Some(holder.clone());
+            }
+            let generic = self
+                .hierarchy(holder.class)
+                .iter()
+                .find(|supertype| supertype.class == class)?
+                .clone();
+            Ty::Class(generic)
+                .substitute(&class_substitution(holder))
+                .class()
+                .cloned()
+        })
     }
 
     /// The class types whose members a value of type `ty` has: its class,
@@ -284,7 +299,13 @@ impl<'db> Types<'db> {
     /// `receiver` has, the most derived first; an inherited member a nearer
     /// class overrides (same kind, same number of parameters) is left out.
     pub fn members_named(&self, receiver: &Ty, name: Name) -> Vec<Member> {
-        self.visible_members(receiver, Wanted::Named(name))
+        let key = (receiver.clone(), name);
+        if let Some(known) = self.members_by_name.borrow().get(&key) {
+            return known.clone();
+        }
+        let found = self.visible_members(receiver, Wanted::Named(name));
+        self.members_by_name.borrow_mut().insert(key, found.clone());
+        found
     }
 
     /// The non-static members of `receiver`'s hierarchy whose name `wanted`
@@ -522,9 +543,21 @@ impl<'db> Types<'db> {
         if !getters.is_empty() {
             return getters;
         }
-        // An acronym's getter: `getURL` for `url`, `getURLName` for `urlName`.
-        self.all_members(receiver)
-            .into_iter()
+        // An acronym's getter: `getURL` for `url`, `getURLName` for `urlName`
+        // — the leading lower-case run upper-cased, in part or whole.
+        let run = spelled
+            .chars()
+            .take_while(|char| char.is_ascii_lowercase())
+            .count();
+        (2..=run)
+            .flat_map(|upper| {
+                let acronym = format!(
+                    "get{}{}",
+                    spelled[..upper].to_ascii_uppercase(),
+                    &spelled[upper..]
+                );
+                self.members_named(receiver, Name::new(&acronym))
+            })
             .filter(names_property)
             .collect()
     }

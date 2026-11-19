@@ -91,7 +91,7 @@ impl Types<'_> {
             return Fit::Yes;
         }
         let is_supertype = self
-            .all_supertypes(value)
+            .hierarchy(value.class)
             .iter()
             .any(|supertype| supertype.class == expected.class);
         if is_supertype {

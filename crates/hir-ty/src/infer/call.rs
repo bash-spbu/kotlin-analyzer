@@ -1335,14 +1335,18 @@ impl<'db> Inferrer<'db> {
                     },
                 )
         };
+        // Each ordered pair once.
         let count = applicable.len();
+        let specific: Vec<Vec<bool>> = (0..count)
+            .map(|first| {
+                (0..count)
+                    .map(|second| first != second && at_least_as_specific(first, second))
+                    .collect()
+            })
+            .collect();
         let not_beaten: Vec<usize> = (0..count)
             .filter(|candidate| {
-                !(0..count).any(|other| {
-                    other != *candidate
-                        && at_least_as_specific(other, *candidate)
-                        && !at_least_as_specific(*candidate, other)
-                })
+                !(0..count).any(|other| specific[other][*candidate] && !specific[*candidate][other])
             })
             .collect();
         let mut best: Vec<Shaped> = applicable
