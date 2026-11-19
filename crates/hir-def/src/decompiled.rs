@@ -23,8 +23,9 @@ use crate::item_tree::{
 };
 use crate::resolver::{DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES};
 use classfile::decompile::{
-    BinaryOperator, Body, DecompiledMethod, Expression, Label, Literal, LogicalOperator, LoopKind,
-    Owner, Receiver, Relation, Statement, decompile_class, parameter_descriptors,
+    BinaryOperator, Body, DecompiledMethod, Expression, Label, LambdaBody, Literal,
+    LogicalOperator, LoopKind, Owner, Receiver, ReferenceTarget, Relation, Statement,
+    decompile_class, parameter_descriptors,
 };
 use classfile::{ClassName, LibraryType};
 use rustc_hash::FxHashMap;
@@ -292,6 +293,7 @@ pub fn render(
         language,
         bodies,
         text: String::new(),
+        statement_depth: std::cell::Cell::new(0),
     };
     renderer.header(library_name, missing);
     let terminator = match language {
@@ -326,6 +328,9 @@ struct Renderer<'tree> {
     language: StubLanguage,
     bodies: &'tree CompiledBodies,
     text: String,
+    /// How deep the statement being written is: a block lambda's body
+    /// indents from there.
+    statement_depth: std::cell::Cell<usize>,
 }
 
 impl Renderer<'_> {
@@ -805,6 +810,7 @@ impl Renderer<'_> {
     }
 
     fn java_statement(&mut self, statement: &Statement, depth: usize) {
+        self.statement_depth.set(depth);
         let simple = match statement {
             Statement::SuperConstructor(arguments) if arguments.is_empty() => return,
             Statement::Expression(expression) => format!("{};", self.expression(expression)),
@@ -821,9 +827,15 @@ impl Renderer<'_> {
                     None => format!("{type_text} {name};"),
                 }
             }
-            Statement::Assign { target, value } => {
-                format!("{} = {};", self.expression(target), self.expression(value))
-            }
+            Statement::Assign { target, value } => match compound(target, value) {
+                Some((operator, operand)) => format!(
+                    "{} {}= {};",
+                    self.expression(target),
+                    binary_symbol(operator),
+                    self.expression(operand)
+                ),
+                None => format!("{} = {};", self.expression(target), self.expression(value)),
+            },
             Statement::Increment { name, by } => match by {
                 1 => format!("{name}++;"),
                 -1 => format!("{name}--;"),
@@ -868,12 +880,64 @@ impl Renderer<'_> {
                         self.java_block(body, depth + 1);
                         self.line(depth, "}");
                     }
+                    LoopKind::For {
+                        initializer,
+                        condition,
+                        update,
+                    } => {
+                        let initializer =
+                            initializer.as_ref().map_or(String::new(), |initializer| {
+                                self.inline_statement(initializer)
+                            });
+                        let condition = self.expression(condition);
+                        let update = self.inline_statement(update);
+                        self.line(
+                            depth,
+                            &format!("{prefix}for ({initializer}; {condition}; {update}) {{"),
+                        );
+                        self.java_block(body, depth + 1);
+                        self.line(depth, "}");
+                    }
+                    LoopKind::ForEach {
+                        type_ref,
+                        name,
+                        iterable,
+                    } => {
+                        let type_text = type_ref
+                            .as_ref()
+                            .map_or("var".to_owned(), |type_ref| self.library_type(type_ref));
+                        let iterable = self.expression(iterable);
+                        self.line(
+                            depth,
+                            &format!("{prefix}for ({type_text} {name} : {iterable}) {{"),
+                        );
+                        self.java_block(body, depth + 1);
+                        self.line(depth, "}");
+                    }
                 }
                 return;
             }
             Statement::Block { label, body } => {
                 self.line(depth, &format!("{}: {{", label_name(*label)));
                 self.java_block(body, depth + 1);
+                self.line(depth, "}");
+                return;
+            }
+            Statement::Try { body, catches } => {
+                self.line(depth, "try {");
+                self.java_block(body, depth + 1);
+                for clause in catches {
+                    let types: Vec<String> = clause
+                        .types
+                        .iter()
+                        .map(|class| self.class_name(class))
+                        .collect();
+                    self.line(
+                        depth,
+                        &format!("}} catch ({} {}) {{", types.join(" | "), clause.name),
+                    );
+                    self.java_block(&clause.body, depth + 1);
+                }
                 self.line(depth, "}");
                 return;
             }
@@ -884,7 +948,7 @@ impl Renderer<'_> {
                     let mut labels: Vec<String> = case
                         .values
                         .iter()
-                        .map(|value| format!("case {value}:"))
+                        .map(|value| format!("case {}:", java_literal(value)))
                         .collect();
                     if case.default {
                         labels.push("default:".to_owned());
@@ -897,6 +961,14 @@ impl Renderer<'_> {
             }
         };
         self.line(depth, &simple);
+    }
+
+    /// A `for`'s initializer or update: the statement without its `;`.
+    fn inline_statement(&mut self, statement: &Statement) -> String {
+        let start = self.text.len();
+        self.java_statement(statement, 0);
+        let written = self.text.split_off(start);
+        written.trim().trim_end_matches(';').to_owned()
     }
 
     /// `if (…) { … } else if (…) { … } else { … }`.
@@ -1097,6 +1169,83 @@ impl Renderer<'_> {
                 self.operand(then, CONDITIONAL + 1),
                 self.operand(otherwise, CONDITIONAL)
             ),
+            Expression::Lambda { parameters, body } => {
+                let parameters = match parameters.as_slice() {
+                    [only] => only.clone(),
+                    all => format!("({})", all.join(", ")),
+                };
+                match body {
+                    LambdaBody::Expression(value) => {
+                        format!("{parameters} -> {}", self.operand(value, LAMBDA))
+                    }
+                    LambdaBody::Block(statements) => {
+                        let depth = self.statement_depth.get();
+                        let mut inner = Renderer {
+                            tree: self.tree,
+                            imports: self.imports,
+                            language: self.language,
+                            bodies: self.bodies,
+                            text: String::new(),
+                            statement_depth: std::cell::Cell::new(depth + 1),
+                        };
+                        inner.java_block(statements, depth + 1);
+                        self.statement_depth.set(depth);
+                        format!(
+                            "{parameters} -> {{\n{}{}}}",
+                            inner.text,
+                            "    ".repeat(depth)
+                        )
+                    }
+                }
+            }
+            Expression::Boxed { class, value } => {
+                format!(
+                    "{}.valueOf({})",
+                    self.class_name(class),
+                    self.expression(value)
+                )
+            }
+            Expression::ArrayInitializer {
+                element,
+                length,
+                values,
+            } => {
+                let mut written: Vec<String> =
+                    values.iter().map(|value| self.expression(value)).collect();
+                let default = match element {
+                    LibraryType::Primitive(name) => match name.as_str() {
+                        "boolean" => "false",
+                        "long" => "0L",
+                        "float" => "0.0F",
+                        "double" => "0.0",
+                        "char" => "'\\u0000'",
+                        _ => "0",
+                    },
+                    _ => "null",
+                };
+                while written.len() < *length {
+                    written.push(default.to_owned());
+                }
+                format!(
+                    "new {}[] {{ {} }}",
+                    self.library_type(element),
+                    written.join(", ")
+                )
+            }
+            Expression::PostIncrement { name, by } => {
+                format!("{name}{}", if *by > 0 { "++" } else { "--" })
+            }
+            Expression::Unboxed { method, value } => {
+                format!("{}.{method}()", self.operand(value, PRIMARY))
+            }
+            Expression::MethodReference { target, name } => {
+                let target = match target {
+                    ReferenceTarget::Class(class) => self.class_name(class),
+                    ReferenceTarget::Bound(receiver) => self.operand(receiver, PRIMARY),
+                    ReferenceTarget::Super => "super".to_owned(),
+                };
+                format!("{target}::{name}")
+            }
             Expression::CompareResult { left, right, .. } => format!(
                 "/* compare */ ({}, {})",
                 self.expression(left),
@@ -1104,6 +1253,34 @@ impl Renderer<'_> {
             ),
         }
     }
+}
+
+/// `x = x + y` as `x += y`: the target a variable or a field of one, read
+/// again as the left operand. (A narrowing compound assignment javac
+/// compiles with a cast, which isn't this shape.)
+fn compound<'value>(
+    target: &Expression,
+    value: &'value Expression,
+) -> Option<(BinaryOperator, &'value Expression)> {
+    let Expression::Binary {
+        operator,
+        left,
+        right,
+    } = value
+    else {
+        return None;
+    };
+    let is_simple_target = match target {
+        Expression::Local(_) => true,
+        Expression::Field { owner, .. } => match owner {
+            Owner::Static(_) => true,
+            Owner::Instance(object) => {
+                matches!(object.as_ref(), Expression::This | Expression::Local(_))
+            }
+        },
+        _ => false,
+    };
+    (is_simple_target && **left == *target).then_some((*operator, right.as_ref()))
 }
 
 /// `label1` for a statement's label.
@@ -1142,6 +1319,7 @@ const EQUALITY: u8 = 8;
 const AND: u8 = 4;
 const OR: u8 = 3;
 const CONDITIONAL: u8 = 2;
+const LAMBDA: u8 = 1;
 
 /// How tightly an expression binds, as Java's grammar ranks it.
 fn precedence(expression: &Expression) -> u8 {
@@ -1156,6 +1334,7 @@ fn precedence(expression: &Expression) -> u8 {
             LogicalOperator::Or => OR,
         },
         Expression::Conditional { .. } => CONDITIONAL,
+        Expression::Lambda { .. } => LAMBDA,
         Expression::Cast { .. } => CAST,
         Expression::Negate(_) => UNARY,
         Expression::Literal(Literal::Int(i32::MIN..=-1) | Literal::Long(i64::MIN..=-1)) => UNARY,
@@ -1518,12 +1697,43 @@ impl Imports {
                     self.collect_statements(otherwise);
                 }
                 Statement::Loop { kind, body, .. } => {
-                    if let LoopKind::While(condition) | LoopKind::DoWhile(condition) = kind {
-                        self.collect_expression(condition);
+                    match kind {
+                        LoopKind::Forever => {}
+                        LoopKind::While(condition) | LoopKind::DoWhile(condition) => {
+                            self.collect_expression(condition);
+                        }
+                        LoopKind::For {
+                            initializer,
+                            condition,
+                            update,
+                        } => {
+                            if let Some(initializer) = initializer {
+                                self.collect_statements(std::slice::from_ref(initializer));
+                            }
+                            self.collect_expression(condition);
+                            self.collect_statements(std::slice::from_ref(update));
+                        }
+                        LoopKind::ForEach {
+                            type_ref, iterable, ..
+                        } => {
+                            if let Some(type_ref) = type_ref {
+                                self.collect(&crate::library::type_ref(type_ref));
+                            }
+                            self.collect_expression(iterable);
+                        }
                     }
                     self.collect_statements(body);
                 }
                 Statement::Block { body, .. } => self.collect_statements(body),
+                Statement::Try { body, catches } => {
+                    self.collect_statements(body);
+                    for clause in catches {
+                        for class in &clause.types {
+                            self.collect(&class_type(class));
+                        }
+                        self.collect_statements(&clause.body);
+                    }
+                }
                 Statement::Switch { value, cases } => {
                     self.collect_expression(value);
                     for case in cases {
@@ -1608,6 +1818,29 @@ impl Imports {
                 self.collect_expression(then);
                 self.collect_expression(otherwise);
             }
+            Expression::Boxed { class, value } => {
+                self.collect(&class_type(class));
+                self.collect_expression(value);
+            }
+            Expression::ArrayInitializer {
+                element, values, ..
+            } => {
+                self.collect(&crate::library::type_ref(element));
+                values
+                    .iter()
+                    .for_each(|value| self.collect_expression(value));
+            }
+            Expression::PostIncrement { .. } => {}
+            Expression::Unboxed { value, .. } => self.collect_expression(value),
+            Expression::Lambda { body, .. } => match body {
+                LambdaBody::Expression(value) => self.collect_expression(value),
+                LambdaBody::Block(statements) => self.collect_statements(statements),
+            },
+            Expression::MethodReference { target, .. } => match target {
+                ReferenceTarget::Class(class) => self.collect(&class_type(class)),
+                ReferenceTarget::Bound(receiver) => self.collect_expression(receiver),
+                ReferenceTarget::Super => {}
+            },
         }
     }
 

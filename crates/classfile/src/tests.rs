@@ -557,7 +557,7 @@ fn an_entry_larger_than_the_limit_is_refused_whatever_its_header_claims() {
 }
 
 #[test]
-fn bodies_that_run_straight_through_decompile_and_others_say_why_not() {
+fn bodies_decompile_and_those_that_dont_say_why() {
     let directory = std::env::temp_dir().join(format!("ka-decompile-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(directory.join("demo")).unwrap();
@@ -575,6 +575,8 @@ public abstract class Shapes {
     public synchronized void locked() { side = 1; }
     public int[] initialized() { return new int[] { 1, 2 }; }
     public abstract int perimeter();
+    public int finished() { try { return side; } finally { side = 0; } }
+    public int counted() { return side++; }
 }
 "#,
     )
@@ -604,10 +606,14 @@ public abstract class Shapes {
     assert_eq!(outcome("<init>"), Ok(()));
     assert_eq!(outcome("loop"), Ok(()));
     assert_eq!(outcome("positive"), Ok(()));
-    assert_eq!(outcome("lazy"), Err(Unsupported::Lambda));
-    assert_eq!(outcome("guarded"), Err(Unsupported::ExceptionHandlers));
-    assert_eq!(outcome("initialized"), Err(Unsupported::StackShape));
+    assert_eq!(outcome("lazy"), Ok(()));
+    assert_eq!(outcome("guarded"), Ok(()));
+    assert_eq!(outcome("initialized"), Ok(()));
     assert_eq!(outcome("perimeter"), Err(Unsupported::NoCode));
+    // `finally` catches anything; a field's `++` inside an expression keeps
+    // its old value under the object (`dup_x1`).
+    assert_eq!(outcome("finished"), Err(Unsupported::ExceptionHandlers));
+    assert_eq!(outcome("counted"), Err(Unsupported::StackShape));
     // `synchronized` on the method is a flag, not code: its body is plain.
     assert_eq!(outcome("locked"), Ok(()));
     let area = decompiled
@@ -658,6 +664,6 @@ fn nearly_all_of_a_java_librarys_bodies_decompile() {
     }
     let share = decompiled as f64 / bodies as f64;
     eprintln!("{}: {decompiled} of {bodies} bodies", jar.display());
-    // 95% for 2.0.17: the rest have `try`, mostly.
-    assert!(share > 0.9, "{decompiled} of {bodies}");
+    // 99.6% for 2.0.20: `finally` is left.
+    assert!(share > 0.95, "{decompiled} of {bodies}");
 }

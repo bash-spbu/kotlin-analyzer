@@ -12,7 +12,27 @@ pub(super) struct Graph {
     /// By block; `None` for one joined into another or never reached.
     /// Their exits name blocks by index.
     pub(super) nodes: Vec<Option<Node>>,
+    /// The `try`s: their blocks and handlers.
+    pub(super) regions: Vec<Region>,
 }
+
+/// A `try`: the blocks of its range, entered at `entry`, and its
+/// handlers.
+pub(super) struct Region {
+    pub(super) entry: usize,
+    /// By block: whether it is inside.
+    pub(super) body: Vec<bool>,
+    pub(super) catches: Vec<Catch>,
+}
+
+pub(super) struct Catch {
+    pub(super) types: Vec<crate::ClassName>,
+    pub(super) handler: usize,
+}
+
+/// What a handler's code starts with on the stack: the exception, a
+/// variable no one names until its `catch` does.
+pub(super) const CAUGHT: &str = "$caught";
 
 pub(super) struct Node {
     pub(super) statements: Vec<super::Statement>,
@@ -60,7 +80,12 @@ pub(super) fn build(mut machine: Machine<'_>) -> Result<Graph, Unsupported> {
     let bytes = machine.code.bytes.clone();
     let decoded = decode(&bytes)?;
     let starts: Vec<usize> = decoded.iter().map(|instruction| instruction.pc).collect();
+    let raw_regions = raw_regions(&machine.code.exception_handlers)?;
     let mut leaders: Vec<usize> = vec![0];
+    for region in &raw_regions {
+        leaders.extend([region.start, region.end]);
+        leaders.extend(region.catches.iter().map(|(_, handler)| *handler));
+    }
     for instruction in &decoded {
         leaders.extend(&instruction.targets);
         if instruction.ends_block {
@@ -108,6 +133,25 @@ pub(super) fn build(mut machine: Machine<'_>) -> Result<Graph, Unsupported> {
         }
         raw_successors.push(successors);
     }
+    // Into each handler from its `try`'s entry: what it catches comes from
+    // anywhere inside, which the entry dominates.
+    let mut handlers: Vec<bool> = vec![false; ranges.len()];
+    let mut membership: Vec<Vec<usize>> = vec![Vec::new(); ranges.len()];
+    for (index, region) in raw_regions.iter().enumerate() {
+        let entry = block_of(region.start)?;
+        for (_, handler) in &region.catches {
+            let handler = block_of(*handler)?;
+            handlers[handler] = true;
+            if !raw_successors[entry].contains(&handler) {
+                raw_successors[entry].push(handler);
+            }
+        }
+        for (block, (start, _)) in ranges.iter().enumerate() {
+            if region.start <= *start && *start < region.end {
+                membership[block].push(index);
+            }
+        }
+    }
     let order = reverse_postorder(&raw_successors, 0);
     let mut position = vec![usize::MAX; ranges.len()];
     for (index, block) in order.iter().enumerate() {
@@ -125,6 +169,8 @@ pub(super) fn build(mut machine: Machine<'_>) -> Result<Graph, Unsupported> {
         replayed: vec![None; ranges.len()],
         alive: vec![false; ranges.len()],
         predecessors,
+        handlers: handlers.clone(),
+        membership,
     };
     for block in &order {
         joining.alive[*block] = true;
@@ -182,6 +228,31 @@ pub(super) fn build(mut machine: Machine<'_>) -> Result<Graph, Unsupported> {
             return Err(Unsupported::StackShape);
         }
     }
+    let mut regions = Vec::with_capacity(raw_regions.len());
+    for (index, region) in raw_regions.iter().enumerate() {
+        let entry = block_of(region.start)?;
+        let body = (0..ranges.len())
+            .map(|block| joining.membership[block].contains(&index))
+            .collect();
+        let catches = region
+            .catches
+            .iter()
+            .map(|(types, handler)| {
+                Ok(Catch {
+                    types: types
+                        .iter()
+                        .map(|binary| machine.class_name(binary))
+                        .collect(),
+                    handler: block_of(*handler)?,
+                })
+            })
+            .collect::<Result<_, Unsupported>>()?;
+        regions.push(Region {
+            entry,
+            body,
+            catches,
+        });
+    }
     let nodes = joining
         .replayed
         .into_iter()
@@ -194,7 +265,66 @@ pub(super) fn build(mut machine: Machine<'_>) -> Result<Graph, Unsupported> {
             })
         })
         .collect();
-    Ok(Graph { nodes })
+    Ok(Graph { nodes, regions })
+}
+
+/// A `try` range and its handlers: each handler with the classes it
+/// catches.
+struct RawRegion {
+    start: usize,
+    end: usize,
+    catches: Vec<(Vec<String>, usize)>,
+}
+
+/// The exception table as `try`s: the entries of one range together, one
+/// handler's classes together (`catch (A | B e)`). Ranges must nest or be
+/// apart, and two starting together are a `try` in a `try` at its start,
+/// which isn't read.
+fn raw_regions(
+    handlers: &[crate::class_file::ExceptionHandler],
+) -> Result<Vec<RawRegion>, Unsupported> {
+    let mut regions: Vec<RawRegion> = Vec::new();
+    for handler in handlers {
+        let caught = handler
+            .catch_type
+            .clone()
+            .ok_or(Unsupported::ExceptionHandlers)?;
+        let region = match regions
+            .iter_mut()
+            .find(|region| region.start == handler.start && region.end == handler.end)
+        {
+            Some(region) => region,
+            None => {
+                regions.push(RawRegion {
+                    start: handler.start,
+                    end: handler.end,
+                    catches: Vec::new(),
+                });
+                regions.last_mut().ok_or(Unsupported::Malformed)?
+            }
+        };
+        match region
+            .catches
+            .iter_mut()
+            .find(|(_, target)| *target == handler.handler)
+        {
+            Some((types, _)) => types.push(caught),
+            None => region.catches.push((vec![caught], handler.handler)),
+        }
+    }
+    for first in &regions {
+        for second in &regions {
+            let same = std::ptr::eq(first, second);
+            let apart = first.end <= second.start || second.end <= first.start;
+            let nested = (first.start <= second.start && second.end <= first.end)
+                || (second.start <= first.start && first.end <= second.end);
+            let same_start = first.start == second.start;
+            if !same && (!(apart || nested) || same_start) {
+                return Err(Unsupported::ExceptionHandlers);
+            }
+        }
+    }
+    Ok(regions)
 }
 
 /// The blocks as they are replayed and joined.
@@ -202,6 +332,11 @@ struct Joining {
     replayed: Vec<Option<Replayed>>,
     alive: Vec<bool>,
     predecessors: Vec<Vec<usize>>,
+    /// By block: whether it starts a handler.
+    handlers: Vec<bool>,
+    /// By block: the `try`s it is inside. Code doesn't join across a
+    /// `try`'s edge: what throws must stay inside.
+    membership: Vec<Vec<usize>>,
 }
 
 impl Joining {
@@ -216,6 +351,12 @@ impl Joining {
     /// The stack `block` starts with: what its one replayed predecessor
     /// left — after two branches' values joined as `?:` — or nothing.
     fn entry(&mut self, block: usize) -> Result<Vec<Value>, Unsupported> {
+        if self.handlers[block] {
+            return Ok(vec![Value {
+                expression: Expression::Local(CAUGHT.to_owned()),
+                kind: super::machine::Kind::Reference,
+            }]);
+        }
         loop {
             let replayed: Vec<usize> = self.predecessors[block]
                 .iter()
@@ -310,6 +451,9 @@ impl Joining {
     /// pushes one value on top of what that block left and goes to `join`.
     fn value_branch_origin(&self, join: usize, branch: usize) -> Option<usize> {
         let replayed = self.replayed[branch].as_ref()?;
+        if self.handlers[branch] {
+            return None;
+        }
         let only_pushes = replayed.statements.is_empty() && replayed.exit == Exit::Goto(join);
         let [origin] = self.predecessors[branch][..] else {
             return None;
@@ -317,7 +461,8 @@ impl Joining {
         let origin_stack = &self.replayed[origin].as_ref()?.stack;
         let pushed_one = replayed.stack.len() == origin_stack.len() + 1
             && replayed.stack[..origin_stack.len()] == origin_stack[..];
-        (only_pushes && pushed_one).then_some(origin)
+        let same_try = self.membership[branch] == self.membership[origin];
+        (only_pushes && pushed_one && same_try).then_some(origin)
     }
 
     /// `block` only tests a condition, reached from one block testing
@@ -351,7 +496,8 @@ impl Joining {
         else {
             return;
         };
-        if !only_tests || first_true == first_false {
+        let same_try = self.membership[block] == self.membership[previous];
+        if !only_tests || first_true == first_false || !same_try || self.handlers[block] {
             return;
         }
         let or = |left: Expression, right: Expression| Expression::Logical {

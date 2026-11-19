@@ -8,7 +8,8 @@ use crate::{ClassName, LibraryType};
 
 use super::{
     BinaryOperator, Expression, Literal, NanOrder, Owner, Receiver, Relation, Statement,
-    Unsupported, coerced, is_wide_descriptor, negated, parameter_descriptors, result_descriptor,
+    Unsupported, coerced, is_wide_descriptor, negated, parameter_descriptors, plain,
+    result_descriptor,
 };
 
 /// What a value on the operand stack is.
@@ -97,6 +98,8 @@ pub(super) struct Machine<'class> {
     uninitialized: Vec<ClassName>,
     stack: Vec<Value>,
     statements: Vec<Statement>,
+    /// How many lambdas deep this body is.
+    depth: usize,
 }
 
 impl<'class> Machine<'class> {
@@ -106,6 +109,7 @@ impl<'class> Machine<'class> {
         method: &'class Member,
         code: &'class Code,
         parameter_names: &[String],
+        depth: usize,
     ) -> Machine<'class> {
         let is_static = method.access & access::STATIC != 0;
         let descriptors = parameter_descriptors(&method.descriptor).unwrap_or_default();
@@ -129,6 +133,7 @@ impl<'class> Machine<'class> {
             uninitialized: Vec::new(),
             stack: Vec::new(),
             statements: Vec::new(),
+            depth,
         }
     }
 
@@ -200,7 +205,7 @@ impl<'class> Machine<'class> {
         Ok(())
     }
 
-    fn class_name(&self, binary: &str) -> ClassName {
+    pub(super) fn class_name(&self, binary: &str) -> ClassName {
         self.names.class_name(binary)
     }
 
@@ -313,9 +318,12 @@ impl<'class> Machine<'class> {
                 let index = self.pop()?;
                 let array = self.pop()?;
                 let value = match opcode {
-                    0x55 => coerced(value.expression, "C"),
-                    _ => value.expression,
+                    0x55 => coerced(plain(value.expression), "C"),
+                    _ => plain(value.expression),
                 };
+                if self.initialized_element(&array, &index, &value) {
+                    return Ok((1, Step::Next));
+                }
                 let target = Expression::ArrayElement {
                     array: Box::new(array.expression),
                     index: Box::new(index.expression),
@@ -338,8 +346,9 @@ impl<'class> Machine<'class> {
             }
             0x59 => {
                 let top = self.stack.last().ok_or(Unsupported::Malformed)?.clone();
-                let can_repeat =
-                    matches!(top.kind, Kind::Uninitialized(_)) || is_repeatable(&top.expression);
+                let can_repeat = matches!(top.kind, Kind::Uninitialized(_))
+                    || is_repeatable(&top.expression)
+                    || is_array_being_initialized(&top.expression);
                 if !can_repeat {
                     return Err(Unsupported::StackShape);
                 }
@@ -355,7 +364,7 @@ impl<'class> Machine<'class> {
                 let slot = u16::from(self.byte(pc + 1)?);
                 let by = i32::from(self.byte(pc + 2)? as i8);
                 let name = self.local_name(slot, pc as u32);
-                self.emit(Statement::Increment { name, by })?;
+                self.increment(name, by)?;
                 3
             }
             0x85..=0x93 => {
@@ -363,8 +372,8 @@ impl<'class> Machine<'class> {
                 1
             }
             0x94..=0x98 => {
-                let right = self.pop()?;
-                let left = self.pop()?;
+                let right = unboxed_operand(self.pop()?);
+                let left = unboxed_operand(self.pop()?);
                 let nan = match opcode {
                     0x94 => NanOrder::Integral,
                     0x95 | 0x97 => NanOrder::Less,
@@ -382,6 +391,11 @@ impl<'class> Machine<'class> {
             }
             0x99..=0x9e | 0xc6 | 0xc7 => {
                 let value = self.pop()?;
+                let value = if opcode < 0xc6 {
+                    unboxed_operand(value)
+                } else {
+                    value
+                };
                 let condition = condition_against_zero(value, opcode);
                 let if_true = Self::target(pc, i32::from(self.u16_at(pc + 1)? as i16))?;
                 return Ok((
@@ -396,6 +410,12 @@ impl<'class> Machine<'class> {
             0x9f..=0xa6 => {
                 let right = self.pop()?;
                 let left = self.pop()?;
+                let is_numeric = opcode < 0xa5;
+                let (left, right) = if is_numeric {
+                    (unboxed_operand(left), unboxed_operand(right))
+                } else {
+                    (left, right)
+                };
                 let relation = match opcode {
                     0x9f | 0xa5 => Relation::Equal,
                     0xa0 | 0xa6 => Relation::NotEqual,
@@ -432,7 +452,7 @@ impl<'class> Machine<'class> {
             0xa8 | 0xa9 | 0xc9 => return Err(Unsupported::Branches),
             0xac..=0xb0 => {
                 let value = self.pop()?;
-                let value = coerced(value.expression, &self.result.clone());
+                let value = coerced(plain(value.expression), &self.result.clone());
                 self.emit(Statement::Return(Some(value)))?;
                 return Ok((1, Step::End(Exit::Leave)));
             }
@@ -607,11 +627,84 @@ impl<'class> Machine<'class> {
             0x84 => {
                 let by = i32::from(self.u16_at(pc + 4)? as i16);
                 let name = self.local_name(slot, pc as u32);
-                self.emit(Statement::Increment { name, by })?;
+                self.increment(name, by)?;
                 Ok(6)
             }
             other => Err(Unsupported::Instruction(other)),
         }
+    }
+
+    /// `iinc`: a statement — or, right after the variable's value was
+    /// loaded for an expression, that expression's `i++`.
+    fn increment(&mut self, name: String, by: i32) -> Result<(), Unsupported> {
+        let loaded_just_now = self
+            .stack
+            .last()
+            .is_some_and(|top| top.expression == Expression::Local(name.clone()));
+        let is_step = by == 1 || by == -1;
+        if loaded_just_now && is_step {
+            if let Some(top) = self.stack.last_mut() {
+                top.expression = Expression::PostIncrement { name, by };
+            }
+            return Ok(());
+        }
+        self.emit(Statement::Increment { name, by })
+    }
+
+    /// `newarray; dup; index; value; xastore; dup; …`: the elements of
+    /// `new T[] { … }`, put into the array still on the stack below. Gaps
+    /// javac leaves are the element type's default.
+    fn initialized_element(&mut self, array: &Value, index: &Value, value: &Expression) -> bool {
+        let below_is_same = self
+            .stack
+            .last()
+            .is_some_and(|below| below.expression == array.expression);
+        let Expression::Literal(Literal::Int(position)) = index.expression else {
+            return false;
+        };
+        let Ok(position) = usize::try_from(position) else {
+            return false;
+        };
+        let (element, length, mut values) = match &array.expression {
+            Expression::NewArray { element, length } => match length.as_ref() {
+                Expression::Literal(Literal::Int(length)) => (
+                    element.clone(),
+                    usize::try_from(*length).unwrap_or(0),
+                    Vec::new(),
+                ),
+                _ => return false,
+            },
+            Expression::ArrayInitializer {
+                element,
+                length,
+                values,
+            } => (element.clone(), *length, values.clone()),
+            _ => return false,
+        };
+        let in_order = position >= values.len() && position < length;
+        if !below_is_same || !in_order {
+            return false;
+        }
+        while values.len() < position {
+            values.push(default_value(&element));
+        }
+        let element_descriptor = match &element {
+            LibraryType::Primitive(name) => match name.as_str() {
+                "boolean" => "Z",
+                "char" => "C",
+                _ => "",
+            },
+            _ => "",
+        };
+        values.push(coerced(value.clone(), element_descriptor));
+        if let Some(below) = self.stack.last_mut() {
+            below.expression = Expression::ArrayInitializer {
+                element,
+                length,
+                values,
+            };
+        }
+        true
     }
 
     fn load_constant(&mut self, index: u16) -> Result<(), Unsupported> {
@@ -694,7 +787,8 @@ impl<'class> Machine<'class> {
     /// `xstore slot`: to a parameter, an assignment; to a local variable,
     /// its declaration the first time its scope sees it.
     fn store(&mut self, slot: u16, next_pc: usize) -> Result<(), Unsupported> {
-        let value = self.pop()?;
+        let mut value = self.pop()?;
+        value.expression = plain(value.expression);
         let next_pc = next_pc as u32;
         let is_parameter = self
             .parameters
@@ -776,7 +870,7 @@ impl<'class> Machine<'class> {
 
     fn arithmetic(&mut self, opcode: u8) -> Result<(), Unsupported> {
         if (0x74..=0x77).contains(&opcode) {
-            let operand = self.pop()?;
+            let operand = unboxed_operand(self.pop()?);
             self.push(
                 Expression::Negate(Box::new(operand.expression)),
                 operand.kind,
@@ -798,6 +892,7 @@ impl<'class> Machine<'class> {
         };
         let right = self.pop()?;
         let left = self.pop()?;
+        let (left, right) = (unboxed_operand(left), unboxed_operand(right));
         let result_kind = match opcode {
             0x60..=0x73 => {
                 [Kind::Int, Kind::Long, Kind::Float, Kind::Double][usize::from((opcode - 0x60) % 4)]
@@ -871,7 +966,7 @@ impl<'class> Machine<'class> {
                     owner: Owner::Static(owner_class),
                     name,
                 };
-                let value = coerced(value.expression, &descriptor);
+                let value = coerced(plain(value.expression), &descriptor);
                 self.emit(Statement::Assign { target, value })?;
             }
             0xb4 => {
@@ -891,7 +986,7 @@ impl<'class> Machine<'class> {
                     owner: Owner::Instance(Box::new(object.expression)),
                     name,
                 };
-                let value = coerced(value.expression, &descriptor);
+                let value = coerced(plain(value.expression), &descriptor);
                 self.emit(Statement::Assign { target, value })?;
             }
         }
@@ -920,6 +1015,16 @@ impl<'class> Machine<'class> {
             .ok_or(Unsupported::Malformed)?
             .to_owned();
         let owner_class = self.class_name(&owner);
+        if boxing(&owner, &name, &descriptor) == Some(Boxing::Box) {
+            let [value] =
+                <[Expression; 1]>::try_from(arguments).map_err(|_| Unsupported::Malformed)?;
+            let boxed = Expression::Boxed {
+                class: owner_class,
+                value: Box::new(value),
+            };
+            self.push(boxed, Kind::Reference);
+            return Ok(());
+        }
         if opcode == 0xb8 {
             let call = Expression::Call {
                 receiver: Receiver::Static(owner_class),
@@ -929,6 +1034,16 @@ impl<'class> Machine<'class> {
             return self.call_result(call, &result);
         }
         let receiver = self.pop()?;
+        if boxing(&owner, &name, &descriptor) == Some(Boxing::Unbox) {
+            self.push(
+                Expression::Unboxed {
+                    method: name,
+                    value: Box::new(receiver.expression),
+                },
+                Kind::of_descriptor(&result),
+            );
+            return Ok(());
+        }
         let is_special = opcode == 0xb7;
         if is_special && name == "<init>" {
             return self.constructed(receiver, &owner, arguments);
@@ -1022,8 +1137,13 @@ impl<'class> Machine<'class> {
             .bootstrap_methods
             .get(usize::from(*bootstrap_index))
             .ok_or(Unsupported::Malformed)?;
-        let is_concatenation = self.bootstrap_owner(bootstrap.method_handle).as_deref()
-            == Some("java/lang/invoke/StringConcatFactory");
+        let owner = self.bootstrap_owner(bootstrap.method_handle);
+        if owner.as_deref() == Some("java/lang/invoke/LambdaMetafactory") {
+            let descriptor = descriptor.to_owned();
+            let bootstrap = bootstrap.clone();
+            return self.lambda(&descriptor, &bootstrap);
+        }
+        let is_concatenation = owner.as_deref() == Some("java/lang/invoke/StringConcatFactory");
         if !is_concatenation {
             return Err(Unsupported::Lambda);
         }
@@ -1052,6 +1172,97 @@ impl<'class> Machine<'class> {
         Ok(())
     }
 
+    /// A lambda or method reference `LambdaMetafactory` makes: `descriptor`
+    /// takes what it captures. The implementation is a synthetic
+    /// `lambda$…` method of this class — decompiled as the lambda's body,
+    /// the captured values in place of its first parameters — or a method
+    /// the reference names.
+    fn lambda(
+        &mut self,
+        descriptor: &str,
+        bootstrap: &crate::class_file::BootstrapMethod,
+    ) -> Result<(), Unsupported> {
+        let captured = self.arguments(descriptor)?;
+        let Some(Constant::MethodHandle {
+            kind,
+            reference_index,
+        }) = bootstrap
+            .arguments
+            .get(1)
+            .and_then(|index| self.class.constant(*index))
+        else {
+            return Err(Unsupported::Malformed);
+        };
+        let kind = *kind;
+        let (owner, name, implementation) = self
+            .class
+            .reference(*reference_index)
+            .ok_or(Unsupported::Malformed)?;
+        let (name, implementation) = (name.to_owned(), implementation.to_owned());
+        let is_synthetic_lambda = owner == self.class.name && name.starts_with("lambda$");
+        let expression = if is_synthetic_lambda {
+            self.lambda_body(&name, &implementation, captured)?
+        } else {
+            method_reference(
+                kind,
+                self.class_name(&owner),
+                self.class.name == owner,
+                name,
+                captured,
+            )?
+        };
+        self.push(expression, Kind::Reference);
+        Ok(())
+    }
+
+    fn lambda_body(
+        &self,
+        name: &str,
+        descriptor: &str,
+        captured: Vec<Expression>,
+    ) -> Result<Expression, Unsupported> {
+        let method = self
+            .class
+            .methods
+            .iter()
+            .find(|method| method.name == name && method.descriptor == descriptor)
+            .ok_or(Unsupported::Malformed)?;
+        let (parameter_names, body) =
+            super::decompile_method(self.class, self.names, method, self.depth + 1);
+        let mut statements = body?.statements;
+        let is_instance = method.access & access::STATIC == 0;
+        let mut captured = captured.into_iter();
+        if is_instance && captured.next() != Some(Expression::This) {
+            return Err(Unsupported::Lambda);
+        }
+        let captured: Vec<Expression> = captured.collect();
+        if captured.len() > parameter_names.len() {
+            return Err(Unsupported::Malformed);
+        }
+        for (parameter, value) in parameter_names.iter().zip(&captured) {
+            if *value == Expression::Local(parameter.clone()) {
+                continue;
+            }
+            // A captured value is evaluated once: only one that reads
+            // the same anywhere can stand in its place.
+            if !is_repeatable(value) {
+                return Err(Unsupported::Lambda);
+            }
+            super::substitute_local(&mut statements, parameter, value);
+        }
+        let parameters = parameter_names[captured.len()..].to_vec();
+        if statements.last() == Some(&Statement::Return(None)) {
+            statements.pop();
+        }
+        let body = match statements.as_slice() {
+            [Statement::Return(Some(value))] | [Statement::Expression(value)] => {
+                super::LambdaBody::Expression(Box::new(value.clone()))
+            }
+            _ => super::LambdaBody::Block(statements),
+        };
+        Ok(Expression::Lambda { parameters, body })
+    }
+
     fn string_constant(&self, index: u16) -> Option<String> {
         match self.class.constant(index)? {
             Constant::String { utf8_index } => self.class.utf8(*utf8_index).map(str::to_owned),
@@ -1061,13 +1272,123 @@ impl<'class> Machine<'class> {
 
     /// The class of a bootstrap method handle's method.
     fn bootstrap_owner(&self, method_handle: u16) -> Option<String> {
-        let Constant::MethodHandle { reference_index } = self.class.constant(method_handle)? else {
+        let Constant::MethodHandle {
+            reference_index, ..
+        } = self.class.constant(method_handle)?
+        else {
             return None;
         };
         self.class
             .reference(*reference_index)
             .map(|(owner, _, _)| owner)
     }
+}
+
+/// A new array whose elements may be put in next: `new T[n]` of a known
+/// length, or one being filled.
+fn is_array_being_initialized(expression: &Expression) -> bool {
+    match expression {
+        Expression::NewArray { length, .. } => {
+            matches!(length.as_ref(), Expression::Literal(Literal::Int(_)))
+        }
+        Expression::ArrayInitializer { .. } => true,
+        _ => false,
+    }
+}
+
+/// What an array of `element` holds until set: `0`, `false`, `null`.
+fn default_value(element: &LibraryType) -> Expression {
+    let literal = match element {
+        LibraryType::Primitive(name) => match name.as_str() {
+            "boolean" => Literal::Boolean(false),
+            "long" => Literal::Long(0),
+            "float" => Literal::Float(0.0),
+            "double" => Literal::Double(0.0),
+            "char" => Literal::Char(0),
+            _ => Literal::Int(0),
+        },
+        _ => Literal::Null,
+    };
+    Expression::Literal(literal)
+}
+
+/// What javac's boxing calls do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Boxing {
+    /// `Integer.valueOf(int)`.
+    Box,
+    /// `x.intValue()` on a box (or a `Number`).
+    Unbox,
+}
+
+/// Whether a call is javac's boxing or unboxing of a primitive.
+fn boxing(owner: &str, name: &str, descriptor: &str) -> Option<Boxing> {
+    const BOXES: [(&str, &str); 8] = [
+        ("java/lang/Integer", "I"),
+        ("java/lang/Long", "J"),
+        ("java/lang/Short", "S"),
+        ("java/lang/Byte", "B"),
+        ("java/lang/Character", "C"),
+        ("java/lang/Boolean", "Z"),
+        ("java/lang/Float", "F"),
+        ("java/lang/Double", "D"),
+    ];
+    let (_, primitive) = BOXES.iter().find(|(class, _)| *class == owner)?;
+    if name == "valueOf" && descriptor == format!("({primitive})L{owner};") {
+        return Some(Boxing::Box);
+    }
+    let unboxes = descriptor == format!("(){primitive}") && name.ends_with("Value");
+    unboxes.then_some(Boxing::Unbox)
+}
+
+/// An operand of arithmetic or a comparison: Java unboxes it by itself.
+fn unboxed_operand(value: Value) -> Value {
+    match value.expression {
+        Expression::Unboxed { value: inner, .. } => Value {
+            expression: *inner,
+            kind: value.kind,
+        },
+        expression => Value {
+            expression,
+            kind: value.kind,
+        },
+    }
+}
+
+/// A method reference by a method handle's `kind`: `REF_invokeStatic`
+/// (6) is `Type::method`; `REF_invokeVirtual` (5) and
+/// `REF_invokeInterface` (9) `Type::method`, or `receiver::method` when
+/// one is captured; `REF_invokeSpecial` (7) `this::method` or
+/// `super::method`; `REF_newInvokeSpecial` (8) `Type::new`.
+fn method_reference(
+    kind: u8,
+    owner: ClassName,
+    owned_here: bool,
+    name: String,
+    captured: Vec<Expression>,
+) -> Result<Expression, Unsupported> {
+    let mut captured = captured.into_iter();
+    let receiver = captured.next();
+    if captured.next().is_some() {
+        return Err(Unsupported::Lambda);
+    }
+    let target = match (kind, receiver) {
+        (6, None) => super::ReferenceTarget::Class(owner),
+        (8, None) => {
+            return Ok(Expression::MethodReference {
+                target: super::ReferenceTarget::Class(owner),
+                name: "new".to_owned(),
+            });
+        }
+        (5 | 9, None) => super::ReferenceTarget::Class(owner),
+        (5 | 9, Some(receiver)) => super::ReferenceTarget::Bound(Box::new(receiver)),
+        (7, Some(Expression::This)) if owned_here => {
+            super::ReferenceTarget::Bound(Box::new(Expression::This))
+        }
+        (7, Some(Expression::This)) => super::ReferenceTarget::Super,
+        _ => return Err(Unsupported::Lambda),
+    };
+    Ok(Expression::MethodReference { target, name })
 }
 
 /// The condition `ifeq`…`ifle`, `ifnull`, `ifnonnull` jump on: a

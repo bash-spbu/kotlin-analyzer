@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use super::graph::{Graph, reverse_postorder};
 use super::machine::Exit;
 use super::{
-    Body, Expression, Label, LoopKind, Owner, Receiver, Statement, SwitchCase, Unsupported, negated,
+    Body, Expression, Label, Literal, LoopKind, Owner, Receiver, Statement, SwitchCase,
+    Unsupported, negated,
 };
 
 pub(super) fn structure(mut graph: Graph) -> Result<Body, Unsupported> {
@@ -30,8 +31,10 @@ pub(super) fn structure(mut graph: Graph) -> Result<Body, Unsupported> {
     for _ in 0..3 {
         tidy(&mut statements);
     }
-    drop_unused_loop_labels(&mut statements);
     declare(&mut statements)?;
+    super::shapes::form_source_shapes(&mut statements);
+    unlabel(&mut statements, &mut Vec::new());
+    drop_unused_loop_labels(&mut statements);
     renumber(&mut statements);
     if statements.iter().any(holds_comparison_result) {
         return Err(Unsupported::StackShape);
@@ -42,14 +45,21 @@ pub(super) fn structure(mut graph: Graph) -> Result<Body, Unsupported> {
 /// A block that only jumps on (javac's `goto` for a `break` or
 /// `continue`) is where it jumps: the jumps to it go there instead.
 fn thread_jumps(graph: &mut Graph) {
+    let mut kept: Vec<usize> = Vec::new();
+    for region in &graph.regions {
+        kept.push(region.entry);
+        kept.extend(region.catches.iter().map(|catch| catch.handler));
+    }
     loop {
-        let empty_jump = (1..graph.nodes.len()).find_map(|node| match graph.nodes[node].as_ref() {
-            Some(found) if found.statements.is_empty() => match found.exit {
-                Exit::Goto(target) if target != node => Some((node, target)),
+        let empty_jump = (1..graph.nodes.len())
+            .filter(|node| !kept.contains(node))
+            .find_map(|node| match graph.nodes[node].as_ref() {
+                Some(found) if found.statements.is_empty() => match found.exit {
+                    Exit::Goto(target) if target != node => Some((node, target)),
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        });
+            });
         let Some((node, target)) = empty_jump else {
             return;
         };
@@ -90,6 +100,8 @@ struct Analysis {
     position: Vec<usize>,
     /// Loop heads: the nodes of each one's loop.
     loops: Vec<(usize, Vec<bool>)>,
+    /// `try` entries: the nodes inside and the handlers.
+    regions: Vec<RegionShape>,
     /// Whether a node is written after a labeled block (`break`s reach
     /// it) rather than where the one jump to it is.
     merge: Vec<bool>,
@@ -98,12 +110,42 @@ struct Analysis {
     followers: Vec<Vec<usize>>,
 }
 
+/// A `try` as nesting sees it.
+#[derive(Clone)]
+struct RegionShape {
+    entry: usize,
+    body: Vec<bool>,
+    /// Each handler with the classes it catches.
+    catches: Vec<(Vec<crate::ClassName>, usize)>,
+}
+
 impl Analysis {
     fn of(graph: &Graph) -> Result<Analysis, Unsupported> {
         let count = graph.nodes.len();
+        let regions: Vec<RegionShape> = graph
+            .regions
+            .iter()
+            .map(|region| RegionShape {
+                entry: region.entry,
+                body: region.body.clone(),
+                catches: region
+                    .catches
+                    .iter()
+                    .map(|catch| (catch.types.clone(), catch.handler))
+                    .collect(),
+            })
+            .collect();
+        let is_handler = |node: usize| {
+            regions
+                .iter()
+                .any(|region| region.catches.iter().any(|(_, handler)| *handler == node))
+        };
         let successors: Vec<Vec<usize>> = (0..count)
             .map(|node| {
                 let mut targets = graph.successors(node);
+                for region in regions.iter().filter(|region| region.entry == node) {
+                    targets.extend(region.catches.iter().map(|(_, handler)| *handler));
+                }
                 targets.dedup();
                 let mut unique = Vec::new();
                 for target in targets {
@@ -173,27 +215,54 @@ impl Analysis {
         loops.sort_by_key(|(_, body)| {
             std::cmp::Reverse(body.iter().filter(|inside| **inside).count())
         });
+        // A `try` is entered at its entry only.
+        for region in &regions {
+            for node in order.iter().copied() {
+                let entered_elsewhere = region.body[node]
+                    && node != region.entry
+                    && predecessors[node]
+                        .iter()
+                        .any(|predecessor| !region.body[*predecessor]);
+                if entered_elsewhere {
+                    return Err(Unsupported::ExceptionHandlers);
+                }
+            }
+        }
+        // Loops and `try`s alike: what is left from inside one is written
+        // after it. Outermost first.
+        let mut containers: Vec<(usize, &Vec<bool>)> = loops
+            .iter()
+            .map(|(head, body)| (*head, body))
+            .chain(regions.iter().map(|region| (region.entry, &region.body)))
+            .collect();
+        containers.sort_by_key(|(_, body)| {
+            std::cmp::Reverse(body.iter().filter(|inside| **inside).count())
+        });
         let mut merge = vec![false; count];
         let mut followers: Vec<Vec<usize>> = vec![Vec::new(); count];
         for node in order.iter().copied().skip(1) {
+            // A handler is written in its `catch`.
+            if is_handler(node) {
+                continue;
+            }
             let forward: Vec<usize> = predecessors[node]
                 .iter()
                 .copied()
                 .filter(|predecessor| position[*predecessor] < position[node])
                 .collect();
-            let leaves_a_loop = forward.iter().any(|predecessor| {
-                loops
+            let leaves_a_container = forward.iter().any(|predecessor| {
+                containers
                     .iter()
                     .any(|(_, body)| body[*predecessor] && !body[node])
             });
-            merge[node] = forward.len() >= 2 || leaves_a_loop;
+            merge[node] = forward.len() >= 2 || leaves_a_container;
             if !merge[node] {
                 continue;
             }
-            // Written after the outermost loop it isn't in but its
+            // Written after the outermost container it isn't in but its
             // dominator is.
             let mut placement = dominators[node];
-            if let Some((head, _)) = loops
+            if let Some((head, _)) = containers
                 .iter()
                 .find(|(head, body)| body[placement] && !body[node] && *head != placement)
             {
@@ -207,9 +276,14 @@ impl Analysis {
         Ok(Analysis {
             position,
             loops,
+            regions,
             merge,
             followers,
         })
+    }
+
+    fn region_of(&self, entry: usize) -> Option<&RegionShape> {
+        self.regions.iter().find(|region| region.entry == entry)
     }
 
     fn loop_of(&self, head: usize) -> Option<&Vec<bool>> {
@@ -284,15 +358,60 @@ impl Nester<'_> {
     /// `node` and all written inside or after it.
     fn tree(&mut self, node: usize) -> Vec<Statement> {
         let followers = self.analysis.followers[node].clone();
-        let Some(body) = self.analysis.loop_of(node).cloned() else {
-            return self.within(node, &followers);
+        let mut containers = Vec::new();
+        if self.analysis.loop_of(node).is_some() {
+            containers.push(Container::Loop);
+        }
+        if self.analysis.region_of(node).is_some() {
+            containers.push(Container::Try);
+        }
+        self.contained(node, &followers, &containers)
+    }
+
+    /// `node`'s code in its loop and `try` (outermost first), each
+    /// followed by the followers outside it.
+    fn contained(
+        &mut self,
+        node: usize,
+        followers: &[usize],
+        containers: &[Container],
+    ) -> Vec<Statement> {
+        let Some((container, rest)) = containers.split_first() else {
+            return self.within(node, followers);
         };
-        let (inside, outside): (Vec<usize>, Vec<usize>) =
-            followers.into_iter().partition(|follower| body[*follower]);
-        let mut code = vec![Statement::Loop {
-            label: Some(loop_label(node)),
-            kind: LoopKind::Forever,
-            body: self.within(node, &inside),
+        let body = match container {
+            Container::Loop => self.analysis.loop_of(node).cloned(),
+            Container::Try => self
+                .analysis
+                .region_of(node)
+                .map(|region| region.body.clone()),
+        }
+        .unwrap_or_default();
+        let (inside, outside): (Vec<usize>, Vec<usize>) = followers
+            .iter()
+            .copied()
+            .partition(|follower| body.get(*follower).copied().unwrap_or(false));
+        let inner = self.contained(node, &inside, rest);
+        let mut code = vec![match container {
+            Container::Loop => Statement::Loop {
+                label: Some(loop_label(node)),
+                kind: LoopKind::Forever,
+                body: inner,
+            },
+            Container::Try => {
+                let catches = self
+                    .analysis
+                    .region_of(node)
+                    .map(|region| region.catches.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(types, handler)| catch_clause(types, self.tree(handler)))
+                    .collect();
+                Statement::Try {
+                    body: inner,
+                    catches,
+                }
+            }
         }];
         for follower in outside {
             code = vec![Statement::Block {
@@ -372,7 +491,7 @@ impl Nester<'_> {
                 let cases = grouped
                     .into_iter()
                     .map(|(target, values)| SwitchCase {
-                        values,
+                        values: values.into_iter().map(Literal::Int).collect(),
                         default: target == default,
                         body: self.branch(node, target),
                     })
@@ -381,6 +500,41 @@ impl Nester<'_> {
             }
         }
     }
+}
+
+/// What a node's code is inside of.
+#[derive(Clone, Copy)]
+enum Container {
+    Loop,
+    Try,
+}
+
+/// A handler's code as a `catch`: its first statement stores the caught
+/// exception — the variable the `catch` declares; one that drops it
+/// catches into `ignored`.
+fn catch_clause(types: Vec<crate::ClassName>, mut body: Vec<Statement>) -> super::CatchClause {
+    let caught = Expression::Local(super::graph::CAUGHT.to_owned());
+    let stored = match body.first() {
+        Some(Statement::Declare {
+            name,
+            value: Some(value),
+            ..
+        }) if *value == caught => Some(name.clone()),
+        _ => None,
+    };
+    let name = match stored {
+        Some(name) => {
+            body.remove(0);
+            name
+        }
+        None => {
+            let renamed = Expression::Local("caught".to_owned());
+            super::substitute_local(&mut body, super::graph::CAUGHT, &renamed);
+            let used = body.iter().any(|statement| mentions(statement, "caught"));
+            if used { "caught" } else { "ignored" }.to_owned()
+        }
+    };
+    super::CatchClause { types, name, body }
 }
 
 /// Removes the jumps and labels a person wouldn't write, and makes loops
@@ -441,6 +595,12 @@ fn breaks_from_nested_loop(statements: &[Statement], label: Label) -> bool {
         Statement::If {
             then, otherwise, ..
         } => breaks_from_nested_loop(then, label) || breaks_from_nested_loop(otherwise, label),
+        Statement::Try { body, catches } => {
+            breaks_from_nested_loop(body, label)
+                || catches
+                    .iter()
+                    .any(|clause| breaks_from_nested_loop(&clause.body, label))
+        }
         Statement::Block { body, .. } => breaks_from_nested_loop(body, label),
         Statement::Switch { cases, .. } => cases
             .iter()
@@ -459,6 +619,13 @@ fn break_count(statements: &[Statement], label: Label) -> usize {
             Statement::If {
                 then, otherwise, ..
             } => break_count(then, label) + break_count(otherwise, label),
+            Statement::Try { body, catches } => {
+                break_count(body, label)
+                    + catches
+                        .iter()
+                        .map(|clause| break_count(&clause.body, label))
+                        .sum::<usize>()
+            }
             Statement::Loop { body, .. } | Statement::Block { body, .. } => {
                 break_count(body, label)
             }
@@ -501,11 +668,16 @@ fn put_in_place_of_break(
 }
 
 /// Each statement's lists of statements.
-fn children(statement: &mut Statement) -> Vec<&mut Vec<Statement>> {
+pub(super) fn children(statement: &mut Statement) -> Vec<&mut Vec<Statement>> {
     match statement {
         Statement::If {
             then, otherwise, ..
         } => vec![then, otherwise],
+        Statement::Try { body, catches } => {
+            let mut lists = vec![body];
+            lists.extend(catches.iter_mut().map(|clause| &mut clause.body));
+            lists
+        }
         Statement::Loop { body, .. } | Statement::Block { body, .. } => vec![body],
         Statement::Switch { cases, .. } => cases.iter_mut().map(|case| &mut case.body).collect(),
         _ => Vec::new(),
@@ -531,6 +703,12 @@ fn strip_tail_jumps(statements: &mut Vec<Statement>, redundant: &[Statement]) {
             } => {
                 strip_tail_jumps(then, inherited);
                 strip_tail_jumps(otherwise, inherited);
+            }
+            Statement::Try { body, catches } => {
+                strip_tail_jumps(body, inherited);
+                for clause in catches {
+                    strip_tail_jumps(&mut clause.body, inherited);
+                }
             }
             Statement::Block { label, body } => {
                 let mut own = vec![Statement::Break(Some(*label))];
@@ -612,6 +790,12 @@ fn replace_breaks(statements: &mut [Statement], label: Label, replacement: State
                 replace_breaks(then, label, replacement.clone());
                 replace_breaks(otherwise, label, replacement.clone());
             }
+            Statement::Try { body, catches } => {
+                replace_breaks(body, label, replacement.clone());
+                for clause in catches {
+                    replace_breaks(&mut clause.body, label, replacement.clone());
+                }
+            }
             Statement::Block { body, .. } => replace_breaks(body, label, replacement.clone()),
             Statement::Loop { body, .. } if names_its_target => {
                 replace_breaks(body, label, replacement.clone())
@@ -628,13 +812,13 @@ fn replace_breaks(statements: &mut [Statement], label: Label, replacement: State
 
 /// What a `break`/`continue` without a label means where it is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Breakable {
+pub(super) enum Breakable {
     Loop(Option<Label>),
     Switch,
 }
 
 /// `break label`/`continue label` of the innermost loop: without it.
-fn unlabel(statements: &mut [Statement], enclosing: &mut Vec<Breakable>) {
+pub(super) fn unlabel(statements: &mut [Statement], enclosing: &mut Vec<Breakable>) {
     for statement in statements.iter_mut() {
         match statement {
             Statement::Break(Some(label)) => {
@@ -669,6 +853,12 @@ fn unlabel(statements: &mut [Statement], enclosing: &mut Vec<Breakable>) {
                 unlabel(then, enclosing);
                 unlabel(otherwise, enclosing);
             }
+            Statement::Try { body, catches } => {
+                unlabel(body, enclosing);
+                for clause in catches {
+                    unlabel(&mut clause.body, enclosing);
+                }
+            }
             Statement::Block { body, .. } => unlabel(body, enclosing),
             _ => {}
         }
@@ -682,6 +872,8 @@ fn references(statements: &[Statement], label: Label) -> bool {
         Statement::If {
             then, otherwise, ..
         } => references(then, label) || references(otherwise, label),
+        Statement::Try { body, catches } => try_statements(body, catches)
+            .any(|inner| references(std::slice::from_ref(inner), label)),
         Statement::Loop { body, .. } | Statement::Block { body, .. } => references(body, label),
         Statement::Switch { cases, .. } => cases.iter().any(|case| references(&case.body, label)),
         _ => false,
@@ -731,18 +923,39 @@ fn splice_unreferenced(statements: &mut Vec<Statement>) {
 
 /// Whether `statements`, outside nested loops, continue the loop they
 /// are the body of.
-fn continues(statements: &[Statement], label: Option<Label>) -> bool {
+pub(super) fn continues(statements: &[Statement], label: Option<Label>) -> bool {
     statements.iter().any(|statement| match statement {
         Statement::Continue(None) => true,
         Statement::Continue(Some(target)) => Some(*target) == label,
         Statement::If {
             then, otherwise, ..
         } => continues(then, label) || continues(otherwise, label),
+        Statement::Try { body, catches } => {
+            continues(body, label) || catches.iter().any(|clause| continues(&clause.body, label))
+        }
         Statement::Block { body, .. } => continues(body, label),
         Statement::Switch { cases, .. } => cases.iter().any(|case| continues(&case.body, label)),
-        Statement::Loop { body, .. } => {
-            label.is_some() && references(body, label.unwrap_or(Label(0)))
+        // Inside a nested loop only `continue label` continues this one.
+        Statement::Loop { body, .. } => label.is_some_and(|label| continues_labeled(body, label)),
+        _ => false,
+    })
+}
+
+/// Whether `statements` hold `continue label`, however nested.
+fn continues_labeled(statements: &[Statement], label: Label) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Continue(Some(target)) => *target == label,
+        Statement::If {
+            then, otherwise, ..
+        } => continues_labeled(then, label) || continues_labeled(otherwise, label),
+        Statement::Try { body, catches } => try_statements(body, catches)
+            .any(|inner| continues_labeled(std::slice::from_ref(inner), label)),
+        Statement::Loop { body, .. } | Statement::Block { body, .. } => {
+            continues_labeled(body, label)
         }
+        Statement::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| continues_labeled(&case.body, label)),
         _ => false,
     })
 }
@@ -769,14 +982,14 @@ fn form_loops(statements: &mut [Statement]) {
             otherwise,
         }) = body.first()
         {
-            let (condition, rest) = if leaves(otherwise) {
-                (condition.clone(), then.clone())
+            let stays = if leaves(otherwise) {
+                Some((condition.clone(), then.clone()))
             } else if leaves(then) {
-                (negated(condition.clone()), otherwise.clone())
+                Some((negated(condition.clone()), otherwise.clone()))
             } else {
-                (Expression::This, Vec::new())
+                None
             };
-            if condition != Expression::This {
+            if let Some((condition, rest)) = stays {
                 let mut new_body = rest;
                 new_body.extend(body.drain(1..));
                 *body = new_body;
@@ -819,6 +1032,9 @@ fn ends_in_jump(statements: &[Statement]) -> bool {
         Some(Statement::If {
             then, otherwise, ..
         }) => ends_in_jump(then) && ends_in_jump(otherwise),
+        Some(Statement::Try { body, catches }) => {
+            ends_in_jump(body) && catches.iter().all(|clause| ends_in_jump(&clause.body))
+        }
         _ => false,
     }
 }
@@ -928,6 +1144,9 @@ fn declared_names(statement: &Statement, names: &mut Vec<String>) {
                 .iter()
                 .for_each(|inner| declared_names(inner, names));
         }
+        Statement::Try { body, catches } => {
+            try_statements(body, catches).for_each(|inner| declared_names(inner, names))
+        }
         Statement::Loop { body, .. } | Statement::Block { body, .. } => {
             body.iter().for_each(|inner| declared_names(inner, names))
         }
@@ -948,6 +1167,9 @@ fn declarations_of(statement: &Statement, name: &str) -> usize {
         } => then
             .iter()
             .chain(otherwise)
+            .map(|inner| declarations_of(inner, name))
+            .sum(),
+        Statement::Try { body, catches } => try_statements(body, catches)
             .map(|inner| declarations_of(inner, name))
             .sum(),
         Statement::Loop { body, .. } | Statement::Block { body, .. } => {
@@ -975,6 +1197,9 @@ fn declared_type(statement: &Statement, name: &str) -> Option<crate::LibraryType
             .iter()
             .chain(otherwise)
             .find_map(|inner| declared_type(inner, name)),
+        Statement::Try { body, catches } => {
+            try_statements(body, catches).find_map(|inner| declared_type(inner, name))
+        }
         Statement::Loop { body, .. } | Statement::Block { body, .. } => {
             body.iter().find_map(|inner| declared_type(inner, name))
         }
@@ -1011,7 +1236,7 @@ fn undeclare(statements: &mut Vec<Statement>, name: &str) {
 }
 
 /// Whether `statement` reads, writes or declares the variable `name`.
-fn mentions(statement: &Statement, name: &str) -> bool {
+pub(super) fn mentions(statement: &Statement, name: &str) -> bool {
     let in_expression = |expression: &Expression| expression_mentions(expression, name);
     match statement {
         Statement::Expression(expression)
@@ -1039,13 +1264,32 @@ fn mentions(statement: &Statement, name: &str) -> bool {
                     .any(|inner| mentions(inner, name))
         }
         Statement::Loop { kind, body, .. } => {
-            let in_condition = match kind {
+            let in_header = match kind {
                 LoopKind::Forever => false,
                 LoopKind::While(condition) | LoopKind::DoWhile(condition) => {
                     in_expression(condition)
                 }
+                LoopKind::For {
+                    initializer,
+                    condition,
+                    update,
+                } => {
+                    initializer
+                        .as_ref()
+                        .is_some_and(|initializer| mentions(initializer, name))
+                        || in_expression(condition)
+                        || mentions(update, name)
+                }
+                LoopKind::ForEach {
+                    name: variable,
+                    iterable,
+                    ..
+                } => variable == name || in_expression(iterable),
             };
-            in_condition || body.iter().any(|inner| mentions(inner, name))
+            in_header || body.iter().any(|inner| mentions(inner, name))
+        }
+        Statement::Try { body, catches } => {
+            try_statements(body, catches).any(|inner| mentions(inner, name))
         }
         Statement::Block { body, .. } => body.iter().any(|inner| mentions(inner, name)),
         Statement::Switch { value, cases } => {
@@ -1065,7 +1309,9 @@ fn operands(expression: &Expression) -> Vec<&Expression> {
         Expression::This
         | Expression::Local(_)
         | Expression::Literal(_)
-        | Expression::ClassLiteral(_) => Vec::new(),
+        | Expression::ClassLiteral(_)
+        | Expression::PostIncrement { .. } => Vec::new(),
+        Expression::ArrayInitializer { values, .. } => values.iter().collect(),
         Expression::Field { owner, .. } => match owner {
             Owner::Instance(object) => vec![object.as_ref()],
             Owner::Static(_) => Vec::new(),
@@ -1089,11 +1335,22 @@ fn operands(expression: &Expression) -> Vec<&Expression> {
         | Expression::Negate(operand)
         | Expression::Not(operand)
         | Expression::Cast { operand, .. }
-        | Expression::InstanceOf { operand, .. } => vec![operand.as_ref()],
+        | Expression::InstanceOf { operand, .. }
+        | Expression::Boxed { value: operand, .. }
+        | Expression::Unboxed { value: operand, .. } => vec![operand.as_ref()],
         Expression::Binary { left, right, .. }
         | Expression::Logical { left, right, .. }
         | Expression::Compare { left, right, .. }
         | Expression::CompareResult { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+        Expression::Lambda { body, .. } => match body {
+            super::LambdaBody::Expression(value) => vec![value.as_ref()],
+            // Its statements: `expression_mentions` reads them.
+            super::LambdaBody::Block(_) => Vec::new(),
+        },
+        Expression::MethodReference { target, .. } => match target {
+            super::ReferenceTarget::Bound(receiver) => vec![receiver.as_ref()],
+            _ => Vec::new(),
+        },
         Expression::Conditional {
             condition,
             then,
@@ -1102,8 +1359,17 @@ fn operands(expression: &Expression) -> Vec<&Expression> {
     }
 }
 
-fn expression_mentions(expression: &Expression, name: &str) -> bool {
-    matches!(expression, Expression::Local(local) if local == name)
+pub(super) fn expression_mentions(expression: &Expression, name: &str) -> bool {
+    if matches!(expression, Expression::PostIncrement { name: variable, .. } if variable == name) {
+        return true;
+    }
+    let in_block_lambda = matches!(
+        expression,
+        Expression::Lambda { body: super::LambdaBody::Block(statements), .. }
+            if statements.iter().any(|statement| mentions(statement, name))
+    );
+    in_block_lambda
+        || matches!(expression, Expression::Local(local) if local == name)
         || operands(expression)
             .into_iter()
             .any(|operand| expression_mentions(operand, name))
@@ -1135,13 +1401,28 @@ fn holds_comparison_result(statement: &Statement) -> bool {
             otherwise,
         } => in_expression(condition) || then.iter().chain(otherwise).any(holds_comparison_result),
         Statement::Loop { kind, body, .. } => {
-            let in_condition = match kind {
+            let in_header = match kind {
                 LoopKind::Forever => false,
                 LoopKind::While(condition) | LoopKind::DoWhile(condition) => {
                     in_expression(condition)
                 }
+                LoopKind::For {
+                    initializer,
+                    condition,
+                    update,
+                } => {
+                    initializer
+                        .as_ref()
+                        .is_some_and(|initializer| holds_comparison_result(initializer))
+                        || in_expression(condition)
+                        || holds_comparison_result(update)
+                }
+                LoopKind::ForEach { iterable, .. } => in_expression(iterable),
             };
-            in_condition || body.iter().any(holds_comparison_result)
+            in_header || body.iter().any(holds_comparison_result)
+        }
+        Statement::Try { body, catches } => {
+            try_statements(body, catches).any(holds_comparison_result)
         }
         Statement::Block { body, .. } => body.iter().any(holds_comparison_result),
         Statement::Switch { value, cases } => {
@@ -1189,4 +1470,13 @@ fn renumber_in(statements: &mut [Statement], numbers: &mut Vec<Label>) {
             renumber_in(child, numbers);
         }
     }
+}
+
+/// A `try`'s statements and its `catch`es'.
+fn try_statements<'statements>(
+    body: &'statements [Statement],
+    catches: &'statements [super::CatchClause],
+) -> impl Iterator<Item = &'statements Statement> {
+    body.iter()
+        .chain(catches.iter().flat_map(|clause| clause.body.iter()))
 }

@@ -81,16 +81,44 @@ that `break`, and forms `while (c)`, `do … while (c)`, `else if` and
 more than one branch is declared before the first, its stores
 assignments. Labels are `label1`, `label2`….
 
-A body is decompiled whole or not at all: anything else — `try`/`catch`,
-`synchronized` blocks, lambdas, values kept on the stack across
-statements (`i++` inside an expression, array initializers), jumps no loop
-nesting describes — leaves it compiled code. Not yet: `for` (a `while`),
-`for`-each (its iterator or index), `switch` on strings (the two
-switches javac makes). About nine in ten of a Java library's bodies read
-(slf4j-api 95%, jackson-databind 92%, guava 90%, commons-lang3 87%).
-Kotlin classes keep their bodies out. Tests compile two classes —
-straight-line code, and branches, loops, labeled breaks, `switch`
-(fall-through, strings), NaN — back from their decompiled text and run a
+Then javac's shapes are read back as source: `int i = 0; while (i < n) {
+…; i++; }` is a `for` (a `continue` going to the update); a `for` over a
+hidden array copy and index, or a hidden iterator's `hasNext()`, its
+element taken first, is a `for`-each; a `switch` on a hidden copy's
+`hashCode()` choosing an index by `equals`, then one on the index, is a
+`switch` on strings. Hidden variables are javac's: no name in the table
+(`varN`), used nowhere else.
+
+Lambdas: `invokedynamic` through `LambdaMetafactory` to a synthetic
+`lambda$…` method of the class is that method decompiled as the lambda's
+body (an expression when it is one `return` or call), the values it
+captures in place of its first parameters; to any other method, a method
+reference (`Type::method`, `receiver::method`, `this::method`,
+`super::method`, `Type::new`). javac's boxing (`Integer.valueOf(x)`) and
+unboxing (`x.intValue()`) are left out where Java does them by itself — a
+return, an assignment, arithmetic, a comparison — and kept in calls'
+arguments, where they choose the overload. `new T[] { a, b }` is read from
+its element stores (gaps javac leaves the default); `x++` inside an
+expression from the load before `iinc`; `x = x + y` is written `x += y`.
+
+`try`/`catch`: each range of the exception table is a `try` whose code is
+the blocks inside it, entered at its first; its handlers are `catch`es
+(one handler's classes `A | B`), the first store of the caught exception
+the `catch`'s variable. Like a loop's, code reached leaving it is written
+after it. Ranges nest or are apart.
+
+A body is decompiled whole or not at all: anything else — `finally`,
+`synchronized` blocks and try-with-resources (handlers catching anything),
+two `try`s starting together, values kept on the stack across statements
+some other way (`dup_x1`: `this.count++` inside an expression), jumps no
+loop nesting describes — leaves it compiled code. Not yet: `switch` on an
+enum (javac's `$SwitchMap`), assertions read as such. Nearly all of a Java
+library's bodies read (slf4j-api 99.6%, jackson-databind 98%, guava 96%,
+commons-lang3 97%). Kotlin classes keep their bodies out. Tests compile
+four classes — straight-line code; branches, loops, labeled breaks,
+`switch` (fall-through, strings), NaN, `for`-each, array initializers;
+lambdas and method references; `try`/`catch` (several, multi-catch, in a
+loop, nested, rethrowing) — back from their decompiled text and run a
 program against them, which must print the same.
 
 The file starts with a header: where it comes from (the JAR), why (no

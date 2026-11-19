@@ -1045,12 +1045,11 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         "{}",
         level.text
     );
-    // A body that runs straight through, decompiled, its parameter named
-    // as it names it; one that branches, left compiled.
+    // Bodies decompiled, their parameters named as they name them.
     let factory = source_of("org.slf4j", "LoggerFactory");
     for expected in [
         "    public static Logger getLogger(String name) {\n        ILoggerFactory iLoggerFactory = LoggerFactory.getILoggerFactory();\n        return iLoggerFactory.getLogger(name);\n    }\n",
-        "    public static Logger getLogger(Class<?> p0) { /* compiled code */ }\n",
+        "    public static Logger getLogger(Class<?> clazz) {\n        Logger logger = LoggerFactory.getLogger(clazz.getName());\n",
     ] {
         assert!(
             factory.text.contains(expected),
@@ -1295,12 +1294,182 @@ public class Flow {
         boolean either = first | second;
         return both ^ either;
     }
+
+    public static int[] squares() {
+        return new int[] { 1, 4, 9 };
+    }
+
+    public static int[] sparse() {
+        return new int[] { 0, 5, 0 };
+    }
+
+    public static String[] names() {
+        return new String[] { "a", null, "c" };
+    }
+
+    public static char[] letters() {
+        return new char[] { 'x', 'y' };
+    }
+
+    public static boolean[] flags() {
+        return new boolean[] { true, false, true };
+    }
+
+    public static int takeNext(int[] values, int start) {
+        int index = start;
+        int first = values[index++];
+        return first * 10 + index;
+    }
+}
+"#;
+
+/// A Java class of lambdas and method references.
+const FUNCTIONAL_JAVA: &str = r#"package demo;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+public class Functions {
+    public int base;
+
+    public Functions(int base) {
+        this.base = base;
+    }
+
+    public static Function<Integer, Integer> adder(int amount) {
+        return value -> value + amount;
+    }
+
+    public Supplier<Integer> doubledBase() {
+        return () -> base * 2;
+    }
+
+    public static List<String> upper(List<String> words) {
+        List<String> result = new ArrayList<>();
+        words.forEach(word -> result.add(word.toUpperCase()));
+        return result;
+    }
+
+    public static Function<String, Integer> length() {
+        return String::length;
+    }
+
+    public static Supplier<List<String>> listMaker() {
+        return ArrayList::new;
+    }
+
+    public static BiFunction<Integer, Integer, Integer> larger() {
+        return Math::max;
+    }
+
+    public Function<Integer, Integer> plusBase() {
+        return this::plus;
+    }
+
+    public int plus(int value) {
+        return value + base;
+    }
+
+    public static Predicate<String> startsWith(String prefix) {
+        return text -> {
+            if (text == null) {
+                return false;
+            }
+            return text.startsWith(prefix);
+        };
+    }
+
+    public static Function<Integer, Function<Integer, Integer>> curried() {
+        return first -> second -> first * second;
+    }
+
+    public static Runnable counter(int[] box) {
+        return () -> {
+            box[0] = box[0] + 1;
+        };
+    }
+}
+"#;
+
+/// A Java class that catches.
+const CATCHING_JAVA: &str = r#"package demo;
+
+public class Catching {
+    public static int parse(String text) {
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException failure) {
+            return -1;
+        }
+    }
+
+    public static String classify(Object value) {
+        String result;
+        try {
+            String text = (String) value;
+            result = "text " + text.length();
+        } catch (ClassCastException wrongType) {
+            result = "not text";
+        } catch (NullPointerException missing) {
+            result = "missing";
+        }
+        return result;
+    }
+
+    public static int either(int[] values, int index) {
+        try {
+            return values[index] / values[0];
+        } catch (ArithmeticException | ArrayIndexOutOfBoundsException failure) {
+            return failure instanceof ArithmeticException ? -2 : -3;
+        }
+    }
+
+    public static int sumParsed(String[] texts) {
+        int sum = 0;
+        for (String text : texts) {
+            try {
+                sum += Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                sum += 100;
+            }
+        }
+        return sum;
+    }
+
+    public static String rethrow(String text) {
+        try {
+            return text.trim();
+        } catch (NullPointerException failure) {
+            throw new IllegalArgumentException("no text", failure);
+        }
+    }
+
+    public static int nested(String first, String second) {
+        int result = 0;
+        try {
+            result = Integer.parseInt(first);
+            try {
+                result += Integer.parseInt(second);
+            } catch (NumberFormatException inner) {
+                result += 1000;
+            }
+        } catch (NumberFormatException outer) {
+            result = -1;
+        }
+        return result;
+    }
 }
 "#;
 
 /// Calls every method of `Account`, printing what each gives.
 const STRAIGHT_JAVA_DRIVER: &str = r#"import demo.Account;
 import demo.Flow;
+import demo.Functions;
+import demo.Catching;
 
 public class Main {
     public static void main(String[] arguments) {
@@ -1328,6 +1497,28 @@ public class Main {
         System.out.println(Flow.firstPair(new int[][] { { 1, 2 }, { 3, 4 } }, 4) + "|" + Flow.firstPair(new int[][] { { 1 } }, 9));
         System.out.println(Flow.total(new int[] { 1, 2, 3 }) + "|" + Flow.longest(java.util.Arrays.asList("a", "abc", "ab")));
         System.out.println(Flow.flag(true, true) + "|" + Flow.flag(true, false) + "|" + Flow.flag(false, false) + "|" + Flow.fallThrough(100));
+        System.out.println(java.util.Arrays.toString(Flow.squares()) + java.util.Arrays.toString(Flow.sparse())
+            + java.util.Arrays.toString(Flow.names()) + java.util.Arrays.toString(Flow.letters())
+            + java.util.Arrays.toString(Flow.flags()) + "|" + Flow.takeNext(new int[] { 3, 4 }, 1));
+        Functions functions = new Functions(5);
+        System.out.println(Functions.adder(3).apply(4) + "|" + functions.doubledBase().get() + "|"
+            + Functions.upper(java.util.Arrays.asList("a", "b")) + "|" + Functions.length().apply("four") + "|"
+            + Functions.listMaker().get().size() + "|" + Functions.larger().apply(3, 9) + "|"
+            + functions.plusBase().apply(1) + "|" + Functions.startsWith("ab").test("abc")
+            + Functions.startsWith("ab").test(null) + "|" + Functions.curried().apply(6).apply(7));
+        System.out.println(Catching.parse("12") + "|" + Catching.parse("x") + "|" + Catching.classify("abc") + "|"
+            + Catching.classify(5) + "|" + Catching.classify(null) + "|" + Catching.either(new int[] { 2, 8 }, 1) + "|"
+            + Catching.either(new int[] { 0, 8 }, 1) + "|" + Catching.either(new int[] { 2 }, 5) + "|"
+            + Catching.sumParsed(new String[] { "1", "x", "2" }) + "|" + Catching.rethrow(" a ") + "|"
+            + Catching.nested("1", "2") + "|" + Catching.nested("1", "y") + "|" + Catching.nested("z", "2"));
+        try {
+            Catching.rethrow(null);
+        } catch (IllegalArgumentException failure) {
+            System.out.println("rethrown " + failure.getMessage() + " " + failure.getCause().getClass().getSimpleName());
+        }
+        int[] box = { 1 };
+        Functions.counter(box).run();
+        System.out.println(box[0]);
         try {
             account.fail("boom");
         } catch (IllegalStateException failure) {
@@ -1364,6 +1555,8 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
     }
     std::fs::write(root.join("src/demo/Account.java"), STRAIGHT_JAVA).unwrap();
     std::fs::write(root.join("src/demo/Flow.java"), BRANCHING_JAVA).unwrap();
+    std::fs::write(root.join("src/demo/Functions.java"), FUNCTIONAL_JAVA).unwrap();
+    std::fs::write(root.join("src/demo/Catching.java"), CATCHING_JAVA).unwrap();
     std::fs::write(root.join("Main.java"), STRAIGHT_JAVA_DRIVER).unwrap();
     let javac = |arguments: &[&std::ffi::OsStr]| {
         run_tool(std::process::Command::new("javac").args(arguments))
@@ -1375,6 +1568,8 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         &path("classes"),
         &path("src/demo/Account.java"),
         &path("src/demo/Flow.java"),
+        &path("src/demo/Functions.java"),
+        &path("src/demo/Catching.java"),
     ]);
     if compiled.is_none() {
         eprintln!("skipped: no javac");
@@ -1424,6 +1619,28 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         flow.text
     );
     std::fs::write(root.join("decompiled/demo/Flow.java"), flow.text.as_bytes()).unwrap();
+    let functions = render("Functions");
+    assert!(
+        !functions.text.contains("compiled code"),
+        "every body decompiled:\n{}",
+        functions.text
+    );
+    std::fs::write(
+        root.join("decompiled/demo/Functions.java"),
+        functions.text.as_bytes(),
+    )
+    .unwrap();
+    let catching = render("Catching");
+    assert!(
+        !catching.text.contains("compiled code"),
+        "every body decompiled:\n{}",
+        catching.text
+    );
+    std::fs::write(
+        root.join("decompiled/demo/Catching.java"),
+        catching.text.as_bytes(),
+    )
+    .unwrap();
     assert!(
         !rendered.text.contains("compiled code"),
         "every body decompiled:\n{}",
@@ -1464,6 +1681,8 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         &path("decompiled-classes"),
         &path("decompiled/demo/Account.java"),
         &path("decompiled/demo/Flow.java"),
+        &path("decompiled/demo/Functions.java"),
+        &path("decompiled/demo/Catching.java"),
     ]);
     let run = |classes: &str| {
         let classpath = std::env::join_paths([root.join(classes), root.join("main")]).unwrap();

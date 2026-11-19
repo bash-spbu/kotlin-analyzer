@@ -13,6 +13,7 @@
 
 mod graph;
 mod machine;
+mod shapes;
 mod structure;
 
 use crate::class_file::{Bodies, ClassFile, Code, access};
@@ -118,6 +119,18 @@ pub enum Statement {
         value: Expression,
         cases: Vec<SwitchCase>,
     },
+    Try {
+        body: Vec<Statement>,
+        catches: Vec<CatchClause>,
+    },
+}
+
+/// `catch (A | B name) { … }`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CatchClause {
+    pub types: Vec<ClassName>,
+    pub name: String,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -126,12 +139,24 @@ pub enum LoopKind {
     Forever,
     While(Expression),
     DoWhile(Expression),
+    /// `for (initializer; condition; update)`.
+    For {
+        initializer: Option<Box<Statement>>,
+        condition: Expression,
+        update: Box<Statement>,
+    },
+    /// `for (Type name : iterable)`: over an array or an `Iterable`.
+    ForEach {
+        type_ref: Option<LibraryType>,
+        name: String,
+        iterable: Expression,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SwitchCase {
-    /// The `case` values.
-    pub values: Vec<i32>,
+    /// The `case` values: numbers, or a `switch` on strings' strings.
+    pub values: Vec<Literal>,
     /// Whether it is (also) `default`.
     pub default: bool,
     pub body: Vec<Statement>,
@@ -202,6 +227,41 @@ pub enum Expression {
         then: Box<Expression>,
         otherwise: Box<Expression>,
     },
+    /// `new T[] { a, b }`: `length` elements, `values` the first ones (the
+    /// rest the default).
+    ArrayInitializer {
+        element: LibraryType,
+        length: usize,
+        values: Vec<Expression>,
+    },
+    /// `name++` (`by` 1) or `name--` (`by` -1) as a value: the variable's
+    /// value before.
+    PostIncrement {
+        name: String,
+        by: i32,
+    },
+    /// `Integer.valueOf(x)` as javac boxes a primitive: where Java boxes
+    /// by itself (a return, an assignment), just `x`.
+    Boxed {
+        class: ClassName,
+        value: Box<Expression>,
+    },
+    /// `x.intValue()` as javac unboxes: where Java unboxes by itself, `x`.
+    Unboxed {
+        method: String,
+        value: Box<Expression>,
+    },
+    /// `(a, b) -> a + b`, or with a block body.
+    Lambda {
+        parameters: Vec<String>,
+        body: LambdaBody,
+    },
+    /// `String::length`, `this::helper`, `Order::new`.
+    MethodReference {
+        target: ReferenceTarget,
+        /// `new` for a constructor.
+        name: String,
+    },
     /// What `lcmp`, `fcmpl`… leave for the branch after them: never in a
     /// finished body.
     CompareResult {
@@ -209,6 +269,23 @@ pub enum Expression {
         right: Box<Expression>,
         nan: NanOrder,
     },
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum LambdaBody {
+    Expression(Box<Expression>),
+    Block(Vec<Statement>),
+}
+
+/// What a method reference is on.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ReferenceTarget {
+    /// `Type::method`: static, or the first argument is the receiver.
+    Class(ClassName),
+    /// `expression::method`: bound to that receiver.
+    Bound(Box<Expression>),
+    /// `super::method`.
+    Super,
 }
 
 /// Whose field it is.
@@ -309,20 +386,7 @@ pub fn decompile_class(bytes: &[u8]) -> Option<DecompiledClass> {
         .methods
         .iter()
         .map(|method| {
-            let is_static = method.access & access::STATIC != 0;
-            let parameters = parameter_descriptors(&method.descriptor).unwrap_or_default();
-            let code = method.code.as_ref();
-            let parameter_names =
-                parameter_names(code, &method.parameter_names, &parameters, is_static);
-            let body = match code {
-                None => Err(Unsupported::NoCode),
-                Some(code) if code.exception_handlers > 0 => Err(Unsupported::ExceptionHandlers),
-                Some(code) => {
-                    let machine =
-                        machine::Machine::new(&class, &names, method, code, &parameter_names);
-                    graph::build(machine).and_then(structure::structure)
-                }
-            };
+            let (parameter_names, body) = decompile_method(&class, &names, method, 0);
             DecompiledMethod {
                 name: method.name.clone(),
                 descriptor: method.descriptor.clone(),
@@ -332,6 +396,41 @@ pub fn decompile_class(bytes: &[u8]) -> Option<DecompiledClass> {
         })
         .collect();
     Some(DecompiledClass { methods })
+}
+
+/// How deep lambdas nest in lambdas before a body isn't read.
+const LAMBDA_DEPTH_LIMIT: usize = 8;
+
+/// A method's parameters' names and its body; `depth` lambdas deep.
+fn decompile_method(
+    class: &ClassFile,
+    names: &NestedNames,
+    method: &crate::class_file::Member,
+    depth: usize,
+) -> (Vec<String>, Result<Body, Unsupported>) {
+    let is_static = method.access & access::STATIC != 0;
+    let parameters = parameter_descriptors(&method.descriptor).unwrap_or_default();
+    let code = method.code.as_ref();
+    let parameter_names = parameter_names(code, &method.parameter_names, &parameters, is_static);
+    let body = match code {
+        None => Err(Unsupported::NoCode),
+        Some(_) if depth > LAMBDA_DEPTH_LIMIT => Err(Unsupported::Lambda),
+        // `finally`, `synchronized` and try-with-resources catch anything.
+        Some(code)
+            if code
+                .exception_handlers
+                .iter()
+                .any(|handler| handler.catch_type.is_none()) =>
+        {
+            Err(Unsupported::ExceptionHandlers)
+        }
+        Some(code) => {
+            let machine =
+                machine::Machine::new(class, names, method, code, &parameter_names, depth);
+            graph::build(machine).and_then(structure::structure)
+        }
+    };
+    (parameter_names, body)
 }
 
 /// The parameters' descriptors: `(ILjava/lang/String;[J)V` →
@@ -471,5 +570,180 @@ pub(crate) fn coerced(expression: Expression, descriptor: &str) -> Expression {
             }
         }
         (expression, _) => expression,
+    }
+}
+
+/// `name` replaced by `value` wherever `statements` read it.
+fn substitute_local(statements: &mut [Statement], name: &str, value: &Expression) {
+    for statement in statements.iter_mut() {
+        statement_expressions_mut(statement, &mut |expression| {
+            if *expression == Expression::Local(name.to_owned()) {
+                *expression = value.clone();
+            }
+        });
+    }
+}
+
+/// `visit` on every expression in `statement`, inner ones first.
+fn statement_expressions_mut(statement: &mut Statement, visit: &mut dyn FnMut(&mut Expression)) {
+    let mut each = |expression: &mut Expression| expression_mut(expression, visit);
+    match statement {
+        Statement::Expression(expression)
+        | Statement::Return(Some(expression))
+        | Statement::Throw(expression) => each(expression),
+        Statement::Declare { value, .. } => {
+            if let Some(value) = value {
+                each(value);
+            }
+        }
+        Statement::Assign { target, value } => {
+            each(target);
+            each(value);
+        }
+        Statement::SuperConstructor(arguments) | Statement::ThisConstructor(arguments) => {
+            arguments.iter_mut().for_each(each);
+        }
+        Statement::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            each(condition);
+            for inner in then.iter_mut().chain(otherwise.iter_mut()) {
+                statement_expressions_mut(inner, visit);
+            }
+        }
+        Statement::Loop { kind, body, .. } => {
+            match kind {
+                LoopKind::Forever => {}
+                LoopKind::While(condition) | LoopKind::DoWhile(condition) => each(condition),
+                LoopKind::For {
+                    initializer,
+                    condition,
+                    update,
+                } => {
+                    each(condition);
+                    if let Some(initializer) = initializer {
+                        statement_expressions_mut(initializer, visit);
+                    }
+                    statement_expressions_mut(update, visit);
+                }
+                LoopKind::ForEach { iterable, .. } => each(iterable),
+            }
+            for inner in body.iter_mut() {
+                statement_expressions_mut(inner, visit);
+            }
+        }
+        Statement::Block { body, .. } => {
+            for inner in body.iter_mut() {
+                statement_expressions_mut(inner, visit);
+            }
+        }
+        Statement::Switch { value, cases } => {
+            each(value);
+            for inner in cases.iter_mut().flat_map(|case| case.body.iter_mut()) {
+                statement_expressions_mut(inner, visit);
+            }
+        }
+        Statement::Try { body, catches } => {
+            let all = body
+                .iter_mut()
+                .chain(catches.iter_mut().flat_map(|clause| clause.body.iter_mut()));
+            for inner in all {
+                statement_expressions_mut(inner, visit);
+            }
+        }
+        Statement::Increment { .. }
+        | Statement::Return(None)
+        | Statement::Break(_)
+        | Statement::Continue(_) => {}
+    }
+}
+
+/// `visit` on `expression` and every expression inside it, inner first.
+fn expression_mut(expression: &mut Expression, visit: &mut dyn FnMut(&mut Expression)) {
+    match expression {
+        Expression::This
+        | Expression::Local(_)
+        | Expression::Literal(_)
+        | Expression::ClassLiteral(_)
+        | Expression::PostIncrement { .. } => {}
+        Expression::ArrayInitializer { values, .. } => values
+            .iter_mut()
+            .for_each(|value| expression_mut(value, visit)),
+        Expression::Field { owner, .. } => {
+            if let Owner::Instance(object) = owner {
+                expression_mut(object, visit);
+            }
+        }
+        Expression::Call {
+            receiver,
+            arguments,
+            ..
+        } => {
+            if let Receiver::Instance(object) = receiver {
+                expression_mut(object, visit);
+            }
+            arguments
+                .iter_mut()
+                .for_each(|argument| expression_mut(argument, visit));
+        }
+        Expression::New { arguments, .. } => arguments
+            .iter_mut()
+            .for_each(|argument| expression_mut(argument, visit)),
+        Expression::Concatenation(pieces) => pieces
+            .iter_mut()
+            .for_each(|piece| expression_mut(piece, visit)),
+        Expression::NewArray { length, .. } => expression_mut(length, visit),
+        Expression::ArrayElement { array, index } => {
+            expression_mut(array, visit);
+            expression_mut(index, visit);
+        }
+        Expression::ArrayLength(operand)
+        | Expression::Negate(operand)
+        | Expression::Not(operand)
+        | Expression::Cast { operand, .. }
+        | Expression::InstanceOf { operand, .. }
+        | Expression::Boxed { value: operand, .. }
+        | Expression::Unboxed { value: operand, .. } => expression_mut(operand, visit),
+        Expression::Binary { left, right, .. }
+        | Expression::Logical { left, right, .. }
+        | Expression::Compare { left, right, .. }
+        | Expression::CompareResult { left, right, .. } => {
+            expression_mut(left, visit);
+            expression_mut(right, visit);
+        }
+        Expression::Conditional {
+            condition,
+            then,
+            otherwise,
+        } => {
+            expression_mut(condition, visit);
+            expression_mut(then, visit);
+            expression_mut(otherwise, visit);
+        }
+        Expression::Lambda { body, .. } => match body {
+            LambdaBody::Expression(value) => expression_mut(value, visit),
+            LambdaBody::Block(statements) => {
+                for statement in statements.iter_mut() {
+                    statement_expressions_mut(statement, visit);
+                }
+            }
+        },
+        Expression::MethodReference { target, .. } => {
+            if let ReferenceTarget::Bound(receiver) = target {
+                expression_mut(receiver, visit);
+            }
+        }
+    }
+    visit(expression);
+}
+
+/// A value where Java boxes and unboxes by itself: without javac's
+/// `valueOf`/`xxxValue()` around it.
+pub(crate) fn plain(expression: Expression) -> Expression {
+    match expression {
+        Expression::Boxed { value, .. } | Expression::Unboxed { value, .. } => *value,
+        other => other,
     }
 }

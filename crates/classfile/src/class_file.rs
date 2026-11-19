@@ -48,7 +48,9 @@ pub(crate) enum Constant {
         name_index: u16,
         descriptor_index: u16,
     },
+    /// A method handle: how it calls (`REF_invokeStatic` 6, …) and what.
     MethodHandle {
+        kind: u8,
         reference_index: u16,
     },
     InvokeDynamic {
@@ -65,9 +67,20 @@ pub(crate) enum Constant {
 #[derive(Debug, Default)]
 pub(crate) struct Code {
     pub(crate) bytes: Vec<u8>,
-    /// How many `try` ranges it has: none in a body without handlers.
-    pub(crate) exception_handlers: usize,
+    /// Its exception table: the `try` ranges and their handlers.
+    pub(crate) exception_handlers: Vec<ExceptionHandler>,
     pub(crate) local_variables: Vec<LocalVariable>,
+}
+
+/// An exception table entry: code in `start..end` throwing `catch_type`
+/// (anything, for `finally`, when `None`) goes to `handler`.
+#[derive(Clone, Debug)]
+pub(crate) struct ExceptionHandler {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) handler: usize,
+    /// The binary name of the class caught.
+    pub(crate) catch_type: Option<String>,
 }
 
 /// A `LocalVariableTable` entry, its generic type from
@@ -351,8 +364,25 @@ fn read_code(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Code> {
     bytes.u16()?;
     let length = bytes.u32()? as usize;
     let code_bytes = bytes.take(length)?.to_vec();
-    let exception_handlers = bytes.u16()? as usize;
-    bytes.take(exception_handlers * 8)?;
+    let handler_count = bytes.u16()? as usize;
+    let mut exception_handlers = Vec::with_capacity(handler_count);
+    for _ in 0..handler_count {
+        let start = bytes.u16()? as usize;
+        let end = bytes.u16()? as usize;
+        let handler = bytes.u16()? as usize;
+        let catch_index = bytes.u16()?;
+        let catch_type = if catch_index == 0 {
+            None
+        } else {
+            Some(class_name(pool, catch_index)?)
+        };
+        exception_handlers.push(ExceptionHandler {
+            start,
+            end,
+            handler,
+            catch_type,
+        });
+    }
     let mut local_variables: Vec<LocalVariable> = Vec::new();
     let mut signatures: Vec<(u32, u16, String)> = Vec::new();
     let attribute_count = bytes.u16()?;
@@ -460,12 +490,10 @@ fn read_constant_pool(bytes: &mut Bytes<'_>) -> Option<Vec<Constant>> {
                 bytes.u16()?;
                 Constant::Other
             }
-            15 => {
-                bytes.u8()?;
-                Constant::MethodHandle {
-                    reference_index: bytes.u16()?,
-                }
-            }
+            15 => Constant::MethodHandle {
+                kind: bytes.u8()?,
+                reference_index: bytes.u16()?,
+            },
             _ => return None,
         };
         pool[index] = constant;
