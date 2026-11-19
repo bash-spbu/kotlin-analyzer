@@ -602,8 +602,8 @@ public abstract class Shapes {
     use crate::decompile::Unsupported;
     assert_eq!(outcome("area"), Ok(()));
     assert_eq!(outcome("<init>"), Ok(()));
-    assert_eq!(outcome("loop"), Err(Unsupported::Branches));
-    assert_eq!(outcome("positive"), Err(Unsupported::Branches));
+    assert_eq!(outcome("loop"), Ok(()));
+    assert_eq!(outcome("positive"), Ok(()));
     assert_eq!(outcome("lazy"), Err(Unsupported::Lambda));
     assert_eq!(outcome("guarded"), Err(Unsupported::ExceptionHandlers));
     assert_eq!(outcome("initialized"), Err(Unsupported::StackShape));
@@ -632,7 +632,7 @@ public abstract class Shapes {
 }
 
 #[test]
-fn most_of_a_java_librarys_bodies_run_straight_through() {
+fn nearly_all_of_a_java_librarys_bodies_decompile() {
     let Some(jar) = cached_jar("org.slf4j", "slf4j-api") else {
         eprintln!("skipped: no slf4j-api in the Gradle cache");
         return;
@@ -658,6 +658,6 @@ fn most_of_a_java_librarys_bodies_run_straight_through() {
     }
     let share = decompiled as f64 / bodies as f64;
     eprintln!("{}: {decompiled} of {bodies} bodies", jar.display());
-    // 69% for 2.0.17: the rest branch, mostly.
-    assert!(share > 0.6, "{decompiled} of {bodies}");
+    // 95% for 2.0.17: the rest have `try`, mostly.
+    assert!(share > 0.9, "{decompiled} of {bodies}");
 }

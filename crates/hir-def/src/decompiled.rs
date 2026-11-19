@@ -23,8 +23,8 @@ use crate::item_tree::{
 };
 use crate::resolver::{DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES};
 use classfile::decompile::{
-    BinaryOperator, Body, DecompiledMethod, Expression, Literal, Owner, Receiver, Statement,
-    decompile_class, parameter_descriptors,
+    BinaryOperator, Body, DecompiledMethod, Expression, Label, Literal, LogicalOperator, LoopKind,
+    Owner, Receiver, Relation, Statement, decompile_class, parameter_descriptors,
 };
 use classfile::{ClassName, LibraryType};
 use rustc_hash::FxHashMap;
@@ -341,9 +341,7 @@ impl Renderer<'_> {
                 "bodies are left out, and parameters with defaults marked /* = … */."
             }
             StubLanguage::Java if self.bodies.is_empty() => "bodies are left out.",
-            StubLanguage::Java => {
-                "bodies are decompiled where they run straight through, others left out."
-            }
+            StubLanguage::Java => "bodies are decompiled where they can be, others left out.",
         };
         let shown = if self.bodies.is_empty() {
             "Only the declarations are shown, as the class files record them;"
@@ -787,44 +785,150 @@ impl Renderer<'_> {
     /// A body's statements, one per line; the `return;` ending a method
     /// and a constructor's `super()` left out, as Java leaves them.
     fn java_statements(&mut self, body: &Body, depth: usize) {
-        let last = body.statements.len().saturating_sub(1);
-        for (position, statement) in body.statements.iter().enumerate() {
-            let line = match statement {
-                Statement::Return(None) if position == last => continue,
-                Statement::SuperConstructor(arguments) if arguments.is_empty() => continue,
-                Statement::Expression(expression) => format!("{};", self.expression(expression)),
-                Statement::Declare {
-                    type_ref,
-                    name,
-                    value,
-                } => {
-                    let type_text = type_ref
-                        .as_ref()
-                        .map_or("var".to_owned(), |type_ref| self.library_type(type_ref));
-                    format!("{type_text} {name} = {};", self.expression(value))
+        let statements = match body.statements.split_last() {
+            Some((Statement::Return(None), rest)) => rest,
+            _ => body.statements.as_slice(),
+        };
+        self.java_block(statements, depth);
+    }
+
+    fn line(&mut self, depth: usize, text: &str) {
+        self.indent(depth);
+        self.text.push_str(text);
+        self.text.push('\n');
+    }
+
+    fn java_block(&mut self, statements: &[Statement], depth: usize) {
+        for statement in statements {
+            self.java_statement(statement, depth);
+        }
+    }
+
+    fn java_statement(&mut self, statement: &Statement, depth: usize) {
+        let simple = match statement {
+            Statement::SuperConstructor(arguments) if arguments.is_empty() => return,
+            Statement::Expression(expression) => format!("{};", self.expression(expression)),
+            Statement::Declare {
+                type_ref,
+                name,
+                value,
+            } => {
+                let type_text = type_ref
+                    .as_ref()
+                    .map_or("var".to_owned(), |type_ref| self.library_type(type_ref));
+                match value {
+                    Some(value) => format!("{type_text} {name} = {};", self.expression(value)),
+                    None => format!("{type_text} {name};"),
                 }
-                Statement::Assign { target, value } => {
-                    format!("{} = {};", self.expression(target), self.expression(value))
+            }
+            Statement::Assign { target, value } => {
+                format!("{} = {};", self.expression(target), self.expression(value))
+            }
+            Statement::Increment { name, by } => match by {
+                1 => format!("{name}++;"),
+                -1 => format!("{name}--;"),
+                by if *by < 0 => format!("{name} -= {};", -i64::from(*by)),
+                by => format!("{name} += {by};"),
+            },
+            Statement::Return(Some(value)) => format!("return {};", self.expression(value)),
+            Statement::Return(None) => "return;".to_owned(),
+            Statement::Throw(thrown) => format!("throw {};", self.expression(thrown)),
+            Statement::SuperConstructor(arguments) => {
+                format!("super({});", self.arguments(arguments))
+            }
+            Statement::ThisConstructor(arguments) => {
+                format!("this({});", self.arguments(arguments))
+            }
+            Statement::Break(label) => format!("break{};", label_suffix(*label)),
+            Statement::Continue(label) => format!("continue{};", label_suffix(*label)),
+            Statement::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.java_if(condition, then, otherwise, depth, "");
+                return;
+            }
+            Statement::Loop { label, kind, body } => {
+                let prefix =
+                    label.map_or(String::new(), |label| format!("{}: ", label_name(label)));
+                match kind {
+                    LoopKind::DoWhile(condition) => {
+                        self.line(depth, &format!("{prefix}do {{"));
+                        self.java_block(body, depth + 1);
+                        let condition = self.expression(condition);
+                        self.line(depth, &format!("}} while ({condition});"));
+                    }
+                    LoopKind::Forever | LoopKind::While(_) => {
+                        let condition = match kind {
+                            LoopKind::While(condition) => self.expression(condition),
+                            _ => "true".to_owned(),
+                        };
+                        self.line(depth, &format!("{prefix}while ({condition}) {{"));
+                        self.java_block(body, depth + 1);
+                        self.line(depth, "}");
+                    }
                 }
-                Statement::Increment { name, by } => match by {
-                    1 => format!("{name}++;"),
-                    -1 => format!("{name}--;"),
-                    by if *by < 0 => format!("{name} -= {};", -i64::from(*by)),
-                    by => format!("{name} += {by};"),
+                return;
+            }
+            Statement::Block { label, body } => {
+                self.line(depth, &format!("{}: {{", label_name(*label)));
+                self.java_block(body, depth + 1);
+                self.line(depth, "}");
+                return;
+            }
+            Statement::Switch { value, cases } => {
+                let value = self.expression(value);
+                self.line(depth, &format!("switch ({value}) {{"));
+                for case in cases {
+                    let mut labels: Vec<String> = case
+                        .values
+                        .iter()
+                        .map(|value| format!("case {value}:"))
+                        .collect();
+                    if case.default {
+                        labels.push("default:".to_owned());
+                    }
+                    self.line(depth + 1, &labels.join(" "));
+                    self.java_block(&case.body, depth + 2);
+                }
+                self.line(depth, "}");
+                return;
+            }
+        };
+        self.line(depth, &simple);
+    }
+
+    /// `if (…) { … } else if (…) { … } else { … }`.
+    fn java_if(
+        &mut self,
+        condition: &Expression,
+        then: &[Statement],
+        otherwise: &[Statement],
+        depth: usize,
+        lead: &str,
+    ) {
+        let condition = self.expression(condition);
+        if lead.is_empty() {
+            self.line(depth, &format!("if ({condition}) {{"));
+        } else {
+            self.line(depth, &format!("{lead}if ({condition}) {{"));
+        }
+        self.java_block(then, depth + 1);
+        match otherwise {
+            [] => self.line(depth, "}"),
+            [
+                Statement::If {
+                    condition,
+                    then,
+                    otherwise,
                 },
-                Statement::Return(Some(value)) => format!("return {};", self.expression(value)),
-                Statement::Return(None) => "return;".to_owned(),
-                Statement::Throw(thrown) => format!("throw {};", self.expression(thrown)),
-                Statement::SuperConstructor(arguments) => {
-                    format!("super({});", self.arguments(arguments))
-                }
-                Statement::ThisConstructor(arguments) => {
-                    format!("this({});", self.arguments(arguments))
-                }
-            };
-            self.indent(depth);
-            self.text.push_str(&line);
-            self.text.push('\n');
+            ] => self.java_if(condition, then, otherwise, depth, "} else "),
+            _ => {
+                self.line(depth, "} else {");
+                self.java_block(otherwise, depth + 1);
+                self.line(depth, "}");
+            }
         }
     }
 
@@ -953,7 +1057,79 @@ impl Renderer<'_> {
                 parts.join(" + ")
             }
             Expression::ClassLiteral(type_ref) => format!("{}.class", self.library_type(type_ref)),
+            Expression::Compare {
+                relation,
+                left,
+                right,
+                ..
+            } => {
+                let level = relation_precedence(*relation);
+                format!(
+                    "{} {} {}",
+                    self.operand(left, level),
+                    relation_symbol(*relation),
+                    self.operand(right, level + 1)
+                )
+            }
+            Expression::Not(operand) => format!("!{}", self.operand(operand, UNARY)),
+            Expression::Logical {
+                operator,
+                left,
+                right,
+            } => {
+                let (level, symbol) = match operator {
+                    LogicalOperator::And => (AND, "&&"),
+                    LogicalOperator::Or => (OR, "||"),
+                };
+                format!(
+                    "{} {symbol} {}",
+                    self.operand(left, level),
+                    self.operand(right, level + 1)
+                )
+            }
+            Expression::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => format!(
+                "{} ? {} : {}",
+                self.operand(condition, OR),
+                self.operand(then, CONDITIONAL + 1),
+                self.operand(otherwise, CONDITIONAL)
+            ),
+            Expression::CompareResult { left, right, .. } => format!(
+                "/* compare */ ({}, {})",
+                self.expression(left),
+                self.expression(right)
+            ),
         }
+    }
+}
+
+/// `label1` for a statement's label.
+fn label_name(label: Label) -> String {
+    format!("label{}", label.0)
+}
+
+fn label_suffix(label: Option<Label>) -> String {
+    label.map_or(String::new(), |label| format!(" {}", label_name(label)))
+}
+
+fn relation_precedence(relation: Relation) -> u8 {
+    match relation {
+        Relation::Equal | Relation::NotEqual => EQUALITY,
+        _ => RELATIONAL,
+    }
+}
+
+fn relation_symbol(relation: Relation) -> &'static str {
+    match relation {
+        Relation::Equal => "==",
+        Relation::NotEqual => "!=",
+        Relation::Less => "<",
+        Relation::LessOrEqual => "<=",
+        Relation::Greater => ">",
+        Relation::GreaterOrEqual => ">=",
     }
 }
 
@@ -962,6 +1138,10 @@ const UNARY: u8 = 14;
 const CAST: u8 = 13;
 const ADDITIVE: u8 = 11;
 const RELATIONAL: u8 = 9;
+const EQUALITY: u8 = 8;
+const AND: u8 = 4;
+const OR: u8 = 3;
+const CONDITIONAL: u8 = 2;
 
 /// How tightly an expression binds, as Java's grammar ranks it.
 fn precedence(expression: &Expression) -> u8 {
@@ -969,6 +1149,13 @@ fn precedence(expression: &Expression) -> u8 {
         Expression::Binary { operator, .. } => binary_precedence(*operator),
         Expression::Concatenation(_) => ADDITIVE,
         Expression::InstanceOf { .. } => RELATIONAL,
+        Expression::Compare { relation, .. } => relation_precedence(*relation),
+        Expression::Not(_) => UNARY,
+        Expression::Logical { operator, .. } => match operator {
+            LogicalOperator::And => AND,
+            LogicalOperator::Or => OR,
+        },
+        Expression::Conditional { .. } => CONDITIONAL,
         Expression::Cast { .. } => CAST,
         Expression::Negate(_) => UNARY,
         Expression::Literal(Literal::Int(i32::MIN..=-1) | Literal::Long(i64::MIN..=-1)) => UNARY,
@@ -1293,7 +1480,11 @@ impl Imports {
 
     /// The classes a decompiled body names.
     fn collect_body(&mut self, body: &Body) {
-        for statement in &body.statements {
+        self.collect_statements(&body.statements);
+    }
+
+    fn collect_statements(&mut self, statements: &[Statement]) {
+        for statement in statements {
             match statement {
                 Statement::Expression(expression)
                 | Statement::Return(Some(expression))
@@ -1304,7 +1495,9 @@ impl Imports {
                     if let Some(type_ref) = type_ref {
                         self.collect(&crate::library::type_ref(type_ref));
                     }
-                    self.collect_expression(value);
+                    if let Some(value) = value {
+                        self.collect_expression(value);
+                    }
                 }
                 Statement::Assign { target, value } => {
                     self.collect_expression(target);
@@ -1315,7 +1508,32 @@ impl Imports {
                         .iter()
                         .for_each(|argument| self.collect_expression(argument));
                 }
-                Statement::Increment { .. } | Statement::Return(None) => {}
+                Statement::If {
+                    condition,
+                    then,
+                    otherwise,
+                } => {
+                    self.collect_expression(condition);
+                    self.collect_statements(then);
+                    self.collect_statements(otherwise);
+                }
+                Statement::Loop { kind, body, .. } => {
+                    if let LoopKind::While(condition) | LoopKind::DoWhile(condition) = kind {
+                        self.collect_expression(condition);
+                    }
+                    self.collect_statements(body);
+                }
+                Statement::Block { body, .. } => self.collect_statements(body),
+                Statement::Switch { value, cases } => {
+                    self.collect_expression(value);
+                    for case in cases {
+                        self.collect_statements(&case.body);
+                    }
+                }
+                Statement::Increment { .. }
+                | Statement::Return(None)
+                | Statement::Break(_)
+                | Statement::Continue(_) => {}
             }
         }
     }
@@ -1374,6 +1592,22 @@ impl Imports {
                 .iter()
                 .for_each(|piece| self.collect_expression(piece)),
             Expression::ClassLiteral(type_ref) => self.collect(&crate::library::type_ref(type_ref)),
+            Expression::Not(operand) => self.collect_expression(operand),
+            Expression::Compare { left, right, .. }
+            | Expression::Logical { left, right, .. }
+            | Expression::CompareResult { left, right, .. } => {
+                self.collect_expression(left);
+                self.collect_expression(right);
+            }
+            Expression::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.collect_expression(condition);
+                self.collect_expression(then);
+                self.collect_expression(otherwise);
+            }
         }
     }
 

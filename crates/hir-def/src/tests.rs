@@ -1023,12 +1023,12 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         crate::library::SourceOrigin::Decompiled(crate::decompiled::MissingSources::NoArchive)
     ));
     for expected in [
-        "it comes without a sources jar.\n// The declarations are shown as the class files record them;\n// bodies are decompiled where they run straight through, others left out.\n",
+        "it comes without a sources jar.\n// The declarations are shown as the class files record them;\n// bodies are decompiled where they can be, others left out.\n",
         "package org.slf4j;\n",
         "import org.slf4j.event.Level;\n",
         "public interface Logger {\n",
         "    void info(String p0);\n",
-        "    default LoggingEventBuilder atLevel(Level p0) { /* compiled code */ }\n",
+        "    default LoggingEventBuilder atLevel(Level level) {\n        if (this.isEnabledForLevel(level)) {\n",
         "    void info(String p0, Object... p1);\n",
     ] {
         assert!(
@@ -1122,8 +1122,185 @@ public class Account {
 }
 "#;
 
+/// A Java class whose methods branch and loop.
+const BRANCHING_JAVA: &str = r#"package demo;
+
+import java.util.List;
+
+public class Flow {
+    public static String sign(int value) {
+        if (value > 0) {
+            return "positive";
+        } else if (value < 0) {
+            return "negative";
+        } else {
+            return "zero";
+        }
+    }
+
+    public static int clamp(int value, int low, int high) {
+        return value < low ? low : value > high ? high : value;
+    }
+
+    public static boolean between(int value, int low, int high) {
+        return value >= low && value <= high;
+    }
+
+    public static boolean outside(int value, int low, int high) {
+        return value < low || value > high;
+    }
+
+    public static String describe(String text) {
+        String shown = text == null || text.isEmpty() ? "empty" : text;
+        if (text != null && text.length() > 3 && !text.startsWith("x")) {
+            shown = shown + "!";
+        }
+        return shown;
+    }
+
+    public static int sumTo(int limit) {
+        int sum = 0;
+        for (int index = 0; index < limit; index++) {
+            if (index % 3 == 0) {
+                continue;
+            }
+            if (sum > 100) {
+                break;
+            }
+            sum += index;
+        }
+        return sum;
+    }
+
+    public static int digits(long value) {
+        int count = 0;
+        do {
+            value = value / 10;
+            count++;
+        } while (value != 0);
+        return count;
+    }
+
+    public static int firstPair(int[][] grid, int wanted) {
+        int found = -1;
+        outer:
+        for (int row = 0; row < grid.length; row++) {
+            for (int column = 0; column < grid[row].length; column++) {
+                if (grid[row][column] == wanted) {
+                    found = row * 100 + column;
+                    break outer;
+                }
+            }
+        }
+        return found;
+    }
+
+    public static String day(int number) {
+        String name;
+        switch (number) {
+            case 1:
+                name = "monday";
+                break;
+            case 2:
+            case 3:
+                name = "midweek";
+                break;
+            case 7:
+                return "sunday";
+            default:
+                name = "other";
+        }
+        return name;
+    }
+
+    public static int fallThrough(int number) {
+        int total = 0;
+        switch (number) {
+            case 1:
+                total += 1;
+            case 2:
+                total += 10;
+                break;
+            case 100:
+                total = 100;
+                break;
+        }
+        return total;
+    }
+
+    public static int score(String word) {
+        switch (word) {
+            case "one":
+                return 1;
+            case "two":
+                return 2;
+            default:
+                return word.length();
+        }
+    }
+
+    public static String compare(double left, double right) {
+        if (left < right) {
+            return "less";
+        }
+        if (left >= right) {
+            return "not less";
+        }
+        return "unordered";
+    }
+
+    public static boolean bigger(long left, long right) {
+        return left > right;
+    }
+
+    public static int total(int[] values) {
+        int sum = 0;
+        for (int value : values) {
+            sum += value;
+        }
+        return sum;
+    }
+
+    public static int longest(List<String> words) {
+        int best = 0;
+        for (String word : words) {
+            if (word.length() > best) {
+                best = word.length();
+            }
+        }
+        return best;
+    }
+
+    public static String parity(int value) {
+        String result;
+        if ((value & 1) == 0) {
+            result = "even";
+        } else {
+            result = "odd";
+        }
+        return result;
+    }
+
+    public static int countDown(int from) {
+        int steps = 0;
+        while (from > 0) {
+            from -= from > 10 ? 3 : 1;
+            steps++;
+        }
+        return steps;
+    }
+
+    public static boolean flag(boolean first, boolean second) {
+        boolean both = first && second;
+        boolean either = first | second;
+        return both ^ either;
+    }
+}
+"#;
+
 /// Calls every method of `Account`, printing what each gives.
 const STRAIGHT_JAVA_DRIVER: &str = r#"import demo.Account;
+import demo.Flow;
 
 public class Main {
     public static void main(String[] arguments) {
@@ -1139,6 +1316,18 @@ public class Main {
         System.out.println(account.length(values) + "|" + account.first(values) + "|" + account.narrow(1L << 33 | 5));
         System.out.println(account.isString("x") + "|" + account.isString(1) + "|" + account.type().getName() + "|" + account.built(42));
         System.out.println(account.negate(5) + "|" + account.widened(-3));
+        for (int value : new int[] { -5, 0, 7, 15, 150 }) {
+            System.out.println(Flow.sign(value) + "|" + Flow.clamp(value, 0, 10) + "|" + Flow.between(value, 0, 10) + "|"
+                + Flow.outside(value, 0, 10) + "|" + Flow.sumTo(value) + "|" + Flow.digits(value) + "|" + Flow.day(value % 8) + "|"
+                + Flow.fallThrough(value % 3) + "|" + Flow.parity(value) + "|" + Flow.countDown(value) + "|" + Flow.bigger(value, 7));
+        }
+        for (String text : new String[] { null, "", "ab", "xyzzy", "hello", "one", "two" }) {
+            System.out.println(Flow.describe(text) + "|" + (text == null ? "-" : String.valueOf(Flow.score(text))));
+        }
+        System.out.println(Flow.compare(1, 2) + "|" + Flow.compare(2, 1) + "|" + Flow.compare(Double.NaN, 1));
+        System.out.println(Flow.firstPair(new int[][] { { 1, 2 }, { 3, 4 } }, 4) + "|" + Flow.firstPair(new int[][] { { 1 } }, 9));
+        System.out.println(Flow.total(new int[] { 1, 2, 3 }) + "|" + Flow.longest(java.util.Arrays.asList("a", "abc", "ab")));
+        System.out.println(Flow.flag(true, true) + "|" + Flow.flag(true, false) + "|" + Flow.flag(false, false) + "|" + Flow.fallThrough(100));
         try {
             account.fail("boom");
         } catch (IllegalStateException failure) {
@@ -1174,6 +1363,7 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     std::fs::write(root.join("src/demo/Account.java"), STRAIGHT_JAVA).unwrap();
+    std::fs::write(root.join("src/demo/Flow.java"), BRANCHING_JAVA).unwrap();
     std::fs::write(root.join("Main.java"), STRAIGHT_JAVA_DRIVER).unwrap();
     let javac = |arguments: &[&std::ffi::OsStr]| {
         run_tool(std::process::Command::new("javac").args(arguments))
@@ -1184,6 +1374,7 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         "-d".as_ref(),
         &path("classes"),
         &path("src/demo/Account.java"),
+        &path("src/demo/Flow.java"),
     ]);
     if compiled.is_none() {
         eprintln!("skipped: no javac");
@@ -1213,16 +1404,26 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
     let db = &parsed.database;
     let file = db.all_files()[0];
-    let account = crate::def_map::visible_top_level(
-        db,
-        file,
-        &Path::parse("demo"),
-        intern::Name::new("Account"),
-    )
-    .into_iter()
-    .next()
-    .unwrap();
-    let rendered = crate::library::library_declaration_source(db, account).unwrap();
+    let render = |name: &str| {
+        let class = crate::def_map::visible_top_level(
+            db,
+            file,
+            &Path::parse("demo"),
+            intern::Name::new(name),
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        crate::library::library_declaration_source(db, class).unwrap()
+    };
+    let rendered = render("Account");
+    let flow = render("Flow");
+    assert!(
+        !flow.text.contains("compiled code"),
+        "every body decompiled:\n{}",
+        flow.text
+    );
+    std::fs::write(root.join("decompiled/demo/Flow.java"), flow.text.as_bytes()).unwrap();
     assert!(
         !rendered.text.contains("compiled code"),
         "every body decompiled:\n{}",
@@ -1262,6 +1463,7 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         "-d".as_ref(),
         &path("decompiled-classes"),
         &path("decompiled/demo/Account.java"),
+        &path("decompiled/demo/Flow.java"),
     ]);
     let run = |classes: &str| {
         let classpath = std::env::join_paths([root.join(classes), root.join("main")]).unwrap();

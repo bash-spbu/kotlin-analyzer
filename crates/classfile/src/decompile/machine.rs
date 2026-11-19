@@ -1,274 +1,21 @@
-//! Method bodies from bytecode, as Java syntax trees: for reading a
-//! library without sources, not for recompiling it.
-//!
-//! The bytecode of a body runs on an operand stack; replaying it with
-//! expressions in place of values gives the statements it was compiled
-//! from — `aload_0; getfield name; areturn` is `return this.name;`. This
-//! covers bodies that run straight through: no branches, loops, `switch`
-//! or `try`. A body with anything else is [`Unsupported`], and shown as
-//! compiled code — a body is decompiled whole or not at all.
+//! One basic block replayed on the operand stack: its instructions become
+//! statements and the expressions left on the stack; its last instruction
+//! says where it goes.
 
-use crate::class_file::{Bodies, ClassFile, Code, Constant, access};
+use crate::class_file::{ClassFile, Code, Constant, LocalVariable, Member, access};
 use crate::signature::{NestedNames, Parser};
 use crate::{ClassName, LibraryType};
 
-/// A class's methods, each with its body when it could be decompiled.
-#[derive(Clone, PartialEq, Debug)]
-pub struct DecompiledClass {
-    pub methods: Vec<DecompiledMethod>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct DecompiledMethod {
-    /// `<init>` for a constructor, `<clinit>` for the static initializer.
-    pub name: String,
-    pub descriptor: String,
-    /// Each parameter's name, as the descriptor lists them (an inner
-    /// class's constructor's outer instance first): from the local
-    /// variables, else `MethodParameters`, else `p0`, `p1`…
-    pub parameter_names: Vec<String>,
-    pub body: Result<Body, Unsupported>,
-}
-
-/// Why a body isn't decompiled.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Unsupported {
-    /// Abstract or native: there is no body.
-    NoCode,
-    /// It branches: `if`, a loop, `switch`, `&&`, `?:`.
-    Branches,
-    /// It has `try`/`catch`/`finally` or `synchronized`.
-    ExceptionHandlers,
-    /// A lambda, method reference or other `invokedynamic` but string
-    /// concatenation.
-    Lambda,
-    /// The operand stack holds values across statements (`dup` of a call,
-    /// an array initializer, `i++` inside an expression).
-    StackShape,
-    /// An instruction not decompiled (its opcode).
-    Instruction(u8),
-    /// Bytecode that doesn't read: truncated, an unknown constant.
-    Malformed,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Body {
-    pub statements: Vec<Statement>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum Statement {
-    Expression(Expression),
-    /// `Type name = value;` (`var` without a recorded type).
-    Declare {
-        type_ref: Option<LibraryType>,
-        name: String,
-        value: Expression,
-    },
-    Assign {
-        target: Expression,
-        value: Expression,
-    },
-    /// `name += by;`
-    Increment {
-        name: String,
-        by: i32,
-    },
-    Return(Option<Expression>),
-    Throw(Expression),
-    /// `super(arguments);` in a constructor.
-    SuperConstructor(Vec<Expression>),
-    /// `this(arguments);` in a constructor.
-    ThisConstructor(Vec<Expression>),
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum Expression {
-    This,
-    Local(String),
-    Literal(Literal),
-    Field {
-        owner: Owner,
-        name: String,
-    },
-    Call {
-        receiver: Receiver,
-        name: String,
-        arguments: Vec<Expression>,
-    },
-    New {
-        class: ClassName,
-        arguments: Vec<Expression>,
-    },
-    NewArray {
-        element: LibraryType,
-        length: Box<Expression>,
-    },
-    ArrayElement {
-        array: Box<Expression>,
-        index: Box<Expression>,
-    },
-    ArrayLength(Box<Expression>),
-    Binary {
-        operator: BinaryOperator,
-        left: Box<Expression>,
-        right: Box<Expression>,
-    },
-    Negate(Box<Expression>),
-    Cast {
-        to: LibraryType,
-        operand: Box<Expression>,
-    },
-    InstanceOf {
-        operand: Box<Expression>,
-        type_ref: LibraryType,
-    },
-    /// `"total: " + total`: the pieces, in order.
-    Concatenation(Vec<Expression>),
-    /// `String.class`.
-    ClassLiteral(LibraryType),
-}
-
-/// Whose field it is.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Owner {
-    Instance(Box<Expression>),
-    Static(ClassName),
-}
-
-/// What a method is called on.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Receiver {
-    Instance(Box<Expression>),
-    Static(ClassName),
-    /// `super.name(…)`.
-    Super,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum Literal {
-    Null,
-    Boolean(bool),
-    Int(i32),
-    Long(i64),
-    Float(f32),
-    Double(f64),
-    /// A UTF-16 unit.
-    Char(u16),
-    String(String),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BinaryOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Remainder,
-    ShiftLeft,
-    ShiftRight,
-    UnsignedShiftRight,
-    And,
-    Or,
-    Xor,
-}
-
-/// Decompiles the methods of a class file; `None` if it doesn't parse.
-pub fn decompile_class(bytes: &[u8]) -> Option<DecompiledClass> {
-    let class = ClassFile::parse_keeping(bytes, Bodies::Kept)?;
-    let names = NestedNames::new(&class.inner_classes);
-    let methods = class
-        .methods
-        .iter()
-        .map(|method| {
-            let is_static = method.access & access::STATIC != 0;
-            let parameters = parameter_descriptors(&method.descriptor).unwrap_or_default();
-            let code = method.code.as_ref();
-            let parameter_names =
-                parameter_names(code, &method.parameter_names, &parameters, is_static);
-            let body = match code {
-                None => Err(Unsupported::NoCode),
-                Some(code) => Machine::new(&class, &names, method, code, &parameter_names).run(),
-            };
-            DecompiledMethod {
-                name: method.name.clone(),
-                descriptor: method.descriptor.clone(),
-                parameter_names,
-                body,
-            }
-        })
-        .collect();
-    Some(DecompiledClass { methods })
-}
-
-/// The parameters' descriptors: `(ILjava/lang/String;[J)V` →
-/// `I`, `Ljava/lang/String;`, `[J`.
-pub fn parameter_descriptors(descriptor: &str) -> Option<Vec<&str>> {
-    let inside = descriptor.strip_prefix('(')?.split_once(')')?.0;
-    let mut parameters = Vec::new();
-    let mut rest = inside;
-    while !rest.is_empty() {
-        let length = descriptor_length(rest)?;
-        parameters.push(&rest[..length]);
-        rest = &rest[length..];
-    }
-    Some(parameters)
-}
-
-/// The result's descriptor: `V`, `I`, `Ljava/lang/String;`.
-fn result_descriptor(descriptor: &str) -> Option<&str> {
-    descriptor.split_once(')').map(|(_, result)| result)
-}
-
-/// The length of the first type descriptor of `text`.
-fn descriptor_length(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut position = 0;
-    while bytes.get(position) == Some(&b'[') {
-        position += 1;
-    }
-    match bytes.get(position)? {
-        b'L' => Some(position + text[position..].find(';')? + 1),
-        b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' => Some(position + 1),
-        _ => None,
-    }
-}
-
-/// The parameters' names: from the local variables at the start, else
-/// `MethodParameters`, else `p0`, `p1`….
-fn parameter_names(
-    code: Option<&Code>,
-    from_attribute: &[String],
-    parameters: &[&str],
-    is_static: bool,
-) -> Vec<String> {
-    let mut slot: u16 = if is_static { 0 } else { 1 };
-    let mut names = Vec::with_capacity(parameters.len());
-    for (index, parameter) in parameters.iter().enumerate() {
-        let recorded = code.and_then(|code| {
-            code.local_variables
-                .iter()
-                .find(|variable| variable.slot == slot && variable.start == 0)
-                .map(|variable| variable.name.clone())
-        });
-        let named = from_attribute
-            .get(index)
-            .filter(|name| !name.is_empty())
-            .cloned();
-        names.push(recorded.or(named).unwrap_or_else(|| format!("p{index}")));
-        slot += if is_wide_descriptor(parameter) { 2 } else { 1 };
-    }
-    names
-}
-
-fn is_wide_descriptor(descriptor: &str) -> bool {
-    descriptor == "J" || descriptor == "D"
-}
+use super::{
+    BinaryOperator, Expression, Literal, NanOrder, Owner, Receiver, Relation, Statement,
+    Unsupported, coerced, is_wide_descriptor, negated, parameter_descriptors, result_descriptor,
+};
 
 /// What a value on the operand stack is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
+pub(super) enum Kind {
     Int,
+    Boolean,
     Long,
     Float,
     Double,
@@ -278,8 +25,9 @@ enum Kind {
 }
 
 impl Kind {
-    fn of_descriptor(descriptor: &str) -> Kind {
+    pub(super) fn of_descriptor(descriptor: &str) -> Kind {
         match descriptor.as_bytes().first() {
+            Some(b'Z') => Kind::Boolean,
             Some(b'J') => Kind::Long,
             Some(b'F') => Kind::Float,
             Some(b'D') => Kind::Double,
@@ -293,50 +41,78 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Value {
-    expression: Expression,
-    kind: Kind,
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct Value {
+    pub(super) expression: Expression,
+    pub(super) kind: Kind,
 }
 
-/// One body's replay.
-struct Machine<'class> {
+/// Where a block goes after its last instruction, by bytecode offset.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) enum Exit {
+    /// On to the instruction at this offset.
+    Goto(usize),
+    /// To `if_true` when `condition` holds, else to `if_false`.
+    Branch {
+        condition: Expression,
+        if_true: usize,
+        if_false: usize,
+    },
+    Switch {
+        value: Expression,
+        cases: Vec<(i32, usize)>,
+        default: usize,
+    },
+    /// Out of the method: its last statement returns or throws.
+    Leave,
+}
+
+/// A block replayed.
+#[derive(Clone, Debug)]
+pub(super) struct Replayed {
+    pub(super) statements: Vec<Statement>,
+    /// What it leaves on the stack for the block after it.
+    pub(super) stack: Vec<Value>,
+    pub(super) exit: Exit,
+}
+
+/// An instruction's step: on to the next, or the block ends.
+enum Step {
+    Next,
+    End(Exit),
+}
+
+pub(super) struct Machine<'class> {
     class: &'class ClassFile,
     names: &'class NestedNames,
-    code: &'class Code,
+    pub(super) code: &'class Code,
     is_static: bool,
     is_constructor: bool,
     result: String,
-    /// The parameters' slots and names.
-    parameters: Vec<(u16, String)>,
-    stack: Vec<Value>,
-    statements: Vec<Statement>,
+    /// The parameters' slots, names and descriptors.
+    parameters: Vec<(u16, String, String)>,
     /// The local variables declared so far: slot and where their scope
     /// starts.
     declared: Vec<(u16, u32)>,
     uninitialized: Vec<ClassName>,
-}
-
-/// An instruction's step: on to the next, or the body is done.
-enum Step {
-    Next,
-    Done,
+    stack: Vec<Value>,
+    statements: Vec<Statement>,
 }
 
 impl<'class> Machine<'class> {
-    fn new(
+    pub(super) fn new(
         class: &'class ClassFile,
         names: &'class NestedNames,
-        method: &'class crate::class_file::Member,
+        method: &'class Member,
         code: &'class Code,
         parameter_names: &[String],
     ) -> Machine<'class> {
         let is_static = method.access & access::STATIC != 0;
-        let parameters_descriptors = parameter_descriptors(&method.descriptor).unwrap_or_default();
+        let descriptors = parameter_descriptors(&method.descriptor).unwrap_or_default();
         let mut slot: u16 = if is_static { 0 } else { 1 };
         let mut parameters = Vec::new();
-        for (descriptor, name) in parameters_descriptors.iter().zip(parameter_names) {
-            parameters.push((slot, name.clone()));
+        for (descriptor, name) in descriptors.iter().zip(parameter_names) {
+            parameters.push((slot, name.clone(), (*descriptor).to_owned()));
             slot += if is_wide_descriptor(descriptor) { 2 } else { 1 };
         }
         Machine {
@@ -349,34 +125,40 @@ impl<'class> Machine<'class> {
                 .unwrap_or("V")
                 .to_owned(),
             parameters,
-            stack: Vec::new(),
-            statements: Vec::new(),
             declared: Vec::new(),
             uninitialized: Vec::new(),
+            stack: Vec::new(),
+            statements: Vec::new(),
         }
     }
 
-    fn run(mut self) -> Result<Body, Unsupported> {
-        if self.code.exception_handlers > 0 {
-            return Err(Unsupported::ExceptionHandlers);
-        }
-        let bytes = &self.code.bytes;
-        let mut pc = 0;
-        while pc < bytes.len() {
+    /// Replays the instructions in `start..end`, the stack holding `entry`
+    /// first.
+    pub(super) fn replay(
+        &mut self,
+        start: usize,
+        end: usize,
+        entry: Vec<Value>,
+    ) -> Result<Replayed, Unsupported> {
+        self.stack = entry;
+        self.statements = Vec::new();
+        let mut pc = start;
+        while pc < end {
             let (length, step) = self.step(pc)?;
-            pc += length;
-            if let Step::Done = step {
-                // Nothing may follow a return or throw in a body that
-                // doesn't branch: if anything does, something jumps there.
-                if pc != bytes.len() {
-                    return Err(Unsupported::Branches);
-                }
-                return Ok(Body {
-                    statements: self.statements,
+            if let Step::End(exit) = step {
+                return Ok(Replayed {
+                    statements: std::mem::take(&mut self.statements),
+                    stack: std::mem::take(&mut self.stack),
+                    exit,
                 });
             }
+            pc += length;
         }
-        Err(Unsupported::Malformed)
+        Ok(Replayed {
+            statements: std::mem::take(&mut self.statements),
+            stack: std::mem::take(&mut self.stack),
+            exit: Exit::Goto(end),
+        })
     }
 
     fn byte(&self, at: usize) -> Result<u8, Unsupported> {
@@ -389,6 +171,15 @@ impl<'class> Machine<'class> {
 
     fn u16_at(&self, at: usize) -> Result<u16, Unsupported> {
         Ok(u16::from_be_bytes([self.byte(at)?, self.byte(at + 1)?]))
+    }
+
+    fn i32_at(&self, at: usize) -> Result<i32, Unsupported> {
+        Ok(i32::from_be_bytes([
+            self.byte(at)?,
+            self.byte(at + 1)?,
+            self.byte(at + 2)?,
+            self.byte(at + 3)?,
+        ]))
     }
 
     fn pop(&mut self) -> Result<Value, Unsupported> {
@@ -426,7 +217,12 @@ impl<'class> Machine<'class> {
             .unwrap_or(LibraryType::Unreadable)
     }
 
-    /// One instruction at `pc`: its length and whether the body ends.
+    /// The offset a branch at `pc` jumps to, `offset` bytes away.
+    fn target(pc: usize, offset: i32) -> Result<usize, Unsupported> {
+        usize::try_from(pc as i64 + i64::from(offset)).map_err(|_| Unsupported::Malformed)
+    }
+
+    /// One instruction at `pc`: its length, and whether the block ends.
     fn step(&mut self, pc: usize) -> Result<(usize, Step), Unsupported> {
         let opcode = self.byte(pc)?;
         let length = match opcode {
@@ -437,32 +233,32 @@ impl<'class> Machine<'class> {
             }
             0x02..=0x08 => {
                 let value = i32::from(opcode) - 3;
-                self.push(Expression::Literal(Literal::Int(value)), Kind::Int);
+                self.push(Literal::Int(value).into(), Kind::Int);
                 1
             }
             0x09 | 0x0a => {
-                let value = i64::from(opcode - 0x09);
-                self.push(Expression::Literal(Literal::Long(value)), Kind::Long);
+                self.push(Literal::Long(i64::from(opcode - 0x09)).into(), Kind::Long);
                 1
             }
             0x0b..=0x0d => {
-                let value = f32::from(opcode - 0x0b);
-                self.push(Expression::Literal(Literal::Float(value)), Kind::Float);
+                self.push(Literal::Float(f32::from(opcode - 0x0b)).into(), Kind::Float);
                 1
             }
             0x0e | 0x0f => {
-                let value = f64::from(opcode - 0x0e);
-                self.push(Expression::Literal(Literal::Double(value)), Kind::Double);
+                self.push(
+                    Literal::Double(f64::from(opcode - 0x0e)).into(),
+                    Kind::Double,
+                );
                 1
             }
             0x10 => {
                 let value = i32::from(self.byte(pc + 1)? as i8);
-                self.push(Expression::Literal(Literal::Int(value)), Kind::Int);
+                self.push(Literal::Int(value).into(), Kind::Int);
                 2
             }
             0x11 => {
                 let value = i32::from(self.u16_at(pc + 1)? as i16);
-                self.push(Expression::Literal(Literal::Int(value)), Kind::Int);
+                self.push(Literal::Int(value).into(), Kind::Int);
                 3
             }
             0x12 => {
@@ -475,12 +271,12 @@ impl<'class> Machine<'class> {
             }
             0x15..=0x19 => {
                 let slot = u16::from(self.byte(pc + 1)?);
-                self.load(slot, opcode - 0x15, pc)?;
+                self.load(slot, opcode - 0x15, pc);
                 2
             }
             0x1a..=0x2d => {
                 let offset = opcode - 0x1a;
-                self.load(u16::from(offset % 4), offset / 4, pc)?;
+                self.load(u16::from(offset % 4), offset / 4, pc);
                 1
             }
             0x2e..=0x35 => {
@@ -566,17 +362,83 @@ impl<'class> Machine<'class> {
                 self.convert(opcode)?;
                 1
             }
-            0x94..=0x98 => return Err(Unsupported::Branches),
-            0x99..=0xab | 0xc6..=0xc9 => return Err(Unsupported::Branches),
+            0x94..=0x98 => {
+                let right = self.pop()?;
+                let left = self.pop()?;
+                let nan = match opcode {
+                    0x94 => NanOrder::Integral,
+                    0x95 | 0x97 => NanOrder::Less,
+                    _ => NanOrder::Greater,
+                };
+                self.push(
+                    Expression::CompareResult {
+                        left: Box::new(left.expression),
+                        right: Box::new(right.expression),
+                        nan,
+                    },
+                    Kind::Int,
+                );
+                1
+            }
+            0x99..=0x9e | 0xc6 | 0xc7 => {
+                let value = self.pop()?;
+                let condition = condition_against_zero(value, opcode);
+                let if_true = Self::target(pc, i32::from(self.u16_at(pc + 1)? as i16))?;
+                return Ok((
+                    3,
+                    Step::End(Exit::Branch {
+                        condition,
+                        if_true,
+                        if_false: pc + 3,
+                    }),
+                ));
+            }
+            0x9f..=0xa6 => {
+                let right = self.pop()?;
+                let left = self.pop()?;
+                let relation = match opcode {
+                    0x9f | 0xa5 => Relation::Equal,
+                    0xa0 | 0xa6 => Relation::NotEqual,
+                    0xa1 => Relation::Less,
+                    0xa2 => Relation::GreaterOrEqual,
+                    0xa3 => Relation::Greater,
+                    _ => Relation::LessOrEqual,
+                };
+                let condition = Expression::Compare {
+                    relation,
+                    left: Box::new(left.expression),
+                    right: Box::new(right.expression),
+                    floating: false,
+                };
+                let if_true = Self::target(pc, i32::from(self.u16_at(pc + 1)? as i16))?;
+                return Ok((
+                    3,
+                    Step::End(Exit::Branch {
+                        condition,
+                        if_true,
+                        if_false: pc + 3,
+                    }),
+                ));
+            }
+            0xa7 => {
+                let target = Self::target(pc, i32::from(self.u16_at(pc + 1)? as i16))?;
+                return Ok((3, Step::End(Exit::Goto(target))));
+            }
+            0xc8 => {
+                let target = Self::target(pc, self.i32_at(pc + 1)?)?;
+                return Ok((5, Step::End(Exit::Goto(target))));
+            }
+            0xaa | 0xab => return self.switch(pc, opcode),
+            0xa8 | 0xa9 | 0xc9 => return Err(Unsupported::Branches),
             0xac..=0xb0 => {
                 let value = self.pop()?;
                 let value = coerced(value.expression, &self.result.clone());
                 self.emit(Statement::Return(Some(value)))?;
-                return Ok((1, Step::Done));
+                return Ok((1, Step::End(Exit::Leave)));
             }
             0xb1 => {
                 self.emit(Statement::Return(None))?;
-                return Ok((1, Step::Done));
+                return Ok((1, Step::End(Exit::Leave)));
             }
             0xb2..=0xb5 => {
                 self.field(opcode, self.u16_at(pc + 1)?)?;
@@ -657,7 +519,7 @@ impl<'class> Machine<'class> {
             0xbf => {
                 let thrown = self.pop()?;
                 self.emit(Statement::Throw(thrown.expression))?;
-                return Ok((1, Step::Done));
+                return Ok((1, Step::End(Exit::Leave)));
             }
             0xc0 | 0xc1 => {
                 let class = self
@@ -680,7 +542,7 @@ impl<'class> Machine<'class> {
                             operand: Box::new(operand.expression),
                             type_ref,
                         },
-                        Kind::Int,
+                        Kind::Boolean,
                     );
                 }
                 3
@@ -691,13 +553,51 @@ impl<'class> Machine<'class> {
         Ok((length, Step::Next))
     }
 
+    /// `tableswitch` and `lookupswitch`: the value popped, each case's
+    /// target.
+    fn switch(&mut self, pc: usize, opcode: u8) -> Result<(usize, Step), Unsupported> {
+        let value = self.pop()?;
+        let mut at = pc + 1;
+        at += (4 - at % 4) % 4;
+        let default = Self::target(pc, self.i32_at(at)?)?;
+        let mut cases = Vec::new();
+        let end = if opcode == 0xaa {
+            let low = self.i32_at(at + 4)?;
+            let high = self.i32_at(at + 8)?;
+            let count = usize::try_from(i64::from(high) - i64::from(low) + 1)
+                .map_err(|_| Unsupported::Malformed)?;
+            for index in 0..count {
+                let offset = self.i32_at(at + 12 + index * 4)?;
+                cases.push((low.wrapping_add(index as i32), Self::target(pc, offset)?));
+            }
+            at + 12 + count * 4
+        } else {
+            let pairs =
+                usize::try_from(self.i32_at(at + 4)?).map_err(|_| Unsupported::Malformed)?;
+            for index in 0..pairs {
+                let key = self.i32_at(at + 8 + index * 8)?;
+                let offset = self.i32_at(at + 12 + index * 8)?;
+                cases.push((key, Self::target(pc, offset)?));
+            }
+            at + 8 + pairs * 8
+        };
+        Ok((
+            end - pc,
+            Step::End(Exit::Switch {
+                value: value.expression,
+                cases,
+                default,
+            }),
+        ))
+    }
+
     /// `wide` before a local variable instruction: its index in two bytes.
     fn wide(&mut self, pc: usize) -> Result<usize, Unsupported> {
         let opcode = self.byte(pc + 1)?;
         let slot = self.u16_at(pc + 2)?;
         match opcode {
             0x15..=0x19 => {
-                self.load(slot, opcode - 0x15, pc)?;
+                self.load(slot, opcode - 0x15, pc);
                 Ok(4)
             }
             0x36..=0x3a => {
@@ -737,16 +637,36 @@ impl<'class> Machine<'class> {
         Ok(())
     }
 
+    /// The local variable in `slot` at `pc`, as its table records it.
+    fn variable_at(&self, slot: u16, pc: u32) -> Option<&LocalVariable> {
+        self.code
+            .local_variables
+            .iter()
+            .find(|variable| variable.slot == slot && variable.covers(pc))
+    }
+
     /// `xload slot`: `kind_index` 0 int, 1 long, 2 float, 3 double, 4
     /// reference.
-    fn load(&mut self, slot: u16, kind_index: u8, pc: usize) -> Result<(), Unsupported> {
-        let kind = [
+    fn load(&mut self, slot: u16, kind_index: u8, pc: usize) {
+        let mut kind = [
             Kind::Int,
             Kind::Long,
             Kind::Float,
             Kind::Double,
             Kind::Reference,
         ][usize::from(kind_index.min(4))];
+        let descriptor = self
+            .variable_at(slot, pc as u32)
+            .map(|variable| variable.descriptor.clone())
+            .or_else(|| {
+                self.parameters
+                    .iter()
+                    .find(|(parameter, _, _)| *parameter == slot)
+                    .map(|(_, _, descriptor)| descriptor.clone())
+            });
+        if kind == Kind::Int && descriptor.as_deref() == Some("Z") {
+            kind = Kind::Boolean;
+        }
         let is_this = slot == 0 && !self.is_static;
         let expression = if is_this {
             Expression::This
@@ -754,25 +674,19 @@ impl<'class> Machine<'class> {
             Expression::Local(self.local_name(slot, pc as u32))
         };
         self.push(expression, kind);
-        Ok(())
     }
 
     /// The name of the variable in `slot` at `pc`.
     fn local_name(&self, slot: u16, pc: u32) -> String {
-        if let Some(variable) = self
-            .code
-            .local_variables
-            .iter()
-            .find(|variable| variable.slot == slot && variable.covers(pc))
-        {
+        if let Some(variable) = self.variable_at(slot, pc) {
             return variable.name.clone();
         }
         match self
             .parameters
             .iter()
-            .find(|(parameter, _)| *parameter == slot)
+            .find(|(parameter, _, _)| *parameter == slot)
         {
-            Some((_, name)) => name.clone(),
+            Some((_, name, _)) => name.clone(),
             None => format!("var{slot}"),
         }
     }
@@ -785,25 +699,21 @@ impl<'class> Machine<'class> {
         let is_parameter = self
             .parameters
             .iter()
-            .any(|(parameter, _)| *parameter == slot);
+            .any(|(parameter, _, _)| *parameter == slot);
         let starting_here = self
             .code
             .local_variables
             .iter()
             .find(|variable| variable.slot == slot && variable.start == next_pc)
-            .or_else(|| {
-                self.code
-                    .local_variables
-                    .iter()
-                    .find(|variable| variable.slot == slot && variable.covers(next_pc))
-            })
+            .or_else(|| self.variable_at(slot, next_pc))
             .cloned();
         let statement = match starting_here {
             Some(variable) => {
                 let descriptor = variable.descriptor.clone();
                 let value = coerced(value.expression, &descriptor);
                 let scope = (slot, variable.start);
-                if self.declared.contains(&scope) {
+                let is_parameter_scope = is_parameter && variable.start == 0;
+                if self.declared.contains(&scope) || is_parameter_scope {
                     Statement::Assign {
                         target: Expression::Local(variable.name),
                         value,
@@ -815,14 +725,22 @@ impl<'class> Machine<'class> {
                     Statement::Declare {
                         type_ref,
                         name: variable.name,
-                        value,
+                        value: Some(value),
                     }
                 }
             }
-            None if is_parameter => Statement::Assign {
-                target: Expression::Local(self.local_name(slot, next_pc)),
-                value: value.expression,
-            },
+            None if is_parameter => {
+                let descriptor = self
+                    .parameters
+                    .iter()
+                    .find(|(parameter, _, _)| *parameter == slot)
+                    .map(|(_, _, descriptor)| descriptor.clone())
+                    .unwrap_or_default();
+                Statement::Assign {
+                    target: Expression::Local(self.local_name(slot, next_pc)),
+                    value: coerced(value.expression, &descriptor),
+                }
+            }
             None => {
                 let scope = (slot, 0);
                 let name = format!("var{slot}");
@@ -836,7 +754,7 @@ impl<'class> Machine<'class> {
                     Statement::Declare {
                         type_ref: None,
                         name,
-                        value: value.expression,
+                        value: Some(value.expression),
                     }
                 }
             }
@@ -857,10 +775,6 @@ impl<'class> Machine<'class> {
     }
 
     fn arithmetic(&mut self, opcode: u8) -> Result<(), Unsupported> {
-        let kind = |offset: u8| match offset % 2 {
-            0 => Kind::Int,
-            _ => Kind::Long,
-        };
         if (0x74..=0x77).contains(&opcode) {
             let operand = self.pop()?;
             self.push(
@@ -888,7 +802,12 @@ impl<'class> Machine<'class> {
             0x60..=0x73 => {
                 [Kind::Int, Kind::Long, Kind::Float, Kind::Double][usize::from((opcode - 0x60) % 4)]
             }
-            _ => kind(opcode - 0x78),
+            // `&`, `|`, `^` of two booleans is a boolean.
+            0x7e | 0x80 | 0x82 if left.kind == Kind::Boolean && right.kind == Kind::Boolean => {
+                Kind::Boolean
+            }
+            _ if (opcode - 0x78).is_multiple_of(2) => Kind::Int,
+            _ => Kind::Long,
         };
         self.push(
             Expression::Binary {
@@ -1012,7 +931,7 @@ impl<'class> Machine<'class> {
         let receiver = self.pop()?;
         let is_special = opcode == 0xb7;
         if is_special && name == "<init>" {
-            return self.constructed(receiver, owner, owner_class, arguments);
+            return self.constructed(receiver, &owner, arguments);
         }
         let is_super_call =
             is_special && receiver.expression == Expression::This && owner != self.class.name;
@@ -1045,8 +964,7 @@ impl<'class> Machine<'class> {
     fn constructed(
         &mut self,
         receiver: Value,
-        owner: String,
-        owner_class: ClassName,
+        owner: &str,
         arguments: Vec<Expression>,
     ) -> Result<(), Unsupported> {
         if let Kind::Uninitialized(id) = receiver.kind {
@@ -1056,16 +974,18 @@ impl<'class> Machine<'class> {
                 .cloned()
                 .ok_or(Unsupported::Malformed)?;
             let built = Expression::New { class, arguments };
+            let mut kept = false;
             for value in self.stack.iter_mut() {
                 if value.kind == Kind::Uninitialized(id) {
                     *value = Value {
                         expression: built.clone(),
                         kind: Kind::Reference,
                     };
+                    kept = true;
                 }
             }
             // `new Foo(…)` whose object nothing kept: a statement.
-            if !self.stack.iter().any(|value| value.expression == built) {
+            if !kept {
                 return self.emit(Statement::Expression(built));
             }
             return Ok(());
@@ -1075,7 +995,6 @@ impl<'class> Machine<'class> {
         if !is_own_constructor_call {
             return Err(Unsupported::StackShape);
         }
-        let _ = owner_class;
         let statement = if owner == self.class.name {
             Statement::ThisConstructor(arguments)
         } else {
@@ -1108,36 +1027,36 @@ impl<'class> Machine<'class> {
         if !is_concatenation {
             return Err(Unsupported::Lambda);
         }
+        let name = name.to_owned();
         let descriptor = descriptor.to_owned();
         let arguments = self.arguments(&descriptor)?;
-        let pieces = match name {
-            "makeConcat" => arguments,
-            _ => {
-                let recipe = bootstrap
-                    .arguments
-                    .first()
-                    .and_then(|argument| match self.class.constant(*argument) {
-                        Some(Constant::String { utf8_index }) => self.class.utf8(*utf8_index),
-                        _ => None,
-                    })
-                    .ok_or(Unsupported::Malformed)?
-                    .to_owned();
-                let constants: Vec<Expression> = bootstrap.arguments[1..]
-                    .iter()
-                    .map(|argument| match self.class.constant(*argument) {
-                        Some(Constant::String { utf8_index }) => self
-                            .class
-                            .utf8(*utf8_index)
-                            .map(|text| Literal::String(text.to_owned()).into()),
-                        _ => None,
-                    })
-                    .collect::<Option<_>>()
-                    .ok_or(Unsupported::Malformed)?;
-                pieces_of_recipe(&recipe, arguments, constants)?
-            }
+        let pieces = if name == "makeConcat" {
+            arguments
+        } else {
+            let recipe = bootstrap
+                .arguments
+                .first()
+                .and_then(|argument| self.string_constant(*argument))
+                .ok_or(Unsupported::Malformed)?;
+            let constants: Vec<Expression> = bootstrap.arguments[1..]
+                .iter()
+                .map(|argument| {
+                    self.string_constant(*argument)
+                        .map(|text| Literal::String(text).into())
+                })
+                .collect::<Option<_>>()
+                .ok_or(Unsupported::Malformed)?;
+            pieces_of_recipe(&recipe, arguments, constants)?
         };
         self.push(Expression::Concatenation(pieces), Kind::Reference);
         Ok(())
+    }
+
+    fn string_constant(&self, index: u16) -> Option<String> {
+        match self.class.constant(index)? {
+            Constant::String { utf8_index } => self.class.utf8(*utf8_index).map(str::to_owned),
+            _ => None,
+        }
     }
 
     /// The class of a bootstrap method handle's method.
@@ -1151,9 +1070,71 @@ impl<'class> Machine<'class> {
     }
 }
 
-impl From<Literal> for Expression {
-    fn from(literal: Literal) -> Expression {
-        Expression::Literal(literal)
+/// The condition `ifeq`…`ifle`, `ifnull`, `ifnonnull` jump on: a
+/// comparison with zero (or null) — a boolean read as itself, a
+/// comparison instruction's result as the comparison.
+fn condition_against_zero(value: Value, opcode: u8) -> Expression {
+    let relation = match opcode {
+        0x99 | 0xc6 => Relation::Equal,
+        0x9a | 0xc7 => Relation::NotEqual,
+        0x9b => Relation::Less,
+        0x9c => Relation::GreaterOrEqual,
+        0x9d => Relation::Greater,
+        _ => Relation::LessOrEqual,
+    };
+    if let Expression::CompareResult { left, right, nan } = value.expression {
+        return compared(relation, *left, *right, nan);
+    }
+    let is_null_check = opcode == 0xc6 || opcode == 0xc7;
+    if is_null_check {
+        return Expression::Compare {
+            relation,
+            left: Box::new(value.expression),
+            right: Box::new(Literal::Null.into()),
+            floating: false,
+        };
+    }
+    let as_boolean =
+        value.kind == Kind::Boolean || matches!(value.expression, Expression::Conditional { .. });
+    let is_boolean_test = matches!(relation, Relation::Equal | Relation::NotEqual);
+    if as_boolean && is_boolean_test {
+        let holds = coerced(value.expression, "Z");
+        return match relation {
+            Relation::NotEqual => holds,
+            _ => negated(holds),
+        };
+    }
+    Expression::Compare {
+        relation,
+        left: Box::new(value.expression),
+        right: Box::new(Literal::Int(0).into()),
+        floating: false,
+    }
+}
+
+/// `left relation right` from a comparison instruction's result and the
+/// branch on it — with NaN, a jump the comparison takes on NaN is the
+/// negation of the opposite one (`dcmpg; ifge` is `!(a < b)`).
+fn compared(relation: Relation, left: Expression, right: Expression, nan: NanOrder) -> Expression {
+    let compare = |relation| Expression::Compare {
+        relation,
+        left: Box::new(left.clone()),
+        right: Box::new(right.clone()),
+        floating: nan != NanOrder::Integral,
+    };
+    let jumps_on_nan = match (nan, relation) {
+        (NanOrder::Integral, _) => false,
+        (_, Relation::Equal) => false,
+        (_, Relation::NotEqual) => false,
+        (NanOrder::Greater, relation) => {
+            matches!(relation, Relation::Greater | Relation::GreaterOrEqual)
+        }
+        (NanOrder::Less, relation) => matches!(relation, Relation::Less | Relation::LessOrEqual),
+    };
+    if jumps_on_nan {
+        Expression::Not(Box::new(compare(relation.inverse())))
+    } else {
+        compare(relation)
     }
 }
 
@@ -1247,19 +1228,5 @@ fn is_repeatable(expression: &Expression) -> bool {
             Owner::Instance(object) => is_repeatable(object),
         },
         _ => false,
-    }
-}
-
-/// A literal as the type it goes to writes it: `true` for a `boolean`'s
-/// `1`, `'a'` for a `char`'s `97`.
-fn coerced(expression: Expression, descriptor: &str) -> Expression {
-    match (expression, descriptor) {
-        (Expression::Literal(Literal::Int(value)), "Z") if value == 0 || value == 1 => {
-            Expression::Literal(Literal::Boolean(value == 1))
-        }
-        (Expression::Literal(Literal::Int(value)), "C") if (0..=0xffff).contains(&value) => {
-            Expression::Literal(Literal::Char(value as u16))
-        }
-        (expression, _) => expression,
     }
 }

@@ -54,24 +54,44 @@ library's API, not its source.
 
 #### Decompiled bodies
 
-A body's bytecode replays on its operand stack with expressions in place
-of values: `aload_0; getfield name; areturn` is `return this.name;`. Read:
-constants, locals (named and typed by `LocalVariableTable`, generic types by
-`LocalVariableTypeTable`; else `varN` declared with `var`), fields, calls
-(`super.…`, `super(…)`, `this(…)`), `new`, arrays, arithmetic, casts
-(Java's implicit widening left out), `instanceof`, class literals, string
-concatenation (`invokedynamic`, or `StringBuilder` chains), `return`,
-`throw`; a literal as its target's type writes it (`true`, `'A'`).
-Parameters are named as the body names them. A body is decompiled whole
-or not at all: anything else — branches (`if`, loops, `switch`, `&&`,
-`?:`), `try`/`catch`, lambdas, values kept on the stack across statements
-(`i++` inside an expression, array initializers) — leaves it compiled
-code. About two thirds of a Java library's bodies read (slf4j-api 69%,
-guava 72%, jackson-databind 63%). Kotlin classes keep their bodies out.
-Tests compile a class back from its decompiled text and run a program
-against it, which must print the same. A call lands on the constructor
-called, a `constructor` of its own (the class files don't say which is
-primary).
+A body's bytecode is cut into basic blocks; each replays on its operand
+stack with expressions in place of values: `aload_0; getfield name;
+areturn` is `return this.name;`. Read: constants, locals (named and typed
+by `LocalVariableTable`, generic types by `LocalVariableTypeTable`; else
+`varN` declared with `var`), fields, calls (`super.…`, `super(…)`,
+`this(…)`), `new`, arrays, arithmetic, casts (Java's implicit widening left
+out), `instanceof`, class literals, string concatenation (`invokedynamic`,
+or `StringBuilder` chains), comparisons (NaN kept: `dcmpg; ifge` is
+`!(a < b)`), `return`, `throw`; a literal as its target's type writes it
+(`true`, `'A'`).
+
+Where blocks join: values two branches of one condition leave are `?:`
+(a boolean's `c ? 1 : 0` is `c`); a block that only tests a condition and
+shares a target with the test before it joins it as `&&` or `||`; an empty
+block that only jumps on is where it jumps. The blocks then nest
+(Ramsey's "Beyond Relooper", for graphs whose loops nest): a block inside
+the one dominating it; one more than one block reaches, or one reached
+leaving a loop, after a labeled block that the jumps to it `break`; a
+loop's head a `while (true)` that the jumps back `continue`. Tidying then
+drops the jumps falling off a list's end does anyway, retargets a
+`break` of a block ending in a loop to the loop, unlabels what the
+innermost loop means, moves code reached by one `break` across loops to
+that `break`, and forms `while (c)`, `do … while (c)`, `else if` and
+`if` without `else` after a branch that never goes on. A variable used in
+more than one branch is declared before the first, its stores
+assignments. Labels are `label1`, `label2`….
+
+A body is decompiled whole or not at all: anything else — `try`/`catch`,
+`synchronized` blocks, lambdas, values kept on the stack across
+statements (`i++` inside an expression, array initializers), jumps no loop
+nesting describes — leaves it compiled code. Not yet: `for` (a `while`),
+`for`-each (its iterator or index), `switch` on strings (the two
+switches javac makes). About nine in ten of a Java library's bodies read
+(slf4j-api 95%, jackson-databind 92%, guava 90%, commons-lang3 87%).
+Kotlin classes keep their bodies out. Tests compile two classes —
+straight-line code, and branches, loops, labeled breaks, `switch`
+(fall-through, strings), NaN — back from their decompiled text and run a
+program against them, which must print the same.
 
 The file starts with a header: where it comes from (the JAR), why (no
 sources JAR, or one not declaring it), what is shown (declarations, and
