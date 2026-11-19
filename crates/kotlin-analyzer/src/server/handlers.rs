@@ -106,7 +106,7 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             DocumentDiagnosticRequest::METHOD => params::<DocumentDiagnosticRequest>(request)
                 .map(|params| super::pull_diagnostics::document(&snapshot, params)),
             WorkspaceDiagnosticRequest::METHOD => params::<WorkspaceDiagnosticRequest>(request)
-                .map(|params| super::pull_diagnostics::workspace(&snapshot, params)),
+                .map(|params| super::pull_diagnostics::workspace(&snapshot, params, None)),
             method if super::code_lens::METHODS.contains(&method) => {
                 Ok(super::code_lens::handle(&snapshot, method, &request.params))
             }
@@ -121,6 +121,15 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
                 );
             }
         };
+    response(id, result)
+}
+
+/// The response to a request with `result`: its value, "content modified"
+/// when an edit cancelled it, or its parameters' error.
+pub(super) fn response(
+    id: lsp_server::RequestId,
+    result: Result<Cancellable<serde_json::Value>, String>,
+) -> Response {
     match result {
         Ok(Ok(value)) => Response::new_ok(id, value),
         Ok(Err(_cancelled)) => Response::new_err(

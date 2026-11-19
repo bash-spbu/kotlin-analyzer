@@ -41,11 +41,28 @@ pub fn read_workspace(
     read_workspaces(&[(root.to_path_buf(), project_json.map(Path::to_path_buf))])
 }
 
+/// A step of reading a workspace, for a progress bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadStep {
+    ReadingModel,
+    ReadingFiles { count: usize },
+    IndexingLibraries { indexed: usize, total: usize },
+}
+
 /// Several workspace folders (each with its model file, when it has one)
 /// read as one workspace.
 pub fn read_workspaces(
     folders: &[(PathBuf, Option<PathBuf>)],
 ) -> Result<LoadedFiles, project_model::LoadError> {
+    read_workspaces_reporting(folders, &|_| {})
+}
+
+/// [`read_workspaces`], telling `report` each step as it comes.
+pub fn read_workspaces_reporting(
+    folders: &[(PathBuf, Option<PathBuf>)],
+    report: &(dyn Fn(LoadStep) + Sync),
+) -> Result<LoadedFiles, project_model::LoadError> {
+    report(LoadStep::ReadingModel);
     let started = Instant::now();
     let models = folders
         .iter()
@@ -58,6 +75,7 @@ pub fn read_workspaces(
     let paths = source_paths(&model);
     let discovery_time = started.elapsed();
 
+    report(LoadStep::ReadingFiles { count: paths.len() });
     let started = Instant::now();
     let files: Vec<(PathBuf, Arc<str>)> = paths
         .into_par_iter()
@@ -70,7 +88,7 @@ pub fn read_workspaces(
     let read_time = started.elapsed();
 
     let started = Instant::now();
-    let libraries = index_libraries(&model);
+    let libraries = index_libraries(&model, report);
     let library_time = started.elapsed();
     Ok(LoadedFiles {
         model: Arc::new(model),
@@ -85,7 +103,10 @@ pub fn read_workspaces(
 
 /// Indexes the JDK and every distinct JAR of the model's classpaths, in
 /// parallel.
-pub fn index_libraries(model: &ProjectModel) -> LoadedLibraries {
+pub fn index_libraries(
+    model: &ProjectModel,
+    report: &(dyn Fn(LoadStep) + Sync),
+) -> LoadedLibraries {
     let mut sources: Vec<hir::LibrarySource> = Vec::new();
     let mut by_source_set: Vec<Vec<usize>> = Vec::with_capacity(model.source_sets.len());
     let mut positions: rustc_hash::FxHashMap<PathBuf, usize> = rustc_hash::FxHashMap::default();
@@ -108,8 +129,23 @@ pub fn index_libraries(model: &ProjectModel) -> LoadedLibraries {
         sources.push(jdk);
         sources.len() - 1
     });
-    let indexed: Vec<Result<hir::IndexedLibrary, String>> =
-        sources.par_iter().map(hir::index_library).collect();
+    let total = sources.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    if total > 0 {
+        report(LoadStep::IndexingLibraries { indexed: 0, total });
+    }
+    let indexed: Vec<Result<hir::IndexedLibrary, String>> = sources
+        .par_iter()
+        .map(|source| {
+            let indexed = hir::index_library(source);
+            let count = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            report(LoadStep::IndexingLibraries {
+                indexed: count,
+                total,
+            });
+            indexed
+        })
+        .collect();
     let mut libraries = Vec::with_capacity(sources.len());
     let mut failures = Vec::new();
     for (source, result) in sources.into_iter().zip(indexed) {

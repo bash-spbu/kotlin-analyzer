@@ -1233,3 +1233,44 @@ fn an_agent_asks_the_editors_server_on_its_socket_and_sees_unsaved_text() {
     assert!(!socket.exists());
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn loading_reports_each_step_in_the_status_bar() {
+    let root = workspace("load-steps");
+    std::fs::write(
+        root.join("src/main/kotlin/app/Order.kt"),
+        "package app\nclass Order\n",
+    )
+    .unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    let token = "kotlin-analyzer/loading/1";
+    let steps: Vec<String> = client
+        .unread
+        .iter()
+        .filter(|notification| {
+            notification.method == "$/progress" && notification.params["token"] == token
+        })
+        .map(|notification| {
+            let value = &notification.params["value"];
+            format!(
+                "{}: {}",
+                value["kind"].as_str().unwrap_or_default(),
+                value["message"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    let expected_start = [
+        "report: Reading the project model",
+        "report: Reading 1 files",
+    ];
+    assert!(
+        steps[1..3] == expected_start,
+        "the loading's steps: {steps:?}"
+    );
+    assert!(steps[0].starts_with("begin: "), "{steps:?}");
+    // No libraries: no step for them (the end was read waiting for it).
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

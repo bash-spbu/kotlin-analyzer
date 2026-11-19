@@ -15,6 +15,7 @@ mod gradle_export;
 mod handlers;
 mod hierarchy;
 mod library_sources;
+mod progress;
 mod pull_diagnostics;
 mod semantic_tokens;
 mod settings;
@@ -378,6 +379,13 @@ enum Task {
         exports: Vec<gradle_export::Export>,
         took: Duration,
     },
+    /// Progress of work off the main thread, to send (see `progress`).
+    Progress {
+        token: String,
+        /// The progress begins: ask the client to create its token first.
+        create: bool,
+        progress: WorkDoneProgress,
+    },
     /// An agent's query, from a socket (see `agent`).
     Agent {
         request: crate::agent::protocol::AgentRequest,
@@ -447,6 +455,12 @@ struct GlobalState {
     open_documents: FxHashMap<FileId, i32>,
     loaded: bool,
     pool: rayon::ThreadPool,
+    /// Workspace-wide work (checking every file) runs here, on half the
+    /// threads: what the user is waiting for — hover, completion — never
+    /// queues behind it.
+    background_pool: rayon::ThreadPool,
+    /// Numbers the progress of each workspace check.
+    next_check: u64,
     task_sender: Sender<Task>,
     task_receiver: Receiver<Task>,
     /// Paths by file id, shared with request threads.
@@ -514,6 +528,13 @@ impl GlobalState {
                 .panic_handler(|_| {})
                 .build()
                 .expect("a thread pool of a few threads can be built"),
+            background_pool: rayon::ThreadPoolBuilder::new()
+                .num_threads((threads / 2).max(1))
+                .thread_name(|index| format!("kotlin-analyzer-background-{index}"))
+                .panic_handler(|_| {})
+                .build()
+                .expect("a thread pool of a few threads can be built"),
+            next_check: 0,
             task_sender,
             task_receiver,
             paths: Arc::default(),
@@ -606,6 +627,7 @@ impl GlobalState {
             .count("folders", folders.len())
             .emit();
         let sender = self.task_sender.clone();
+        let progress = progress::Progress::begun(self.task_sender.clone(), token);
         std::thread::Builder::new()
             .name("kotlin-analyzer-loader".to_owned())
             .spawn(move || {
@@ -617,7 +639,21 @@ impl GlobalState {
                         if folders[0].0.join("panic-while-loading").exists() {
                             panic!("a test panic while loading");
                         }
-                        load::read_workspaces(&folders)
+                        load::read_workspaces_reporting(&folders, &|step| {
+                            let (message, percentage) = match step {
+                                load::LoadStep::ReadingModel => {
+                                    ("Reading the project model".to_owned(), None)
+                                }
+                                load::LoadStep::ReadingFiles { count } => {
+                                    (format!("Reading {count} files"), None)
+                                }
+                                load::LoadStep::IndexingLibraries { indexed, total } => (
+                                    format!("Indexing libraries {indexed}/{total}"),
+                                    progress::percentage(indexed, total),
+                                ),
+                            };
+                            progress.report(message, percentage);
+                        })
                     })
                 });
                 let loaded = match loaded {
@@ -740,6 +776,20 @@ impl GlobalState {
                 }
             }
             Task::ModelExported { exports, took } => self.on_exports(exports, took),
+            Task::Progress {
+                token,
+                create,
+                progress,
+            } => {
+                if create {
+                    self.send_request::<request::WorkDoneProgressCreate>(
+                        WorkDoneProgressCreateParams {
+                            token: lsp_types::NumberOrString::String(token.clone()),
+                        },
+                    );
+                }
+                self.progress_on(&token, progress);
+            }
             Task::Agent { request, replier } => {
                 if self.loaded {
                     self.answer_agent(request, replier);
@@ -1117,6 +1167,19 @@ impl GlobalState {
             self.answer_on_pool(request, formatting::handle);
             return;
         }
+        if request.method == request::WorkspaceDiagnosticRequest::METHOD {
+            self.next_check += 1;
+            let progress = progress::Progress::deferred(
+                self.task_sender.clone(),
+                format!("kotlin-analyzer/checking/{}", self.next_check),
+                "Checking files",
+                CHECK_PROGRESS_DELAY,
+            );
+            self.answer_on(PoolKind::Background, request, move |snapshot, request| {
+                pull_diagnostics::workspace_request(&snapshot, request, &progress)
+            });
+            return;
+        }
         self.answer_on_pool(request, handlers::handle);
     }
 
@@ -1125,6 +1188,15 @@ impl GlobalState {
     /// logged.
     fn answer_on_pool(
         &mut self,
+        request: Request,
+        handle: impl FnOnce(handlers::Snapshot, Request) -> Response + Send + 'static,
+    ) {
+        self.answer_on(PoolKind::Interactive, request, handle);
+    }
+
+    fn answer_on(
+        &mut self,
+        pool: PoolKind,
         request: Request,
         handle: impl FnOnce(handlers::Snapshot, Request) -> Response + Send + 'static,
     ) {
@@ -1138,7 +1210,11 @@ impl GlobalState {
         let received = Instant::now();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.in_flight.insert(request.id.clone(), cancelled.clone());
-        self.pool.spawn(move || {
+        let pool = match pool {
+            PoolKind::Interactive => &self.pool,
+            PoolKind::Background => &self.background_pool,
+        };
+        pool.spawn(move || {
             // Cancelled while it waited for a worker: nothing to compute.
             if cancelled.load(Ordering::SeqCst) {
                 return;
@@ -1640,6 +1716,18 @@ impl GlobalState {
         });
     }
 }
+
+/// Which of the server's thread pools a request runs on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PoolKind {
+    /// What the user waits for.
+    Interactive,
+    /// Workspace-wide work, on fewer threads.
+    Background,
+}
+
+/// A workspace check shows its progress only once it has run this long.
+const CHECK_PROGRESS_DELAY: Duration = Duration::from_millis(500);
 
 /// A request slower than this is logged with what led to it.
 const SLOW_REQUEST: Duration = Duration::from_secs(1);

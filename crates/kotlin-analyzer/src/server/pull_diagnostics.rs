@@ -13,7 +13,11 @@ use lsp_types::{
     WorkspaceDocumentDiagnosticReport, WorkspaceFullDocumentDiagnosticReport,
     WorkspaceUnchangedDocumentDiagnosticReport,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rayon::prelude::*;
+
+use super::progress::Progress;
 use serde_json::Value;
 use vfs::FileId;
 
@@ -51,9 +55,24 @@ pub(super) fn document(
 
 /// `workspace/diagnostic`: every workspace file's, checked in parallel —
 /// "unchanged" for those the client has from this revision.
+/// `workspace/diagnostic` as a request: run on the background pool, its
+/// progress shown.
+pub(super) fn workspace_request(
+    snapshot: &Snapshot,
+    request: lsp_server::Request,
+    progress: &Progress,
+) -> lsp_server::Response {
+    let id = request.id;
+    let result = serde_json::from_value::<lsp_types::WorkspaceDiagnosticParams>(request.params)
+        .map_err(|error| error.to_string())
+        .map(|params| workspace(snapshot, params, Some(progress)));
+    super::handlers::response(id, result)
+}
+
 pub(super) fn workspace(
     snapshot: &Snapshot,
     params: lsp_types::WorkspaceDiagnosticParams,
+    progress: Option<&Progress>,
 ) -> Cancellable<Value> {
     if !snapshot.loaded {
         let empty = WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport {
@@ -77,6 +96,8 @@ pub(super) fn workspace(
             Some((file, uri))
         })
         .collect();
+    let total = files.len();
+    let checked = AtomicUsize::new(0);
     let threads = rayon::current_num_threads().max(1);
     let chunk = files.len().div_ceil(threads * 4).max(1);
     let shared = Arc::new(current);
@@ -116,6 +137,13 @@ pub(super) fn workspace(
                     })
                 };
                 reports.push(report);
+                let done = checked.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(progress) = progress {
+                    progress.report(
+                        format!("{done}/{total}"),
+                        super::progress::percentage(done, total),
+                    );
+                }
             }
             Ok(reports)
         })
@@ -123,6 +151,9 @@ pub(super) fn workspace(
     let mut items = Vec::with_capacity(files.len());
     for part in reports {
         items.extend(part?);
+    }
+    if let Some(progress) = progress {
+        progress.end(Some(format!("{total} files checked")));
     }
     let result = WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items });
     Ok(serde_json::to_value(result).unwrap_or_default())

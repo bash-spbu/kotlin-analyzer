@@ -12,8 +12,15 @@ folders there are then. `$/cancelRequest` answers a request
 not answered yet with `RequestCancelled` at once: its work is skipped when
 it hasn't started, and its result dropped when it comes (a computation
 already running goes on until done or an edit cancels it). While the workspace is being loaded, `$/progress` reports it under
-the token `kotlin-analyzer/loading`, created (`window/workDoneProgress/create`)
-right after `initialize` returns. Requests that need the workspace answer
+the token `kotlin-analyzer/loading/<n>`, created (`window/workDoneProgress/create`)
+right after `initialize` returns, step by step: reading the project model,
+reading the files (how many), indexing the libraries (how many of how many,
+with a percentage), ending with how many files there are. The Gradle export
+reports under `kotlin-analyzer/gradle`. `workspace/diagnostic` runs on a pool
+of half the worker threads, so requests the user waits for (hover,
+completion) never queue behind it; one that runs longer than 0.5 s shows
+`Checking files` with how many of how many under
+`kotlin-analyzer/checking/<n>`. Requests that need the workspace answer
 empty until it has loaded; once it has, the client is asked to refresh
 semantic tokens and inlay hints (when it supports `refresh`).
 
