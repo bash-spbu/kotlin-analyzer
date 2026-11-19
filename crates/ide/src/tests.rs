@@ -378,7 +378,7 @@ fun shapes(flag: Boolean) {
             let name_start = text[..hint.offset as usize]
                 .rfind(|char: char| !char.is_alphanumeric())
                 .map_or(0, |index| index + 1);
-            format!("{}{}", &text[name_start..hint.offset as usize], hint.label)
+            format!("{}{}", &text[name_start..hint.offset as usize], hint.text())
         })
         .collect();
     expect![[r#"
@@ -392,6 +392,55 @@ fun shapes(flag: Boolean) {
         it: String
         both: List<Shape>
         mixed: List<*>"#]]
+    .assert_eq(&rendered.join("\n"));
+}
+
+#[test]
+fn each_class_name_in_an_inlay_hint_links_to_its_declaration() {
+    let fixture = Fixture::with_mini_stdlib(
+        r#"
+//- /app/a/Use.kt
+package a
+class Box<T>(val content: T)
+class Shape
+fun use(shapes: List<Shape>) {
+    val boxes = shapes.map { Box(it) }
+    val first = boxes.first()
+}
+"#,
+    );
+    let file = fixture.file("/app/a/Use.kt");
+    let analysis = analysis(&fixture);
+    let hints = analysis.inlay_hints(file, None).unwrap();
+    let rendered: Vec<String> = hints
+        .iter()
+        .map(|hint| {
+            let parts: String = hint
+                .label
+                .iter()
+                .map(|part| match &part.target {
+                    Some(crate::HintTarget::Declaration(target)) => {
+                        format!("[{}@{}]", part.text, target.name)
+                    }
+                    Some(crate::HintTarget::LibraryDeclaration) => {
+                        format!("[{}@library]", part.text)
+                    }
+                    None => part.text.clone(),
+                })
+                .collect();
+            let resolved: Vec<String> = analysis
+                .resolve_inlay_hint(file, hint.offset)
+                .unwrap()
+                .into_iter()
+                .map(|target| target.map_or("-".to_owned(), |target| target.name))
+                .collect();
+            format!("{parts}  resolves {}", resolved.join(" "))
+        })
+        .collect();
+    expect![[r#"
+        : [List@List]<[Box@Box]<[Shape@Shape]>>  resolves - List - Box - Shape -
+        it: [Shape@Shape]  resolves - Shape
+        : [Box@Box]<[Shape@Shape]>  resolves - Box - Shape -"#]]
     .assert_eq(&rendered.join("\n"));
 }
 
@@ -808,6 +857,44 @@ fn deprecated_since_kotlin_follows_the_api_version_and_werror_makes_warnings_err
         diagnostics("api=2.0 werror"),
         "Deprecation Error, UnnecessarySafeCall Error"
     );
+}
+
+#[test]
+fn a_library_class_in_an_inlay_hint_is_linked_when_resolved() {
+    let Some(jar) = newest_cached_stdlib() else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let mut fixture = Fixture::parse(
+        "\n//- /app/b/Use.kt\npackage b\nfun use() {\n    val names = listOf(\"a\")\n}\n",
+    );
+    let source = base_db::LibrarySource {
+        archive: jar.clone(),
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = hir::index_library(&source).unwrap();
+    fixture
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let file = fixture.file("/app/b/Use.kt");
+    let hints = analysis(&fixture).inlay_hints(file, None).unwrap();
+    let [hint] = &hints[..] else {
+        panic!("one hint: {hints:?}");
+    };
+    let library_parts: Vec<&str> = hint
+        .label
+        .iter()
+        .filter(|part| part.target == Some(crate::HintTarget::LibraryDeclaration))
+        .map(|part| part.text.as_str())
+        .collect();
+    assert_eq!(library_parts, ["List", "String"]);
+    // Without a sources archive there's nothing to open: resolving gives
+    // no target, and nothing fails.
+    let resolved = analysis(&fixture)
+        .resolve_inlay_hint(file, hint.offset)
+        .unwrap();
+    assert_eq!(resolved.len(), hint.label.len());
 }
 
 /// The newest `kotlin-stdlib` JAR in the Gradle cache.

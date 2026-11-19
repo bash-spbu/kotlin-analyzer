@@ -15,7 +15,7 @@ pub mod signature;
 pub mod ty;
 pub mod type_references;
 
-pub use display::display;
+pub use display::{TypePart, display, display_parts};
 pub use lower::{TypeScope, lower_type};
 pub use ty::{ClassType, FunctionType, Nullability, Substitution, Ty, TypeParameterId};
 

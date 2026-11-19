@@ -447,3 +447,39 @@ fn a_panic_while_loading_ends_the_load_and_the_server_goes_on() {
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn a_class_name_in_an_inlay_hint_links_to_its_declaration() {
+    let root = workspace("hint-links");
+    let sources = root.join("src/main/kotlin/app");
+    let boxes = sources.join("Box.kt");
+    let user = sources.join("User.kt");
+    std::fs::write(&boxes, "package app\nclass Box\n").unwrap();
+    let user_text = "package app\nfun use() {\n    val made = make()\n}\nfun make() = Box()\n";
+    std::fs::write(&user, user_text).unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    client.open(&user, user_text);
+    let hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri(&user) },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 5, "character": 0 } },
+        }),
+    );
+    let made = &hints.as_array().unwrap()[0];
+    let parts = made["label"].as_array().expect("the label in parts");
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| part["value"].as_str())
+        .collect();
+    assert_eq!(texts, [": ", "Box"]);
+    assert_eq!(parts[1]["location"]["uri"], uri(&boxes));
+    assert_eq!(parts[1]["location"]["range"]["start"]["line"], 1);
+    assert!(parts[0].get("location").is_none_or(Value::is_null));
+    // Nothing to resolve in it: resolving gives it back as it was.
+    let resolved = client.request("inlayHint/resolve", made.clone());
+    assert_eq!(&resolved, made);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

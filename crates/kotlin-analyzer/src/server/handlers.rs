@@ -7,7 +7,8 @@ use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
     CodeActionRequest, DocumentSymbolRequest, GotoDefinition, GotoImplementation,
-    GotoTypeDefinition, HoverRequest, InlayHintRequest, Request as _, WorkspaceSymbolRequest,
+    GotoTypeDefinition, HoverRequest, InlayHintRequest, InlayHintResolveRequest, Request as _,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -56,6 +57,8 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             InlayHintRequest::METHOD => {
                 params::<InlayHintRequest>(request).map(|params| inlay_hints(&snapshot, params))
             }
+            InlayHintResolveRequest::METHOD => params::<InlayHintResolveRequest>(request)
+                .map(|hint| resolve_inlay_hint(&snapshot, hint)),
             DocumentSymbolRequest::METHOD => {
                 params::<DocumentSymbolRequest>(request).map(|_| document_symbols(&snapshot))
             }
@@ -178,22 +181,81 @@ fn inlay_hints(
         convert::offset(&text, params.range.end),
     );
     let index = LineIndex::new(&text);
-    let hints: Vec<lsp_types::InlayHint> = snapshot
-        .analysis
-        .inlay_hints(file, Some(range))?
-        .into_iter()
-        .map(|hint| lsp_types::InlayHint {
+    let uri = snapshot
+        .paths
+        .get(file.index())
+        .and_then(|path| convert::uri_of(path));
+    let mut hints: Vec<lsp_types::InlayHint> = Vec::new();
+    for hint in snapshot.analysis.inlay_hints(file, Some(range))? {
+        let mut parts = Vec::with_capacity(hint.label.len());
+        for part in &hint.label {
+            let location = match &part.target {
+                Some(ide::HintTarget::Declaration(target)) => location_of(snapshot, target)?,
+                Some(ide::HintTarget::LibraryDeclaration) | None => None,
+            };
+            parts.push(lsp_types::InlayHintLabelPart {
+                value: part.text.clone(),
+                location,
+                ..lsp_types::InlayHintLabelPart::default()
+            });
+        }
+        // A library class's place is found (its source read) only when the
+        // editor asks: `inlayHint/resolve`, with what tells the hint again.
+        let resolvable = hint
+            .label
+            .iter()
+            .any(|part| part.target == Some(ide::HintTarget::LibraryDeclaration));
+        let data = match (&uri, resolvable) {
+            (Some(uri), true) => Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "offset": hint.offset,
+            })),
+            _ => None,
+        };
+        hints.push(lsp_types::InlayHint {
             position: convert::position(&index, &text, hint.offset as usize),
-            label: lsp_types::InlayHintLabel::String(hint.label),
+            label: lsp_types::InlayHintLabel::LabelParts(parts),
             kind: Some(lsp_types::InlayHintKind::TYPE),
             text_edits: None,
             tooltip: None,
             padding_left: None,
             padding_right: None,
-            data: None,
-        })
-        .collect();
+            data,
+        });
+    }
     Ok(serde_json::to_value(hints).unwrap_or_default())
+}
+
+/// `inlayHint/resolve`: the hint with each library class name linked to
+/// its declaration in the library's sources (when they're there).
+fn resolve_inlay_hint(
+    snapshot: &Snapshot,
+    mut hint: lsp_types::InlayHint,
+) -> Cancellable<serde_json::Value> {
+    let offset = hint
+        .data
+        .as_ref()
+        .and_then(|data| data.get("offset"))
+        .and_then(serde_json::Value::as_u64);
+    let file = snapshot.request_file.filter(|_| snapshot.loaded);
+    let (Some(file), Some(offset), lsp_types::InlayHintLabel::LabelParts(parts)) =
+        (file, offset, &mut hint.label)
+    else {
+        return Ok(serde_json::to_value(hint).unwrap_or_default());
+    };
+    let targets = snapshot.analysis.resolve_inlay_hint(file, offset as u32)?;
+    // The hint is the one sent only if it still has as many parts.
+    if targets.len() == parts.len() {
+        for (part, target) in parts.iter_mut().zip(targets) {
+            if part.location.is_some() {
+                continue;
+            }
+            if let Some(target) = target {
+                part.location = location_of(snapshot, &target)?;
+            }
+        }
+    }
+    Ok(serde_json::to_value(hint).unwrap_or_default())
 }
 
 fn location_of(snapshot: &Snapshot, target: &NavigationTarget) -> Cancellable<Option<Location>> {

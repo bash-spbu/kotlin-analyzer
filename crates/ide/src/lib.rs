@@ -33,7 +33,7 @@ pub use document_symbols::DocumentSymbol;
 pub use folding::{Fold, FoldKind};
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
-pub use inlay_hints::InlayHint;
+pub use inlay_hints::{HintTarget, InlayHint, InlayHintPart};
 pub use navigation_target::{NavigationFile, NavigationTarget, SymbolKind};
 pub use references::{Access, FileRange, Highlight, RenameError, SourceChange};
 pub use semantic_tokens::{SemanticToken, TokenKind, TokenModifiers};
@@ -203,6 +203,16 @@ impl Analysis {
         range: Option<TextRange>,
     ) -> Cancellable<Vec<InlayHint>> {
         self.with_db(|db| inlay_hints::inlay_hints(db, file, range))
+    }
+
+    /// Where each part of the hint at `offset` leads (see
+    /// [`HintTarget::LibraryDeclaration`]).
+    pub fn resolve_inlay_hint(
+        &self,
+        file: FileId,
+        offset: u32,
+    ) -> Cancellable<Vec<Option<NavigationTarget>>> {
+        self.with_db(|db| inlay_hints::resolve_inlay_hint(db, file, offset))
     }
 
     /// The declarations the name at `offset` refers to.

@@ -1,16 +1,44 @@
 //! `textDocument/inlayHint`: the inferred types of what doesn't write one —
 //! locals (`val total = sum(prices)` shows `: Long`), a lambda's parameters
 //! and its `it` (`{ it: Order -> …`), an expression-bodied function's
-//! result (`fun total() = …` shows `: Long` after its parameters).
+//! result (`fun total() = …` shows `: Long` after its parameters). Each
+//! class name in a hint links to its declaration.
 
-use hir::{FileId, ItemKind, LocalKind, RootDatabase, Signature, SourceDatabase};
+use hir::{FileId, ItemKind, LocalKind, RootDatabase, Signature, SourceDatabase, Ty};
 use syntax::{Language, SyntaxNode, TextRange, named_children};
+
+use crate::NavigationTarget;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InlayHint {
     /// Where the hint goes: right after the name.
     pub offset: u32,
-    pub label: String,
+    /// The hint's text in pieces: each class name apart, linked.
+    pub label: Vec<InlayHintPart>,
+}
+
+impl InlayHint {
+    pub fn text(&self) -> String {
+        self.label.iter().map(|part| part.text.as_str()).collect()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InlayHintPart {
+    pub text: String,
+    pub target: Option<HintTarget>,
+    /// The class the part names.
+    class: Option<hir::ItemLocation>,
+}
+
+/// Where a class name in a hint leads.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum HintTarget {
+    /// A workspace class: its declaration.
+    Declaration(NavigationTarget),
+    /// A library class: its declaration is read from the library's sources
+    /// only when asked for (`resolve_inlay_hint`).
+    LibraryDeclaration,
 }
 
 pub(crate) fn inlay_hints(
@@ -42,27 +70,73 @@ pub(crate) fn inlay_hints(
         .filter(|(_, local)| in_range(local.name_range))
         .filter(|(_, local)| !local.ty.is_unknown())
         .filter_map(|(_, local)| {
-            let label = hir::display_type(db, &local.ty);
             // `it` has no name written: its hint follows the lambda's `{`.
             if local.kind == LocalKind::ImplicitIt {
                 return Some(InlayHint {
                     offset: local.name_range.end,
-                    label: format!("it: {label}"),
+                    label: label(db, "it: ", &local.ty),
                 });
             }
+            let type_text = hir::display_type(db, &local.ty);
             let name = parse.root().descendant_for_byte_range(
                 local.name_range.start as usize,
                 local.name_range.end as usize,
             )?;
-            needs_hint(&parse, name, &label).then(|| InlayHint {
+            needs_hint(&parse, name, &type_text).then(|| InlayHint {
                 offset: local.name_range.end,
-                label: format!(": {label}"),
+                label: label(db, ": ", &local.ty),
             })
         })
         .collect();
     hints.extend(result_hints(db, source, &parse, &in_range));
     hints.sort_by_key(|hint| hint.offset);
     hints
+}
+
+/// The declarations the class names of the hint at `offset` lead to, part
+/// by part (`None` for a part that names no class, or one whose source
+/// isn't available) — the library ones too.
+pub(crate) fn resolve_inlay_hint(
+    db: &RootDatabase,
+    file: FileId,
+    offset: u32,
+) -> Vec<Option<NavigationTarget>> {
+    let Some(hint) = inlay_hints(db, file, None)
+        .into_iter()
+        .find(|hint| hint.offset == offset)
+    else {
+        return Vec::new();
+    };
+    hint.label
+        .iter()
+        .map(|part| part.class.and_then(|class| NavigationTarget::of(db, class)))
+        .collect()
+}
+
+/// `prefix` and `ty`, a class name linked to a workspace declaration
+/// directly, to a library's when resolved.
+fn label(db: &RootDatabase, prefix: &str, ty: &Ty) -> Vec<InlayHintPart> {
+    let mut label = vec![InlayHintPart {
+        text: prefix.to_owned(),
+        target: None,
+        class: None,
+    }];
+    for part in hir::display_type_parts(db, ty) {
+        let target = part.class.map(|class| match class.file() {
+            Some(_) => NavigationTarget::of(db, class)
+                .map_or(HintTarget::LibraryDeclaration, HintTarget::Declaration),
+            None => HintTarget::LibraryDeclaration,
+        });
+        match (target, label.last_mut()) {
+            (None, Some(last)) if last.target.is_none() => last.text.push_str(&part.text),
+            (target, _) => label.push(InlayHintPart {
+                text: part.text,
+                target,
+                class: part.class,
+            }),
+        }
+    }
+    label
 }
 
 /// The result types of the file's expression-bodied functions that write
@@ -104,7 +178,7 @@ fn result_hints(
             let ty = hir::declaration_type(db, file, id);
             (expression_body && !ty.is_unknown()).then(|| InlayHint {
                 offset: parameters.end_byte() as u32,
-                label: format!(": {}", hir::display_type(db, &ty)),
+                label: label(db, ": ", &ty),
             })
         })
         .collect()

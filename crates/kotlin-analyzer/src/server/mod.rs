@@ -206,7 +206,12 @@ fn capabilities() -> ServerCapabilities {
                 },
             ),
         ),
-        inlay_hint_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Right(
+            lsp_types::InlayHintServerCapabilities::Options(lsp_types::InlayHintOptions {
+                resolve_provider: Some(true),
+                ..lsp_types::InlayHintOptions::default()
+            }),
+        )),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
@@ -1118,6 +1123,7 @@ const KNOWN_METHODS: &[&str] = &[
     "textDocument/semanticTokens/full",
     "textDocument/semanticTokens/range",
     "textDocument/inlayHint",
+    "inlayHint/resolve",
     "textDocument/codeAction",
     "workspace/executeCommand",
     "shutdown",

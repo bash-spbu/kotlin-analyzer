@@ -38,72 +38,127 @@ pub fn type_parameter_name(db: &dyn SourceDatabase, parameter: TypeParameterId) 
         .unwrap_or_else(|| "?".to_owned())
 }
 
-fn write(db: &dyn SourceDatabase, ty: &Ty, text: &mut String) {
+/// A piece of a type's text: a class's name (with the class), or what
+/// joins names (`<`, `, `, `?`, `) -> `).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypePart {
+    pub text: String,
+    pub class: Option<ItemLocation>,
+}
+
+/// `ty`'s text in pieces, each class name apart with its class — for an
+/// editor to link each name to its declaration.
+pub fn display_parts(db: &dyn SourceDatabase, ty: &Ty) -> Vec<TypePart> {
+    let mut parts = TypeParts::default();
+    write(db, ty, &mut parts);
+    parts.0
+}
+
+/// Where a type's text is written.
+trait TypeText {
+    fn text(&mut self, text: &str);
+    /// The name of `class`, as written (`Map.Entry`).
+    fn class(&mut self, name: &str, class: ItemLocation);
+}
+
+impl TypeText for String {
+    fn text(&mut self, text: &str) {
+        self.push_str(text);
+    }
+
+    fn class(&mut self, name: &str, _class: ItemLocation) {
+        self.push_str(name);
+    }
+}
+
+#[derive(Default)]
+struct TypeParts(Vec<TypePart>);
+
+impl TypeText for TypeParts {
+    fn text(&mut self, text: &str) {
+        match self.0.last_mut() {
+            Some(last) if last.class.is_none() => last.text.push_str(text),
+            _ => self.0.push(TypePart {
+                text: text.to_owned(),
+                class: None,
+            }),
+        }
+    }
+
+    fn class(&mut self, name: &str, class: ItemLocation) {
+        self.0.push(TypePart {
+            text: name.to_owned(),
+            class: Some(class),
+        });
+    }
+}
+
+fn write(db: &dyn SourceDatabase, ty: &Ty, out: &mut impl TypeText) {
     match ty {
         Ty::Class(class) => {
-            text.push_str(&class_name(db, class.class));
+            out.class(&class_name(db, class.class), class.class);
             if !class.arguments.is_empty() {
-                text.push('<');
+                out.text("<");
                 for (position, argument) in class.arguments.iter().enumerate() {
                     if position > 0 {
-                        text.push_str(", ");
+                        out.text(", ");
                     }
                     match argument {
-                        Ty::Unknown => text.push('*'),
-                        known => write(db, known, text),
+                        Ty::Unknown => out.text("*"),
+                        known => write(db, known, out),
                     }
                 }
-                text.push('>');
+                out.text(">");
             }
-            write_nullability(class.nullability, text);
+            write_nullability(class.nullability, out);
         }
         Ty::TypeParameter {
             parameter,
             nullability,
         } => {
-            text.push_str(&type_parameter_name(db, *parameter));
-            write_nullability(*nullability, text);
+            out.text(&type_parameter_name(db, *parameter));
+            write_nullability(*nullability, out);
         }
         Ty::Function(function) => {
             let nullable = function.nullability == Nullability::Nullable;
             if nullable {
-                text.push('(');
+                out.text("(");
             }
             if function.suspend {
-                text.push_str("suspend ");
+                out.text("suspend ");
             }
             if let Some(receiver) = &function.receiver {
-                write(db, receiver, text);
-                text.push('.');
+                write(db, receiver, out);
+                out.text(".");
             }
-            text.push('(');
+            out.text("(");
             for (position, parameter) in function.parameters.iter().enumerate() {
                 if position > 0 {
-                    text.push_str(", ");
+                    out.text(", ");
                 }
-                write(db, parameter, text);
+                write(db, parameter, out);
             }
-            text.push_str(") -> ");
-            write(db, &function.result, text);
+            out.text(") -> ");
+            write(db, &function.result, out);
             if nullable {
-                text.push_str(")?");
+                out.text(")?");
             }
         }
         Ty::Nothing { nullable } => {
-            text.push_str("Nothing");
+            out.text("Nothing");
             if *nullable {
-                text.push('?');
+                out.text("?");
             }
         }
-        Ty::Unknown => text.push_str("{unknown}"),
-        Ty::Error => text.push_str("{error}"),
+        Ty::Unknown => out.text("{unknown}"),
+        Ty::Error => out.text("{error}"),
     }
 }
 
-fn write_nullability(nullability: Nullability, text: &mut String) {
+fn write_nullability(nullability: Nullability, out: &mut impl TypeText) {
     match nullability {
         Nullability::NotNull => {}
-        Nullability::Nullable => text.push('?'),
-        Nullability::Platform => text.push('!'),
+        Nullability::Nullable => out.text("?"),
+        Nullability::Platform => out.text("!"),
     }
 }
