@@ -197,6 +197,7 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
     classes.sort_by_key(|class| class.name.classes.len());
     let mut by_nesting: FxHashMap<Box<[Name]>, ItemId> = FxHashMap::default();
     let mut source_files = Vec::new();
+    let mut compiled_classes: Vec<(ItemId, Arc<str>)> = Vec::new();
     for class in classes {
         let parent = match class.name.classes.split_last() {
             Some((_, outer)) if !outer.is_empty() => match by_nesting.get(outer) {
@@ -217,10 +218,14 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
         by_nesting.insert(nesting, index);
     }
     for part in members {
+        let compiled_class: Option<Arc<str>> = part.compiled_class.as_deref().map(Arc::from);
         for member in part.members {
             let index = builder.member(member, None, false);
             if let Some(source_file) = &part.source_file {
                 source_files.push((index, source_file.clone().into_boxed_str()));
+            }
+            if let Some(class) = &compiled_class {
+                compiled_classes.push((index, class.clone()));
             }
         }
         for alias in part.type_aliases {
@@ -244,7 +249,9 @@ fn lower(package: Path, mut classes: Vec<LibraryClass>, members: Vec<PackageMemb
             }
         }
     }
-    builder.finish(package, source_files)
+    let mut tree = builder.finish(package, source_files);
+    tree.compiled_classes = compiled_classes.into_boxed_slice();
+    tree
 }
 
 #[derive(Default)]
@@ -715,10 +722,7 @@ fn decompiled_declaration_source(
     let file_name = recorded_file
         .filter(|file| file.ends_with(&format!(".{extension}")))
         .unwrap_or_else(|| format!("{}.{extension}", tree.item(top_level).name));
-    let bodies = match language {
-        StubLanguage::Java => compiled_bodies(&tree, &items, compiled),
-        StubLanguage::Kotlin => crate::decompiled::CompiledBodies::default(),
-    };
+    let bodies = compiled_bodies(&tree, &items, compiled);
     let text: Arc<str> = Arc::from(crate::decompiled::render(
         &tree,
         &items,
@@ -740,7 +744,7 @@ fn decompiled_declaration_source(
     })
 }
 
-/// The decompiled bodies of Java classes' methods, their class files read
+/// The decompiled bodies of the classes' methods and top-level functions, their class files read
 /// from the compiled archive (a JAR's; the JDK's `ct.sym` has no bodies).
 fn compiled_bodies(
     tree: &ItemTree,

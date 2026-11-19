@@ -254,6 +254,10 @@ pub struct PackageMembers {
     pub members: Vec<Member>,
     pub type_aliases: Vec<TypeAlias>,
     pub source_file: Option<String>,
+    /// The class file whose methods are the members' code, by its binary
+    /// name (`kotlin/collections/CollectionsKt___CollectionsKt`); `None` for
+    /// built-ins, which have none.
+    pub compiled_class: Option<String>,
 }
 
 /// `typealias Name<T> = Expanded<T>`.

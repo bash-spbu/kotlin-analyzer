@@ -999,9 +999,11 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         "under the library's own license",
         "package kotlin\n",
         "import java.io.Serializable\n",
-        "data class Pair<out A, out B> : Serializable {\n    constructor(first: A, second: B)\n\n    val first: A\n",
-        "    fun copy(first: A /* = … */, second: B /* = … */): Pair<A, B> { /* compiled code */ }\n",
-        "infix fun <A, B> A.to(that: B): Pair<A, B> { /* compiled code */ }\n",
+        "// bodies are shown as Java, decompiled, in comments where they can be,\n// and parameters with defaults marked /* = … */.\n",
+        "data class Pair<out A, out B> : Serializable {\n    constructor(first: A, second: B) {\n        // Decompiled to Java:\n        // this.first = first;\n        // this.second = second;\n    }\n\n    val first: A\n",
+        "    fun copy(first: A /* = … */, second: B /* = … */): Pair<A, B> {\n        // Decompiled to Java:\n        // return new Pair(first, second);\n    }\n",
+        // An extension's receiver is its method's first parameter.
+        "infix fun <A, B> A.to(that: B): Pair<A, B> {\n    // Decompiled to Java:\n    // return new Pair($this$to, that);\n}\n",
     ] {
         assert!(
             pair.text.contains(expected),
@@ -1602,6 +1604,81 @@ fn run_tool(command: &mut std::process::Command) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn a_kotlin_librarys_bodies_show_as_java_in_comments() {
+    let Some((stdlib, _)) = cached_jar_with_sources("org.jetbrains.kotlin", "kotlin-stdlib") else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
+    let source = base_db::LibrarySource {
+        archive: stdlib,
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = crate::library::index_library(&source).expect("indexes");
+    parsed
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let text_of = |package: &str, name: &str| {
+        let declaration = crate::def_map::visible_top_level(
+            db,
+            file,
+            &Path::parse(package),
+            intern::Name::new(name),
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{package}.{name} is declared"));
+        crate::library::library_declaration_source(db, declaration)
+            .unwrap_or_else(|| panic!("{package}.{name} has a text"))
+            .text
+    };
+    // Where `expected` starts, the text from there, for a readable failure.
+    let assert_has = |text: &str, expected: &str| {
+        let first_line = expected.lines().next().unwrap_or(expected);
+        let around = text.find(first_line).map_or("(not there)", |start| {
+            &text[start.saturating_sub(300)..(start + 400).min(text.len())]
+        });
+        assert!(text.contains(expected), "{expected:?}, found:\n{around}");
+    };
+
+    // A multi-file facade's function: its code is in the facade's part
+    // (`CollectionsKt__CollectionsKt`), not the facade, which only calls it.
+    let collections = text_of("kotlin.collections", "emptyList");
+    assert_has(
+        &collections,
+        "fun <T> emptyList(): List<T> {\n    // Decompiled to Java:\n    // return (List) EmptyList.INSTANCE;\n}\n",
+    );
+
+    // Overloads told apart by Kotlin's types as the JVM has them: `Int` an
+    // `int`, `Long` a `long`.
+    let ranges = text_of("kotlin.ranges", "coerceAtLeast");
+    assert_has(
+        &ranges,
+        "fun Int.coerceAtLeast(minimumValue: Int): Int {\n    // Decompiled to Java:\n    // return $this$coerceAtLeast < minimumValue ? minimumValue : $this$coerceAtLeast;\n}\n",
+    );
+    assert_has(
+        &ranges,
+        "fun Long.coerceAtLeast(minimumValue: Long): Long {\n    // Decompiled to Java:\n    // return $this$coerceAtLeast < minimumValue ? minimumValue : $this$coerceAtLeast;\n}\n",
+    );
+
+    // A suspend function's method, a state machine taking a `Continuation`
+    // more, is not its body: none shown.
+    let continuation = text_of("kotlin.coroutines", "suspendCoroutine");
+    assert_has(&continuation, "suspendCoroutine(");
+    let suspend_line = continuation
+        .lines()
+        .find(|line| line.contains("fun <T> suspendCoroutine("))
+        .expect("suspendCoroutine is rendered");
+    assert!(
+        suspend_line.ends_with("{ /* compiled code */ }"),
+        "{suspend_line}"
+    );
 }
 
 #[test]

@@ -129,6 +129,7 @@ pub(crate) fn read(class: &ClassFile, metadata: &KotlinMetadata) -> ClassContent
                 &methods,
                 package,
                 class.source_file.clone(),
+                Some(class.name.clone()),
             ))
         }
         MetadataKind::Other => ClassContents::Nothing,
@@ -173,7 +174,7 @@ pub(crate) fn read_builtins(bytes: &[u8], package: Path) -> Vec<ClassContents> {
         .collect();
     // The package's own functions and properties (`arrayOf`, `emptyArray`).
     if let Some(message) = package_message {
-        let members = read_package(message, &names, &JvmMethods::default(), package, None);
+        let members = read_package(message, &names, &JvmMethods::default(), package, None, None);
         if !members.members.is_empty() || !members.type_aliases.is_empty() {
             contents.push(ClassContents::PackageMembers(members));
         }
@@ -629,6 +630,7 @@ fn read_package(
     methods: &JvmMethods,
     package: Path,
     source_file: Option<String>,
+    compiled_class: Option<String>,
 ) -> PackageMembers {
     let mut functions = Vec::new();
     let mut properties = Vec::new();
@@ -668,6 +670,7 @@ fn read_package(
         members,
         type_aliases: aliases,
         source_file,
+        compiled_class,
     }
 }
 

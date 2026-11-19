@@ -68,6 +68,9 @@ pub struct ItemTree {
     /// For a library package: the source file each top-level item was
     /// compiled from (`Strings.kt`), to find it in a sources archive.
     pub source_files: Box<[(ItemId, Box<str>)]>,
+    /// For a library package: the class file each top-level member's code
+    /// is in, by binary name (`kotlin/TuplesKt`), shared by a part's members.
+    pub compiled_classes: Box<[(ItemId, std::sync::Arc<str>)]>,
     pub imports: Box<[Import]>,
     /// Every declaration of the file, nested ones included, in document
     /// order, and each one's id.
@@ -598,6 +601,7 @@ impl ItemTreeBuilder {
         let tree = ItemTree {
             package,
             source_files: source_files.into_boxed_slice(),
+            compiled_classes: Box::new([]),
             imports: imports.into_boxed_slice(),
             items: self.items.into_boxed_slice(),
             ids: self.ids.into_boxed_slice(),

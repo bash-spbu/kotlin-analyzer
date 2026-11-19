@@ -48,7 +48,18 @@ functions, nested classes; signatures, modifiers, supertypes and enum
 entries as recorded, types by their simple names with imports, Kotlin
 parameters with defaults `/* = … */`. A Java class's method bodies (and its
 static initializer, `static { … }`) are decompiled where they run straight
-through (`classfile`'s `decompile`, below); every other body is
+through (`classfile`'s `decompile`, below). A Kotlin file keeps its
+declarations in Kotlin and shows each function's and constructor's body as
+Java, decompiled the same way, in `//` lines under a `// Decompiled to
+Java:` line inside the Kotlin block — no Kotlin decompiler, the bytecode
+read as what it is. A Kotlin method is found by the class its metadata
+names for the code (a class's own, a file's `…Kt` facade, or a multi-file
+facade's part, `CollectionsKt__CollectionsKt`, never the facade's
+delegating stub), an extension's receiver as its first parameter, Kotlin's
+`Int`/`Int?`/`IntArray` as `int`/`Integer`/`int[]` to tell overloads apart;
+the compiler's leading `Intrinsics.checkNotNull…` calls are left out. A
+`suspend` function's method takes a `Continuation` more and is a state
+machine: it matches nothing. Every other body is
 `{ /* compiled code */ }`. Nothing runs: no JVM — a reading aid for a
 library's API, not its source.
 
@@ -132,7 +143,7 @@ two `try`s starting together, values kept on the stack across statements
 some other way (`a[i]++` inside an expression), jumps no loop nesting
 describes — leaves it compiled code. Nearly all of a Java
 library's bodies read (slf4j-api 99.6%, jackson-databind 98%, guava 96%,
-commons-lang3 97%). Kotlin classes keep their bodies out. Tests compile
+commons-lang3 97%). Tests compile
 five classes — straight-line code; branches, loops, labeled breaks,
 `switch` (fall-through, strings), NaN, `for`-each, array initializers;
 lambdas and method references; `try`/`catch` (several, multi-catch, in a

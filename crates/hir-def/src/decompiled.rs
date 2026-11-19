@@ -1,8 +1,8 @@
 //! A library's declarations as a source file, when its sources aren't to
 //! be had: rendered from what its class files record — signatures,
-//! modifiers, supertypes — and, in a Java class, the bodies `classfile`'s
-//! decompiler reads back (those that run straight through); every other
-//! body left out. A reading aid, as an IDE shows a compiled class without
+//! modifiers, supertypes — and the bodies `classfile`'s decompiler reads
+//! back (those that run straight through), in a Kotlin file as Java in
+//! comments; every other body left out. A reading aid, as an IDE shows a compiled class without
 //! sources, not the library's code.
 //!
 //! A Kotlin class's file is Kotlin (from its `@Metadata`), a Java class's
@@ -108,7 +108,40 @@ impl CompiledBodies {
                 bodies.read_class(tree, *item, &binary, read_class);
             }
         }
+        bodies.read_top_level_functions(tree, items, read_class);
         bodies
+    }
+
+    /// The bodies of the Kotlin top-level functions among `items`, from the
+    /// class files the tree records them compiled into (`TuplesKt`, or a
+    /// multi-file facade's part).
+    fn read_top_level_functions(
+        &mut self,
+        tree: &ItemTree,
+        items: &[ItemId],
+        read_class: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) {
+        let mut by_class: BTreeMap<&str, Vec<ItemId>> = BTreeMap::new();
+        for (item, class) in tree.compiled_classes.iter() {
+            let is_wanted_function =
+                items.contains(item) && tree.item(*item).kind == ItemKind::Function;
+            if is_wanted_function {
+                by_class.entry(class).or_default().push(*item);
+            }
+        }
+        for (class, functions) in by_class {
+            let Some(decompiled) = read_class(class).and_then(|bytes| decompile_class(&bytes))
+            else {
+                continue;
+            };
+            for function in functions {
+                let item = tree.item(function);
+                if let Some(mut body) = matching_body(item, &decompiled.methods) {
+                    without_null_checks(&mut body.body);
+                    self.methods.insert(function, body);
+                }
+            }
+        }
     }
 
     fn read_class(
@@ -119,9 +152,7 @@ impl CompiledBodies {
         read_class: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     ) {
         let item = tree.item(class);
-        if StubLanguage::of(item) != StubLanguage::Java {
-            return;
-        }
+        let is_kotlin = StubLanguage::of(item) == StubLanguage::Kotlin;
         let mut decompiled = read_class(binary).and_then(|bytes| decompile_class(&bytes));
         if let Some(decompiled) = decompiled.as_mut() {
             name_enum_cases(decompiled, &self.package_directory(tree), read_class);
@@ -135,6 +166,9 @@ impl CompiledBodies {
                 }
                 if let Some(mut body) = matching_body(member, &decompiled.methods) {
                     name_ordinal_cases(tree, member, &mut body);
+                    if is_kotlin {
+                        without_null_checks(&mut body.body);
+                    }
                     self.methods.insert(*child, body);
                 }
             }
@@ -549,9 +583,19 @@ fn matching_body(item: &Item, methods: &[DecompiledMethod]) -> Option<MethodBody
     let Signature::Function { parameters, .. } = &item.signature else {
         return None;
     };
-    let wanted: Vec<String> = parameters
-        .iter()
-        .map(|parameter| {
+    let receiver = match &item.signature {
+        Signature::Function {
+            receiver: Some(receiver),
+            ..
+        } => Some(simple_type_name(receiver)),
+        _ => None,
+    };
+    // An extension's receiver is its method's first parameter. (A suspend
+    // function's method takes a `Continuation` last: it matches nothing,
+    // its state machine no body to show.)
+    let wanted: Vec<String> = receiver
+        .into_iter()
+        .chain(parameters.iter().map(|parameter| {
             let simple = parameter
                 .type_ref
                 .as_ref()
@@ -561,7 +605,7 @@ fn matching_body(item: &Item, methods: &[DecompiledMethod]) -> Option<MethodBody
             } else {
                 simple
             }
-        })
+        }))
         .collect();
     let candidates: Vec<(&DecompiledMethod, Vec<&str>)> = methods
         .iter()
@@ -595,9 +639,14 @@ fn matching_body(item: &Item, methods: &[DecompiledMethod]) -> Option<MethodBody
     })
 }
 
-/// `int`, `String`, `Entry`, `long[]`: a type's simple name; `*` for a
-/// type parameter, which matches anything.
+/// `int`, `String`, `Entry`, `long[]`: a type's simple name as the JVM
+/// has it — Kotlin's `Int` an `int`, `Int?` an `Integer`, `IntArray` an
+/// `int[]`; `*` for a type parameter or a generic array, which match
+/// anything.
 fn simple_type_name(type_ref: &TypeRef) -> String {
+    if let Some(jvm_name) = kotlin_jvm_name(type_ref) {
+        return jvm_name;
+    }
     match type_ref {
         TypeRef::Qualified { classes, .. }
         | TypeRef::Named {
@@ -609,6 +658,73 @@ fn simple_type_name(type_ref: &TypeRef) -> String {
         TypeRef::Array { element } => format!("{}[]", simple_type_name(element)),
         _ => "*".to_owned(),
     }
+}
+
+/// The JVM's simple name for a `kotlin.` class that compiles to a
+/// primitive, `Object` or an array; `None` for any other type.
+fn kotlin_jvm_name(type_ref: &TypeRef) -> Option<String> {
+    let TypeRef::Qualified {
+        package,
+        classes,
+        nullable,
+    } = type_ref
+    else {
+        return None;
+    };
+    let is_kotlin_package = package.to_string() == "kotlin";
+    let [class] = &classes[..] else {
+        return None;
+    };
+    if !is_kotlin_package {
+        return None;
+    }
+    let (primitive, boxed) = match class.name.as_str() {
+        "Int" => ("int", "Integer"),
+        "Long" => ("long", "Long"),
+        "Short" => ("short", "Short"),
+        "Byte" => ("byte", "Byte"),
+        "Char" => ("char", "Character"),
+        "Boolean" => ("boolean", "Boolean"),
+        "Float" => ("float", "Float"),
+        "Double" => ("double", "Double"),
+        "Any" => ("Object", "Object"),
+        "Array" => ("*", "*"),
+        "IntArray" => ("int[]", "int[]"),
+        "LongArray" => ("long[]", "long[]"),
+        "ShortArray" => ("short[]", "short[]"),
+        "ByteArray" => ("byte[]", "byte[]"),
+        "CharArray" => ("char[]", "char[]"),
+        "BooleanArray" => ("boolean[]", "boolean[]"),
+        "FloatArray" => ("float[]", "float[]"),
+        "DoubleArray" => ("double[]", "double[]"),
+        _ => return None,
+    };
+    let jvm_name = if *nullable { boxed } else { primitive };
+    Some(jvm_name.to_owned())
+}
+
+/// A Kotlin body without the compiler's leading
+/// `Intrinsics.checkNotNullParameter(…)` calls.
+fn without_null_checks(body: &mut Body) {
+    let checks = body
+        .statements
+        .iter()
+        .take_while(|statement| is_null_check(statement))
+        .count();
+    body.statements.drain(..checks);
+}
+
+fn is_null_check(statement: &Statement) -> bool {
+    let Statement::Expression(Expression::Call {
+        receiver: Receiver::Static(class),
+        name,
+        ..
+    }) = statement
+    else {
+        return false;
+    };
+    let is_intrinsics = class.qualified() == "kotlin.jvm.internal.Intrinsics";
+    is_intrinsics && name.starts_with("check")
 }
 
 /// [`simple_type_name`] of a descriptor: `I` is `int`, `[Ljava/util/Map$Entry;`
@@ -653,17 +769,29 @@ pub fn render(
     for item in items {
         imports.collect_item(tree, *item);
     }
+    // A Kotlin file's bodies are Java in comments: they name their classes
+    // as Java would, with no import lines of their own.
+    let mut comment_imports = Imports::new(&tree.package, StubLanguage::Java);
+    let body_imports = match language {
+        StubLanguage::Java => &mut imports,
+        StubLanguage::Kotlin => &mut comment_imports,
+    };
     for body in bodies
         .methods
         .values()
         .map(|method| &method.body)
         .chain(bodies.static_initializers.values())
     {
-        imports.collect_body(body);
+        body_imports.collect_body(body);
     }
+    let body_imports = match language {
+        StubLanguage::Java => &imports,
+        StubLanguage::Kotlin => &comment_imports,
+    };
     let mut renderer = Renderer {
         tree,
         imports: &imports,
+        body_imports,
         language,
         bodies,
         text: String::new(),
@@ -698,7 +826,11 @@ const COMPILED_CODE: &str = "{ /* compiled code */ }";
 
 struct Renderer<'tree> {
     tree: &'tree ItemTree,
+    /// How the declarations name classes.
     imports: &'tree Imports,
+    /// How the decompiled bodies, Java, name classes: in a Java file the
+    /// same as the declarations.
+    body_imports: &'tree Imports,
     language: StubLanguage,
     bodies: &'tree CompiledBodies,
     text: String,
@@ -716,8 +848,12 @@ impl Renderer<'_> {
             }
         };
         let left_out = match self.language {
-            StubLanguage::Kotlin => {
+            StubLanguage::Kotlin if self.bodies.is_empty() => {
                 "bodies are left out, and parameters with defaults marked /* = … */."
+            }
+            StubLanguage::Kotlin => {
+                "bodies are shown as Java, decompiled, in comments where they can be,\n\
+                 and parameters with defaults marked /* = … */."
             }
             StubLanguage::Java if self.bodies.is_empty() => "bodies are left out.",
             StubLanguage::Java => "bodies are decompiled where they can be, others left out.",
@@ -735,7 +871,7 @@ impl Renderer<'_> {
             "A reading aid, not the library's source: the code is its authors',".to_owned(),
             "under the library's own license. Check it before reusing anything here.".to_owned(),
         ];
-        for line in lines {
+        for line in lines.iter().flat_map(|line| line.split('\n')) {
             if line.is_empty() {
                 self.text.push_str("//\n");
             } else {
@@ -777,7 +913,7 @@ impl Renderer<'_> {
     }
 
     fn java_type(&self, type_ref: &TypeRef) -> String {
-        java_type(&self.imports.shortened(type_ref))
+        java_type(&self.body_imports.shortened(type_ref))
     }
 
     fn kotlin_item(&mut self, index: ItemId, depth: usize) {
@@ -843,15 +979,24 @@ impl Renderer<'_> {
                     let _ = write!(declaration, ": {}", self.kotlin_type(return_type));
                 }
                 words.push(declaration);
-                if !item.modifiers.contains(Modifiers::ABSTRACT) {
-                    words.push(COMPILED_CODE.to_owned());
+                let header = words.join(" ");
+                if item.modifiers.contains(Modifiers::ABSTRACT) {
+                    let _ = writeln!(self.text, "{header}");
+                } else if !self.kotlin_commented_body(index, &header, depth) {
+                    let _ = writeln!(self.text, "{header} {COMPILED_CODE}");
                 }
+                return;
             }
             (ItemKind::Constructor, Signature::Function { parameters, .. }) => {
                 words.push(format!(
                     "constructor({})",
                     self.kotlin_parameters(parameters)
                 ));
+                let header = words.join(" ");
+                if !self.kotlin_commented_body(index, &header, depth) {
+                    let _ = writeln!(self.text, "{header}");
+                }
+                return;
             }
             (ItemKind::Property { mutable }, Signature::Property { type_ref, .. }) => {
                 words.push(if *mutable { "var" } else { "val" }.to_owned());
@@ -874,6 +1019,38 @@ impl Renderer<'_> {
             _ => words.push(item.name.to_string()),
         }
         let _ = writeln!(self.text, "{}", words.join(" "));
+    }
+
+    /// `header {`, the item's decompiled body as Java in `//` lines, `}`;
+    /// false, writing nothing, when it has no body to show.
+    fn kotlin_commented_body(&mut self, index: ItemId, header: &str, depth: usize) -> bool {
+        let Some(method) = self.bodies.methods.get(&index) else {
+            return false;
+        };
+        let mut java = Renderer {
+            tree: self.tree,
+            imports: self.imports,
+            body_imports: self.body_imports,
+            language: StubLanguage::Java,
+            bodies: self.bodies,
+            text: String::new(),
+            statement_depth: std::cell::Cell::new(depth + 1),
+        };
+        // Written where the lines go, for them to wrap there.
+        java.java_statements(&method.body, depth + 1);
+        if java.text.is_empty() {
+            return false;
+        }
+        let _ = writeln!(self.text, "{header} {{");
+        let body_indent = "    ".repeat(depth + 1);
+        let _ = writeln!(self.text, "{body_indent}// Decompiled to Java:");
+        for line in java.text.lines() {
+            let statement = line.strip_prefix(body_indent.as_str()).unwrap_or(line);
+            let _ = writeln!(self.text, "{body_indent}// {statement}");
+        }
+        self.indent(depth);
+        self.text.push_str("}\n");
+        true
     }
 
     /// `{`, enum entries, members, `}` — or nothing for a class without
@@ -1584,6 +1761,7 @@ impl Renderer<'_> {
                         let mut inner = Renderer {
                             tree: self.tree,
                             imports: self.imports,
+                            body_imports: self.body_imports,
                             language: self.language,
                             bodies: self.bodies,
                             text: String::new(),
@@ -2527,6 +2705,40 @@ impl Imports {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kotlin_body_loses_its_leading_null_checks_only() {
+        let call = |class: &str, name: &str| {
+            Statement::Expression(Expression::Call {
+                receiver: Receiver::Static(
+                    ClassName::from_kotlin_internal(class).expect("a class name"),
+                ),
+                name: name.to_owned(),
+                arguments: vec![Expression::Local("value".to_owned())],
+            })
+        };
+        let mut body = Body {
+            statements: vec![
+                call("kotlin/jvm/internal/Intrinsics", "checkNotNullParameter"),
+                call("kotlin/jvm/internal/Intrinsics", "checkNotNull"),
+                // The same name on another class is the library's own call.
+                call("a/b/Intrinsics", "checkNotNull"),
+                // After the first statement of its own, a check is the
+                // body's: a `!!` written in it.
+                call("kotlin/jvm/internal/Intrinsics", "checkNotNull"),
+                Statement::Return(Some(Expression::Local("value".to_owned()))),
+            ],
+        };
+        without_null_checks(&mut body);
+        assert_eq!(
+            body.statements,
+            vec![
+                call("a/b/Intrinsics", "checkNotNull"),
+                call("kotlin/jvm/internal/Intrinsics", "checkNotNull"),
+                Statement::Return(Some(Expression::Local("value".to_owned()))),
+            ]
+        );
+    }
 
     #[test]
     fn a_long_line_wraps_at_its_outermost_call_with_arguments() {
