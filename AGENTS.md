@@ -87,6 +87,13 @@ with the behaviour you change.
 - **Queries.** Every derived fact is a Salsa query; read paths take
   `&self`. The one exception is syntax trees: `base_db::parse` keeps a
   bounded cache of them, since a tree is a pure function of its text.
+- **Logs hold no user code.** The server logs only through `crate::log`
+  events (`Event::info("load-finished").count(…).emit()`), never
+  `eprintln!` or a formatted string. An event's fields come from safe types
+  (counts, durations, the program's own words, `FileRef`, keyed `Hashed`),
+  so code, names and paths have no way in. If the types don't allow a
+  value, it must not be logged. A new event or field goes into
+  `docs/spec/logging.md`.
 - **Every change has a test** that fails without it. Check that: break the
   fix and watch the test fail.
 - **Types say what code means.** Reach for an enum or newtype before a
