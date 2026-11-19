@@ -39,5 +39,10 @@ first): what one file declares changes what another's code means.
 `workspace/executeCommand`: `kotlin-analyzer.reloadWorkspace` — export the
 model again if the build files changed, and reload it and every file.
 
+Settings in `initializationOptions`: `diagnostics.disabled`,
+`diagnostics.experimental`, `gradleExport`, `projectJson`, and `log`
+(`"info"`, `"debug"`; see logging.md). `diagnostics` and `log` may also
+change in `workspace/didChangeConfiguration` (under `kotlin-analyzer`).
+
 Not provided: formatting, call hierarchy, selection range,
 on-type formatting.

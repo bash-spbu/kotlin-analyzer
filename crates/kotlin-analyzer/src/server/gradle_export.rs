@@ -70,7 +70,40 @@ pub(super) enum Export {
     /// The cached model was exported after the build files' last change.
     UpToDate,
     Exported,
-    Failed(String),
+    Failed(ExportFailure),
+}
+
+/// Why an export failed: for the log, its kind (and Gradle's exit code);
+/// for the user, what Gradle said.
+#[derive(Debug)]
+pub(super) struct ExportFailure {
+    pub(super) kind: ExportFailureKind,
+    pub(super) exit_code: Option<i32>,
+    /// Shown to the user, never logged: it may name their paths and code.
+    pub(super) detail: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ExportFailureKind {
+    /// The cache directory couldn't be written.
+    Cache,
+    /// Neither the wrapper nor `gradle` could be started.
+    CannotRun,
+    /// Gradle ran and failed.
+    BuildFailed,
+    /// Gradle succeeded without writing the model.
+    NoModel,
+}
+
+impl ExportFailureKind {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            ExportFailureKind::Cache => "cache-unwritable",
+            ExportFailureKind::CannotRun => "cannot-run-gradle",
+            ExportFailureKind::BuildFailed => "build-failed",
+            ExportFailureKind::NoModel => "no-model-written",
+        }
+    }
 }
 
 /// Exports the model of the build at `root` to `output` unless the cached
@@ -162,11 +195,24 @@ const EXPORT_ARGUMENTS: &[&str] = &[
 
 /// Runs the export (the build's wrapper, else `gradle` on the PATH) and
 /// writes the model to `output`.
-fn export(root: &Path, output: &Path) -> Result<(), String> {
-    let directory = output.parent().ok_or("no cache directory")?;
-    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+fn export(root: &Path, output: &Path) -> Result<(), ExportFailure> {
+    let failure = |kind, exit_code, detail: String| ExportFailure {
+        kind,
+        exit_code,
+        detail,
+    };
+    let cache_failure =
+        |error: std::io::Error| failure(ExportFailureKind::Cache, None, error.to_string());
+    let directory = output.parent().ok_or_else(|| {
+        failure(
+            ExportFailureKind::Cache,
+            None,
+            "no cache directory".to_owned(),
+        )
+    })?;
+    std::fs::create_dir_all(directory).map_err(cache_failure)?;
     let script = directory.join("kotlin-analyzer.init.gradle");
-    std::fs::write(&script, INIT_SCRIPT).map_err(|error| error.to_string())?;
+    std::fs::write(&script, INIT_SCRIPT).map_err(cache_failure)?;
     let wrapper = root.join("gradlew");
     let program = if wrapper.is_file() {
         wrapper
@@ -181,13 +227,25 @@ fn export(root: &Path, output: &Path) -> Result<(), String> {
         .arg("kotlinAnalyzerModel")
         .arg(format!("-PkotlinAnalyzerOutput={}", output.display()))
         .output()
-        .map_err(|error| format!("cannot run {}: {error}", program.display()))?;
+        .map_err(|error| {
+            failure(
+                ExportFailureKind::CannotRun,
+                None,
+                format!("cannot run {}: {error}", program.display()),
+            )
+        })?;
     if result.status.success() && output.is_file() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&result.stderr);
     let last_lines: Vec<&str> = stderr.lines().rev().take(12).collect();
-    Err(last_lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
+    let detail = last_lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let kind = if result.status.success() {
+        ExportFailureKind::NoModel
+    } else {
+        ExportFailureKind::BuildFailed
+    };
+    Err(failure(kind, result.status.code(), detail))
 }
 
 #[cfg(test)]

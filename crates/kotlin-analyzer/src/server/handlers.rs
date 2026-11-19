@@ -33,6 +33,10 @@ pub(super) struct Snapshot {
 const WORKSPACE_SYMBOL_LIMIT: usize = 128;
 
 pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
+    #[cfg(test)]
+    if request.method == "kotlin-analyzer/testPanic" {
+        panic!("a test panic about `{}`", request.params["secret"]);
+    }
     let id = request.id.clone();
     let result =
         match request.method.as_str() {

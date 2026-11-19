@@ -8,6 +8,29 @@
 use ide::{Check, DiagnosticsConfig};
 use serde_json::Value;
 
+/// How much the log writes as it happens: `log` in `initializationOptions`
+/// (`info`, `debug`), else `KOTLIN_ANALYZER_LOG`, else `info`.
+pub(super) fn log_level(options: Option<&Value>) -> crate::log::Level {
+    let from_options = options
+        .and_then(|options| options.get("log"))
+        .and_then(Value::as_str)
+        .and_then(crate::log::Level::from_setting);
+    let from_environment = std::env::var("KOTLIN_ANALYZER_LOG")
+        .ok()
+        .and_then(|setting| crate::log::Level::from_setting(&setting));
+    from_options
+        .or(from_environment)
+        .unwrap_or(crate::log::Level::Info)
+}
+
+/// The log level in a configuration change, if it has one.
+pub(super) fn changed_log_level(settings: &Value) -> Option<crate::log::Level> {
+    let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
+    ours.get("log")
+        .and_then(Value::as_str)
+        .and_then(crate::log::Level::from_setting)
+}
+
 /// The diagnostics settings in `initializationOptions`.
 pub(super) fn diagnostics_config(options: Option<&Value>) -> DiagnosticsConfig {
     options

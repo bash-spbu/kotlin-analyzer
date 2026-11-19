@@ -2,8 +2,10 @@
 //! line tools for measuring it on a real workspace.
 
 mod analysis_stats;
+mod anonymize;
 mod diagnostics;
 mod load;
+mod log;
 mod server;
 
 use std::path::Path;
@@ -23,6 +25,12 @@ USAGE:
                                 on any error or warning
     kotlin-analyzer parse <file>
                                 print a Kotlin or Java file's syntax tree
+    kotlin-analyzer log-whois <root> <hash>…
+                                which workspace file a log's hash stands for
+                                (only on the machine that wrote the log)
+    kotlin-analyzer anonymize <file>
+                                the file with its names, strings and comments
+                                replaced, structure kept — to send with a report
     kotlin-analyzer --version   print the version
     kotlin-analyzer --help      print this help
 ";
@@ -35,6 +43,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("parse") => parse_command(arguments.get(1)),
+        Some("log-whois") => log::whois::command(&arguments[1..]),
+        Some("anonymize") => anonymize::command(&arguments[1..]),
         Some("analysis-stats") => analysis_stats_command(&arguments[1..]),
         Some("diagnostics") => diagnostics::command(&arguments[1..]),
         Some("definition") => analysis_stats::definition_command(&arguments[1..]),

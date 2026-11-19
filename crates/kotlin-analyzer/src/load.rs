@@ -34,9 +34,12 @@ pub struct LoadedLibraries {
     pub failures: Vec<(PathBuf, String)>,
 }
 
-pub fn read_workspace(root: &Path, project_json: Option<&Path>) -> Result<LoadedFiles, String> {
+pub fn read_workspace(
+    root: &Path,
+    project_json: Option<&Path>,
+) -> Result<LoadedFiles, project_model::LoadError> {
     let started = Instant::now();
-    let model = ProjectModel::load(root, project_json).map_err(|error| error.to_string())?;
+    let model = ProjectModel::load(root, project_json)?;
     let model_time = started.elapsed();
 
     let started = Instant::now();

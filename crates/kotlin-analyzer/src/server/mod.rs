@@ -17,6 +17,7 @@ mod tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select};
 use ide::AnalysisHost;
@@ -33,6 +34,9 @@ use rustc_hash::FxHashMap;
 use vfs::{FileId, Vfs};
 
 use crate::load::{self, LoadedFiles};
+use crate::log::{Context, Event, FileRef, Hashed, SafeToken};
+
+pub(crate) use library_sources::cache_directory;
 
 /// The progress token of workspace loading (one per load: a reload may
 /// start while one is running).
@@ -52,6 +56,7 @@ pub enum Ending {
 }
 
 pub fn run() -> Result<Ending, String> {
+    crate::log::enable_output();
     let (connection, io_threads) = Connection::stdio();
     let ending = run_on(&connection)?;
     drop(connection);
@@ -80,6 +85,9 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         .and_then(|options| options.get("gradleExport"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
+    let log_level = settings::log_level(params.initialization_options.as_ref());
+    crate::log::start_session(&root, log_level);
+    log_session_start(&params, &root, &diagnostics_config, gradle_export);
     let result = InitializeResult {
         capabilities: capabilities(),
         server_info: Some(ServerInfo {
@@ -102,7 +110,62 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     state.gradle_export = gradle_export;
     state.start_loading();
     state.start_export();
-    state.main_loop(&connection.receiver)
+    let ending = state.main_loop(&connection.receiver);
+    Event::info("session-ended")
+        .text(
+            "ending",
+            match ending {
+                Ok(Ending::AfterShutdown) => "after-shutdown",
+                Ok(Ending::WithoutShutdown) => "without-shutdown",
+                Err(_) => "connection-error",
+            },
+        )
+        .count("requests", state.requests_received)
+        .count("panics", crate::log::panics_so_far())
+        .emit();
+    ending
+}
+
+/// The session's first event: this build, the machine, the client and the
+/// settings — what any report needs first.
+fn log_session_start(
+    params: &InitializeParams,
+    root: &std::path::Path,
+    diagnostics: &ide::DiagnosticsConfig,
+    gradle_export: bool,
+) {
+    let client = params.client_info.as_ref();
+    let disabled: Vec<&'static str> = diagnostics
+        .disabled
+        .iter()
+        .map(|check| check.name())
+        .collect();
+    let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
+    Event::info("session-started")
+        .text("version", env!("CARGO_PKG_VERSION"))
+        .text("os", std::env::consts::OS)
+        .text("arch", std::env::consts::ARCH)
+        .count("cpus", threads)
+        .token(
+            "client",
+            SafeToken::of(client.map_or("unknown", |client| client.name.as_str())),
+        )
+        .token(
+            "client-version",
+            SafeToken::of(
+                client
+                    .and_then(|client| client.version.as_deref())
+                    .unwrap_or("unknown"),
+            ),
+        )
+        .hash("workspace", Hashed::of(&root.to_string_lossy()))
+        .flag("gradle-export", gradle_export)
+        .flag("experimental-checks", diagnostics.experimental)
+        .texts("disabled-checks", disabled)
+        .emit();
+    if let Some(location) = crate::log::file_location() {
+        eprintln!("kotlin-analyzer: this session's log is {location}");
+    }
 }
 
 fn capabilities() -> ServerCapabilities {
@@ -172,10 +235,13 @@ enum Task {
     /// A load finished; `generation` tells it from a later one.
     Loaded {
         generation: u64,
-        loaded: Result<LoadedFiles, String>,
+        loaded: Result<LoadedFiles, project_model::LoadError>,
     },
-    /// The background Gradle export finished.
-    ModelExported(gradle_export::Export),
+    /// The background Gradle export finished, after `took`.
+    ModelExported {
+        export: gradle_export::Export,
+        took: Duration,
+    },
     Diagnostics {
         file: FileId,
         version: i32,
@@ -249,6 +315,8 @@ struct GlobalState {
     diagnostics_generations: FxHashMap<FileId, u64>,
     next_diagnostics_generation: u64,
     refreshes: ClientRefreshes,
+    /// For the log: how many requests the client sent.
+    requests_received: u64,
 }
 
 impl GlobalState {
@@ -269,6 +337,9 @@ impl GlobalState {
             pool: rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .thread_name(|index| format!("kotlin-analyzer-worker-{index}"))
+                // A job's panic is caught (and logged) where it runs; this
+                // keeps one that slips through from aborting the server.
+                .panic_handler(|_| {})
                 .build()
                 .expect("a thread pool of a few threads can be built"),
             task_sender,
@@ -283,6 +354,7 @@ impl GlobalState {
             diagnostics_generations: FxHashMap::default(),
             next_diagnostics_generation: 0,
             refreshes: ClientRefreshes::default(),
+            requests_received: 0,
         }
     }
 
@@ -294,6 +366,7 @@ impl GlobalState {
                     match message {
                         Message::Request(request) => {
                             if request.method == request::Shutdown::METHOD {
+                                Event::info("shutdown-requested").emit();
                                 self.shutdown_requested = true;
                                 self.respond(Response::new_ok(request.id, ()));
                                 continue;
@@ -341,14 +414,33 @@ impl GlobalState {
         );
         let root = self.root.clone();
         let project_json = self.model_file();
+        Event::info("load-started")
+            .count("generation", generation)
+            .text("model", self.model_source(project_json.is_some()))
+            .emit();
         let sender = self.task_sender.clone();
         std::thread::Builder::new()
             .name("kotlin-analyzer-loader".to_owned())
             .spawn(move || {
-                let loaded = load::read_workspace(&root, project_json.as_deref());
+                let loaded = crate::log::within(Context::Loading { generation }, || {
+                    load::read_workspace(&root, project_json.as_deref())
+                });
                 let _ = sender.send(Task::Loaded { generation, loaded });
             })
             .expect("a thread can be spawned");
+    }
+
+    /// Where the model a load reads comes from, for the log.
+    fn model_source(&self, has_model_file: bool) -> &'static str {
+        if self.project_json.is_some() {
+            "given-project-json"
+        } else if self.root.join(".kotlin-analyzer/project.json").is_file() {
+            "workspace-project-json"
+        } else if has_model_file {
+            "exported-gradle-model"
+        } else {
+            "directory-conventions"
+        }
     }
 
     /// The model file to load: the one given, the workspace's own, or the
@@ -392,11 +484,23 @@ impl GlobalState {
         );
         let root = self.root.clone();
         let sender = self.task_sender.clone();
+        let tool = if root.join("gradlew").is_file() {
+            "gradle-wrapper"
+        } else {
+            "gradle-on-path"
+        };
+        Event::info("gradle-export-started")
+            .text("tool", tool)
+            .emit();
         std::thread::Builder::new()
             .name("kotlin-analyzer-gradle".to_owned())
             .spawn(move || {
-                let export = gradle_export::export_if_stale(&root, &cached);
-                let _ = sender.send(Task::ModelExported(export));
+                let started = Instant::now();
+                let export = crate::log::within(Context::GradleExport, || {
+                    gradle_export::export_if_stale(&root, &cached)
+                });
+                let took = started.elapsed();
+                let _ = sender.send(Task::ModelExported { export, took });
             })
             .expect("a thread can be spawned");
     }
@@ -404,9 +508,12 @@ impl GlobalState {
     fn on_task(&mut self, task: Task) {
         match task {
             Task::Response(response) => self.respond(response),
-            Task::ModelExported(export) => self.on_export(export),
+            Task::ModelExported { export, took } => self.on_export(export, took),
             Task::Loaded { generation, loaded } => {
                 if generation != self.load_generation {
+                    Event::info("load-superseded")
+                        .count("generation", generation)
+                        .emit();
                     // Superseded by a later load, which reports for both.
                     self.progress_on(
                         &loading_token(generation),
@@ -427,6 +534,10 @@ impl GlobalState {
                 let current = self.open_documents.get(&file).copied();
                 let latest = self.diagnostics_generations.get(&file).copied();
                 if current != Some(version) || latest != Some(generation) {
+                    Event::debug("diagnostics-stale")
+                        .file("file", self.file_ref(file))
+                        .count("generation", generation)
+                        .emit();
                     return;
                 }
                 let Some(uri) = convert::uri_of(self.vfs.path(file)) else {
@@ -443,13 +554,26 @@ impl GlobalState {
         }
     }
 
-    fn on_export(&mut self, export: gradle_export::Export) {
+    fn on_export(&mut self, export: gradle_export::Export, took: Duration) {
         self.exporting = false;
         let message = match &export {
             gradle_export::Export::UpToDate => "up to date",
             gradle_export::Export::Exported => "exported",
             gradle_export::Export::Failed(_) => "failed",
         };
+        match &export {
+            gradle_export::Export::Failed(failure) => Event::warn("gradle-export-failed")
+                .text("reason", failure.kind.name())
+                .number("exit-code", failure.exit_code.map_or(-1, i64::from))
+                .duration("took", took)
+                .emit(),
+            gradle_export::Export::UpToDate | gradle_export::Export::Exported => {
+                Event::info("gradle-export-finished")
+                    .text("outcome", message)
+                    .duration("took", took)
+                    .emit();
+            }
+        }
         self.progress_on(
             EXPORT_TOKEN,
             WorkDoneProgress::End(WorkDoneProgressEnd {
@@ -459,22 +583,27 @@ impl GlobalState {
         match export {
             gradle_export::Export::UpToDate => {}
             gradle_export::Export::Exported => self.start_loading(),
-            gradle_export::Export::Failed(error) => {
+            gradle_export::Export::Failed(failure) => {
                 self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
                     typ: lsp_types::MessageType::WARNING,
                     message: format!(
-                        "kotlin-analyzer couldn't export the Gradle model (libraries stay unknown):\n{error}"
+                        "kotlin-analyzer couldn't export the Gradle model (libraries stay unknown):\n{}",
+                        failure.detail
                     ),
                 })
             }
         }
     }
 
-    fn on_loaded(&mut self, loaded: Result<LoadedFiles, String>) {
+    fn on_loaded(&mut self, loaded: Result<LoadedFiles, project_model::LoadError>) {
         let token = loading_token(self.load_generation);
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
+                Event::warn("load-failed")
+                    .count("generation", self.load_generation)
+                    .text("reason", load_failure_kind(&error))
+                    .emit();
                 self.loaded = true;
                 self.progress_on(
                     &token,
@@ -489,7 +618,9 @@ impl GlobalState {
                 return;
             }
         };
+        let started = Instant::now();
         let files = loaded.files.len();
+        let summary = LoadSummary::of(&loaded);
         self.model = loaded.model.clone();
         let open: Vec<PathBuf> = self
             .open_documents
@@ -506,6 +637,7 @@ impl GlobalState {
         load::apply_libraries(&mut self.host, loaded.libraries);
         self.loaded = true;
         self.refresh_paths();
+        summary.emit(self.load_generation, started.elapsed());
         self.progress_on(
             &token,
             WorkDoneProgress::End(WorkDoneProgressEnd {
@@ -551,6 +683,9 @@ impl GlobalState {
     fn on_watched_files(&mut self, changes: Vec<lsp_types::FileEvent>) {
         let mut model_changed = false;
         let mut build_changed = false;
+        let mut sources = 0usize;
+        let mut open_skipped = 0usize;
+        let reported = changes.len();
         for change in changes {
             let Some(path) = convert::path_of(&change.uri) else {
                 continue;
@@ -571,14 +706,23 @@ impl GlobalState {
                 .file_id(&path)
                 .is_some_and(|file| self.open_documents.contains_key(&file));
             if is_open {
+                open_skipped += 1;
                 continue;
             }
+            sources += 1;
             let text = match change.typ {
                 lsp_types::FileChangeType::DELETED => None,
                 _ => std::fs::read_to_string(&path).ok().map(Arc::from),
             };
             self.vfs.set_contents(&path, text);
         }
+        Event::debug("watched-files-changed")
+            .count("reported", reported)
+            .count("sources-read", sources)
+            .count("open-skipped", open_skipped)
+            .flag("build-files", build_changed)
+            .flag("model-file", model_changed)
+            .emit();
         self.apply_vfs_changes();
         self.update_diagnostics(self.open_documents.keys().copied().collect());
         if model_changed {
@@ -614,22 +758,48 @@ impl GlobalState {
             ));
             return;
         }
+        self.requests_received += 1;
         if request.method == request::ExecuteCommand::METHOD {
             self.execute_command(request);
             return;
         }
+        let request_file = self.request_file_of(&request);
+        let method = known_method(&request.method);
+        let id = request_number(&request.id);
+        let file = request_file.map(|file| self.file_ref(file));
+        log_request(&request, id, method, file);
         let snapshot = handlers::Snapshot {
             analysis: self.host.analysis(),
             paths: self.paths.clone(),
             loaded: self.loaded,
-            request_file: self.request_file_of(&request),
+            request_file,
             diagnostics_config: self.diagnostics_config.clone(),
         };
         let sender = self.task_sender.clone();
         self.pool.spawn(move || {
-            let response = handlers::handle(snapshot, request);
+            let started = Instant::now();
+            let request_id = request.id.clone();
+            let context = Context::Request { id, method, file };
+            let handled = crate::log::within(context, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handlers::handle(snapshot, request)
+                }))
+            });
+            let response = handled.unwrap_or_else(|_| {
+                Response::new_err(
+                    request_id,
+                    lsp_server::ErrorCode::InternalError as i32,
+                    "kotlin-analyzer failed on this request; its log says where".to_owned(),
+                )
+            });
+            log_response(&response, id, method, file, started.elapsed());
             let _ = sender.send(Task::Response(response));
         });
+    }
+
+    /// A file as the log names it.
+    fn file_ref(&self, file: FileId) -> FileRef {
+        FileRef::new(file.index() as u32, self.vfs.path(file), &self.root)
     }
 
     /// `workspace/executeCommand`, on the main thread: the commands change
@@ -639,6 +809,7 @@ impl GlobalState {
             serde_json::from_value(request.params.clone());
         match params {
             Ok(params) if params.command == RELOAD_COMMAND => {
+                Event::info("reload-requested").emit();
                 self.respond(Response::new_ok(request.id, serde_json::Value::Null));
                 self.start_loading();
                 self.start_export();
@@ -673,11 +844,16 @@ impl GlobalState {
             match cast_notification::<notification::DidOpenTextDocument>(notification) {
                 Ok(params) => {
                     if let Some(path) = convert::path_of(&params.text_document.uri) {
-                        let file = self
-                            .vfs
-                            .set_contents(&path, Some(Arc::from(params.text_document.text)));
+                        let text = params.text_document.text;
+                        let shape = TextShape::of(&text);
+                        let file = self.vfs.set_contents(&path, Some(Arc::from(text)));
                         self.open_documents
                             .insert(file, params.text_document.version);
+                        shape
+                            .describe(Event::debug("document-opened"))
+                            .file("file", self.file_ref(file))
+                            .number("version", i64::from(params.text_document.version))
+                            .emit();
                         self.apply_vfs_changes();
                         self.update_diagnostics(vec![file]);
                     }
@@ -692,12 +868,20 @@ impl GlobalState {
                         return;
                     };
                     // Full sync: the last change carries the whole text.
+                    let changes = params.content_changes.len();
                     let Some(change) = params.content_changes.into_iter().last() else {
                         return;
                     };
+                    let shape = TextShape::of(&change.text);
                     let file = self.vfs.set_contents(&path, Some(Arc::from(change.text)));
                     self.open_documents
                         .insert(file, params.text_document.version);
+                    shape
+                        .describe(Event::debug("document-changed"))
+                        .file("file", self.file_ref(file))
+                        .number("version", i64::from(params.text_document.version))
+                        .count("changes", changes)
+                        .emit();
                     self.apply_vfs_changes();
                     // An edit can change what other files' code means: all
                     // open files are checked again, the edited one first.
@@ -717,7 +901,16 @@ impl GlobalState {
         let notification =
             match cast_notification::<notification::DidChangeConfiguration>(notification) {
                 Ok(params) => {
+                    if let Some(level) = settings::changed_log_level(&params.settings) {
+                        crate::log::set_level(level);
+                    }
                     if let Some(config) = settings::changed_diagnostics_config(&params.settings) {
+                        let disabled: Vec<&'static str> =
+                            config.disabled.iter().map(|check| check.name()).collect();
+                        Event::info("settings-changed")
+                            .flag("experimental-checks", config.experimental)
+                            .texts("disabled-checks", disabled)
+                            .emit();
                         self.diagnostics_config = Arc::new(config);
                         self.update_diagnostics(self.open_documents.keys().copied().collect());
                     }
@@ -730,6 +923,9 @@ impl GlobalState {
                 return;
             };
             if let Some(file) = self.vfs.file_id(&path) {
+                Event::debug("document-closed")
+                    .file("file", self.file_ref(file))
+                    .emit();
                 self.open_documents.remove(&file);
                 self.diagnostics_generations.remove(&file);
             }
@@ -782,6 +978,8 @@ impl GlobalState {
             self.diagnostics_generations.insert(file, generation);
             let analysis = self.host.analysis();
             let sender = self.task_sender.clone();
+            let file_ref = self.file_ref(file);
+            let syntax_only = !self.loaded;
             // Until the workspace is loaded only syntax is known for sure.
             let config = if self.loaded {
                 self.diagnostics_config.clone()
@@ -792,7 +990,42 @@ impl GlobalState {
                 })
             };
             self.pool.spawn(move || {
-                let Ok(diagnostics) = handlers::diagnostics(&analysis, file, &config) else {
+                let started = Instant::now();
+                let context = Context::Diagnostics {
+                    file: file_ref,
+                    version,
+                };
+                let computed = crate::log::within(context, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handlers::diagnostics(&analysis, file, &config)
+                    }))
+                });
+                let took = started.elapsed();
+                let outcome = match &computed {
+                    Ok(Ok(_)) => "computed",
+                    Ok(Err(_)) => "cancelled",
+                    Err(_) => "panicked",
+                };
+                let slow = took > SLOW_DIAGNOSTICS;
+                let event = if slow {
+                    Event::warn("slow-diagnostics")
+                } else {
+                    Event::debug("diagnostics")
+                };
+                let count = match &computed {
+                    Ok(Ok(diagnostics)) => diagnostics.len(),
+                    _ => 0,
+                };
+                event
+                    .file("file", file_ref)
+                    .number("version", i64::from(version))
+                    .count("generation", generation)
+                    .flag("syntax-only", syntax_only)
+                    .text("outcome", outcome)
+                    .count("found", count)
+                    .duration("took", took)
+                    .emit();
+                let Ok(Ok(diagnostics)) = computed else {
                     return;
                 };
                 let _ = sender.send(Task::Diagnostics {
@@ -829,6 +1062,205 @@ impl GlobalState {
             token: lsp_types::NumberOrString::String(token.to_owned()),
             value: lsp_types::ProgressParamsValue::WorkDone(progress),
         });
+    }
+}
+
+/// A request slower than this is logged with what led to it.
+const SLOW_REQUEST: Duration = Duration::from_secs(1);
+const SLOW_DIAGNOSTICS: Duration = Duration::from_secs(2);
+
+/// The LSP methods the log names; any other is `other` (a method is the
+/// client's text).
+const KNOWN_METHODS: &[&str] = &[
+    "textDocument/definition",
+    "textDocument/declaration",
+    "textDocument/typeDefinition",
+    "textDocument/implementation",
+    "textDocument/hover",
+    "textDocument/completion",
+    "completionItem/resolve",
+    "textDocument/signatureHelp",
+    "textDocument/references",
+    "textDocument/documentHighlight",
+    "textDocument/prepareRename",
+    "textDocument/rename",
+    "textDocument/documentSymbol",
+    "workspace/symbol",
+    "textDocument/foldingRange",
+    "textDocument/semanticTokens/full",
+    "textDocument/semanticTokens/range",
+    "textDocument/inlayHint",
+    "textDocument/codeAction",
+    "workspace/executeCommand",
+    "shutdown",
+];
+
+fn known_method(method: &str) -> &'static str {
+    KNOWN_METHODS
+        .iter()
+        .find(|known| **known == method)
+        .copied()
+        .unwrap_or("other")
+}
+
+/// A request's id when it's a number (editors number them); `-1` else.
+fn request_number(id: &RequestId) -> i64 {
+    serde_json::to_value(id)
+        .ok()
+        .and_then(|value| value.as_i64())
+        .unwrap_or(-1)
+}
+
+/// A request received: its method, file and position — never its text
+/// (a symbol query, a new name).
+fn log_request(request: &Request, id: i64, method: &'static str, file: Option<FileRef>) {
+    let mut event = Event::debug("request")
+        .number("id", id)
+        .text("method", method);
+    if let Some(file) = file {
+        event = event.file("file", file);
+    }
+    let position = request.params.get("position");
+    let coordinate = |key: &str| {
+        position
+            .and_then(|position| position.get(key))
+            .and_then(serde_json::Value::as_i64)
+    };
+    if let (Some(line), Some(column)) = (coordinate("line"), coordinate("character")) {
+        event = event.number("line", line).number("column", column);
+    }
+    event.emit();
+}
+
+/// A request answered: how, how long it took, how much it found. A slow
+/// one is a warning, written with the recorder's recent events.
+fn log_response(
+    response: &Response,
+    id: i64,
+    method: &'static str,
+    file: Option<FileRef>,
+    took: Duration,
+) {
+    let slow = took > SLOW_REQUEST;
+    let mut event = if slow {
+        Event::warn("slow-request")
+    } else {
+        Event::debug("response")
+    };
+    event = event.number("id", id).text("method", method);
+    if let Some(file) = file {
+        event = event.file("file", file);
+    }
+    event = match &response.response_result {
+        Err(error) if error.code == lsp_server::ErrorCode::ContentModified as i32 => {
+            event.text("outcome", "cancelled")
+        }
+        Err(error) => event
+            .text("outcome", "error")
+            .number("code", i64::from(error.code)),
+        Ok(result) => event.text("outcome", "ok").count("items", items_in(result)),
+    };
+    event.duration("took", took).emit();
+}
+
+/// How many things an answer holds: an array's elements, a list's items,
+/// semantic tokens' tokens; one for anything else, none for `null`.
+fn items_in(result: &serde_json::Value) -> usize {
+    match result {
+        serde_json::Value::Null => 0,
+        serde_json::Value::Array(elements) => elements.len(),
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Array(items)) = object.get("items") {
+                items.len()
+            } else if let Some(serde_json::Value::Array(data)) = object.get("data") {
+                data.len() / 5
+            } else {
+                1
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// A document's size, never its text.
+struct TextShape {
+    bytes: usize,
+    lines: usize,
+}
+
+impl TextShape {
+    fn of(text: &str) -> TextShape {
+        TextShape {
+            bytes: text.len(),
+            lines: text.lines().count(),
+        }
+    }
+
+    fn describe(&self, event: Event) -> Event {
+        event.count("bytes", self.bytes).count("lines", self.lines)
+    }
+}
+
+/// What a workspace load found, for its log event.
+struct LoadSummary {
+    modules: usize,
+    source_sets: usize,
+    kotlin_files: usize,
+    java_files: usize,
+    libraries: usize,
+    library_failures: usize,
+    model_time: Duration,
+    read_time: Duration,
+    library_time: Duration,
+}
+
+impl LoadSummary {
+    fn of(loaded: &LoadedFiles) -> LoadSummary {
+        let language_count = |extension: &str| {
+            loaded
+                .files
+                .iter()
+                .filter(|(path, _)| path.extension().is_some_and(|found| found == extension))
+                .count()
+        };
+        LoadSummary {
+            modules: loaded.model.modules.len(),
+            source_sets: loaded.model.source_sets.len(),
+            kotlin_files: language_count("kt") + language_count("kts"),
+            java_files: language_count("java"),
+            libraries: loaded.libraries.libraries.len(),
+            library_failures: loaded.libraries.failures.len(),
+            model_time: loaded.model_time,
+            read_time: loaded.discovery_time + loaded.read_time,
+            library_time: loaded.library_time,
+        }
+    }
+
+    fn emit(&self, generation: u64, apply_time: Duration) {
+        let resident_megabytes =
+            memory_stats::memory_stats().map_or(0, |stats| stats.physical_mem / (1024 * 1024));
+        Event::info("load-finished")
+            .count("generation", generation)
+            .count("modules", self.modules)
+            .count("source-sets", self.source_sets)
+            .count("kotlin-files", self.kotlin_files)
+            .count("java-files", self.java_files)
+            .count("libraries", self.libraries)
+            .count("library-failures", self.library_failures)
+            .duration("model-time", self.model_time)
+            .duration("read-time", self.read_time)
+            .duration("library-time", self.library_time)
+            .duration("apply-time", apply_time)
+            .count("memory-mb", resident_megabytes)
+            .emit();
+    }
+}
+
+/// Why the model couldn't be read, for the log.
+fn load_failure_kind(error: &project_model::LoadError) -> &'static str {
+    match error {
+        project_model::LoadError::Unreadable(_) => "model-unreadable",
+        project_model::LoadError::Malformed(_) => "model-malformed",
     }
 }
 

@@ -24,6 +24,10 @@ struct Client {
 
 impl Client {
     fn start(root: &Path) -> Client {
+        Client::start_with(root, json!({ "gradleExport": false }))
+    }
+
+    fn start_with(root: &Path, initialization_options: Value) -> Client {
         let (server, connection) = Connection::memory();
         let thread = std::thread::spawn(move || super::run_on(&server));
         let mut client = Client {
@@ -44,7 +48,7 @@ impl Client {
                         "didChangeWatchedFiles": { "dynamicRegistration": true }
                     }
                 },
-                "initializationOptions": { "gradleExport": false },
+                "initializationOptions": initialization_options,
             }),
         );
         client.notify("initialized", json!({}));
@@ -52,6 +56,18 @@ impl Client {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Value {
+        match self.request_result(method, params) {
+            Ok(result) => result,
+            Err(error) => panic!("{method}: {error:?}"),
+        }
+    }
+
+    /// A request's answer, an error included.
+    fn request_result(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, lsp_server::ResponseError> {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
         let request = Request::new(id.clone(), method.to_owned(), params);
@@ -62,10 +78,7 @@ impl Client {
         loop {
             match self.receive() {
                 Message::Response(response) if response.id == id => {
-                    return match response.response_result {
-                        Ok(result) => result,
-                        Err(error) => panic!("{method}: {error:?}"),
-                    };
+                    return response.response_result;
                 }
                 Message::Response(_) => {}
                 Message::Request(request) => self.answer(request),
@@ -310,5 +323,103 @@ fn files_changed_on_disk_are_read_again_when_the_client_reports_them() {
     assert!(client.workspace_symbols("First").is_empty());
 
     client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_sessions_log_holds_no_code_names_or_paths() {
+    crate::log::capture();
+    let root = workspace("privacy");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("QuokkaLedger.kt");
+    let text = "package app.zebrasecret\nclass QuokkaLedger(val wombatBalance: Long) {\n    fun platypusTotal(): Long = wombatBalance + 7\n}\nval narwhalNote = \"okapi passphrase\"\n";
+    std::fs::write(&file, text).unwrap();
+    let mut client = Client::start_with(&root, json!({ "gradleExport": false, "log": "debug" }));
+    client.wait_for_load(1);
+    client.open(&file, text);
+    client.diagnostics_of(&file);
+    let position = |line: u32, character: u32| {
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "position": { "line": line, "character": character },
+        })
+    };
+    client.request("textDocument/hover", position(2, 33));
+    client.request("textDocument/completion", position(2, 32));
+    client.request("textDocument/definition", position(2, 33));
+    assert_eq!(
+        client.workspace_symbols("QuokkaLedger"),
+        vec!["QuokkaLedger"]
+    );
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri(&file), "version": 2 },
+            "contentChanges": [{ "text": text.replace("okapi", "dugongSecret") }],
+        }),
+    );
+    client.diagnostics_of(&file);
+    client.shut_down();
+
+    let log = crate::log::captured().join("\n");
+    let root_text = root.display().to_string();
+    for secret in [
+        "zebrasecret",
+        "Quokka",
+        "wombat",
+        "platypus",
+        "narwhal",
+        "okapi",
+        "passphrase",
+        "dugong",
+        "privacy",
+        "src/main",
+        root_text.as_str(),
+    ] {
+        assert!(!log.contains(secret), "`{secret}` in the log:\n{log}");
+    }
+    for expected in [
+        "\"event\":\"session-started\"",
+        "\"event\":\"load-finished\"",
+        "\"event\":\"document-opened\"",
+        "\"event\":\"document-changed\"",
+        "\"method\":\"textDocument/hover\"",
+        "\"method\":\"workspace/symbol\"",
+        "\"event\":\"diagnostics\"",
+    ] {
+        assert!(log.contains(expected), "no {expected} in the log:\n{log}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_panic_in_a_request_is_answered_and_logged_and_the_server_goes_on() {
+    crate::log::capture();
+    let root = workspace("panic");
+    let sources = root.join("src/main/kotlin/app");
+    std::fs::write(sources.join("First.kt"), "package app\nclass First\n").unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+
+    let answer = client.request_result(
+        "kotlin-analyzer/testPanic",
+        json!({ "secret": "ibisVault" }),
+    );
+    let error = answer.expect_err("a panicking request is answered with an error");
+    assert_eq!(error.code, lsp_server::ErrorCode::InternalError as i32);
+    assert_eq!(client.workspace_symbols("First"), vec!["First"]);
+    client.shut_down();
+
+    let log = crate::log::captured();
+    let panic = log
+        .iter()
+        .find(|line| line.contains("\"event\":\"panic\"") && line.contains("a test panic about"))
+        .unwrap_or_else(|| panic!("no panic logged:\n{}", log.join("\n")));
+    assert!(!panic.contains("ibisVault"), "{panic}");
+    assert!(panic.contains("\"while\":\"request\""), "{panic}");
+    assert!(
+        panic.contains("crates/kotlin-analyzer/src/server/handlers.rs"),
+        "{panic}"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }

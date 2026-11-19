@@ -12,6 +12,7 @@ rust-analyzer's architecture — never from another implementation's source.
 | [lsp.md](lsp.md) | the LSP requests served and what each answers |
 | [diagnostics.md](diagnostics.md) | the checks, when they report, and the corpus gate |
 | [cli.md](cli.md) | command-line tools |
+| [logging.md](logging.md) | what the server logs, what it never does |
 
 ## Principles
 
