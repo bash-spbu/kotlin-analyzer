@@ -78,6 +78,8 @@ fn the_extension_queries_compile_and_capture_what_they_are_for() {
     for expected in [
         "keyword=class",
         "keyword=fun",
+        // `enum` is a token of its own, not a class modifier.
+        "keyword=enum",
         "type=Money",
         "function=total",
         "function=sumOf",

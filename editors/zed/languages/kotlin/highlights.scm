@@ -76,6 +76,7 @@
   "package"
   "import"
   "class"
+  "enum"
   "interface"
   "object"
   "fun"
