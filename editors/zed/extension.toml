@@ -20,3 +20,10 @@ languages = ["Kotlin", "Java"]
 # `kotlin-analyzer mcp`: the analysis for the Agent Panel's agents (see
 # README.md).
 [context_servers.kotlin-analyzer]
+
+# `kotlin-analyzer dap`: Zed's debugger for JVM tests and programs; the
+# configuration's schema is debug_adapter_schemas/Kotlin.json.
+[debug_adapters.Kotlin]
+
+# Debugs the tests the gutter's runnables run (languages/kotlin/tasks.json).
+[debug_locators.kotlin-gradle]

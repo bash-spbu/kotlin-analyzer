@@ -104,6 +104,7 @@ fn breakpoints_variables_steps_and_an_uncaught_exception() {
             "demo.Main".to_owned(),
         ],
         directory: root.clone(),
+        environment: Vec::new(),
     };
     let mut session = Session::start(&launch, &[root.join("src")]).unwrap();
     // Nothing is loaded yet: both wait for their classes.

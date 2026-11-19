@@ -275,7 +275,7 @@ impl DebugTools {
             .ok_or_else(|| format!("{} isn't in a Gradle project", file.display()))?;
         let launch = match (arguments["test"].as_str(), arguments["attach"].as_str()) {
             (Some(filter), None) => Launch::GradleTests {
-                project: module_of(&file, &root),
+                project: debugger::launch::gradle_module(&file, &root),
                 root: root.clone(),
                 filter: filter.to_owned(),
             },
@@ -500,19 +500,4 @@ fn absolute(path: &str, working_directory: &Path) -> PathBuf {
     } else {
         working_directory.join(path)
     }
-}
-
-/// The Gradle module holding `file`: its nearest directory with a build
-/// script, within the build at `root`.
-fn module_of(file: &Path, root: &Path) -> PathBuf {
-    file.ancestors()
-        .skip(1)
-        .take_while(|directory| directory.starts_with(root))
-        .find(|directory| {
-            ["build.gradle.kts", "build.gradle"]
-                .iter()
-                .any(|name| directory.join(name).is_file())
-        })
-        .unwrap_or(root)
-        .to_path_buf()
 }

@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,10 +30,20 @@ pub enum Launch {
         project: PathBuf,
         filter: String,
     },
-    /// `java` with `arguments` (the agent goes first), in `directory`.
+    /// Gradle with `arguments` (`run`, `bootRun`, `test --tests …`) in
+    /// the build at `root`, with `environment` added: its `Test` and
+    /// `JavaExec` JVMs get the agent.
+    Gradle {
+        root: PathBuf,
+        arguments: Vec<String>,
+        environment: Vec<(String, String)>,
+    },
+    /// `java` with `arguments` (the agent goes first), in `directory`,
+    /// with `environment` added.
     Java {
         arguments: Vec<String>,
         directory: PathBuf,
+        environment: Vec<(String, String)>,
     },
     /// A JVM already listening for a debugger (`server=y`) at `address`.
     Attach { address: String },
@@ -86,8 +97,11 @@ impl Drop for Debuggee {
 }
 
 /// Starts or reaches the JVM: a connection to it (handshake done) and
-/// the process.
-pub fn start(launch: &Launch) -> Result<(TcpStream, Debuggee), String> {
+/// the process. Each line the process prints goes to `lines` too.
+pub fn start(
+    launch: &Launch,
+    lines: Option<Sender<String>>,
+) -> Result<(TcpStream, Debuggee), String> {
     if let Launch::Attach { address } = launch {
         let stream = TcpStream::connect(address)
             .map_err(|error| format!("can't reach {address}: {error}"))?;
@@ -110,13 +124,36 @@ pub fn start(launch: &Launch) -> Result<(TcpStream, Debuggee), String> {
             root,
             project,
             filter,
-        } => gradle_tests(root, project, filter, &agent)?,
+        } => {
+            let project = project.strip_prefix(root).unwrap_or(project);
+            let mut arguments = Vec::new();
+            if !project.as_os_str().is_empty() {
+                arguments.push("-p".to_owned());
+                arguments.push(project.display().to_string());
+            }
+            arguments.extend(["test", "--tests", filter, "--rerun"].map(str::to_owned));
+            gradle(root, &arguments, &agent)?
+        }
+        Launch::Gradle {
+            root,
+            arguments,
+            environment,
+        } => {
+            let mut command = gradle(root, arguments, &agent)?;
+            command.envs(environment.iter().cloned());
+            command
+        }
         Launch::Java {
             arguments,
             directory,
+            environment,
         } => {
             let mut command = Command::new(java());
-            command.arg(&agent).args(arguments).current_dir(directory);
+            command
+                .arg(&agent)
+                .args(arguments)
+                .current_dir(directory)
+                .envs(environment.iter().cloned());
             command
         }
         Launch::Attach { .. } => unreachable!("attached above"),
@@ -129,10 +166,10 @@ pub fn start(launch: &Launch) -> Result<(TcpStream, Debuggee), String> {
         .map_err(|error| format!("can't start the program: {error}"))?;
     let output: Arc<Mutex<Vec<String>>> = Arc::default();
     if let Some(stdout) = process.stdout.take() {
-        keep_lines(stdout, output.clone());
+        keep_lines(stdout, output.clone(), lines.clone());
     }
     if let Some(stderr) = process.stderr.take() {
-        keep_lines(stderr, output.clone());
+        keep_lines(stderr, output.clone(), lines);
     }
     let mut debuggee = Debuggee {
         process: Some(process),
@@ -167,15 +204,30 @@ pub fn start(launch: &Launch) -> Result<(TcpStream, Debuggee), String> {
     }
 }
 
+/// The Gradle module holding `file`: its nearest directory with a build
+/// script, within the build at `root`.
+pub fn gradle_module(file: &Path, root: &Path) -> PathBuf {
+    file.ancestors()
+        .skip(1)
+        .take_while(|directory| directory.starts_with(root))
+        .find(|directory| {
+            ["build.gradle.kts", "build.gradle"]
+                .iter()
+                .any(|name| directory.join(name).is_file())
+        })
+        .unwrap_or(root)
+        .to_path_buf()
+}
+
 /// The debug agent's option: connect to the debugger at `port` and wait
 /// for it before running.
 pub fn agent_argument(port: u16) -> String {
     format!("-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=127.0.0.1:{port}")
 }
 
-/// `gradlew -p <project> test --tests <filter> --rerun` with an init
-/// script giving the test JVM the agent (one fork, so one JVM connects).
-fn gradle_tests(root: &Path, project: &Path, filter: &str, agent: &str) -> Result<Command, String> {
+/// Gradle — the build's wrapper, else `gradle` — with `arguments` and an
+/// init script giving the JVMs it starts the agent.
+fn gradle(root: &Path, arguments: &[String], agent: &str) -> Result<Command, String> {
     let script = std::env::temp_dir().join(format!(
         "kotlin-analyzer-debug-{}-{}.gradle",
         std::process::id(),
@@ -188,19 +240,9 @@ fn gradle_tests(root: &Path, project: &Path, filter: &str, agent: &str) -> Resul
     } else {
         Command::new("gradle")
     };
-    let project = project.strip_prefix(root).unwrap_or(project);
-    if !project.as_os_str().is_empty() {
-        command.arg("-p").arg(project);
-    }
     command
-        .args([
-            "test",
-            "--tests",
-            filter,
-            "--rerun",
-            "--console=plain",
-            "-I",
-        ])
+        .args(arguments)
+        .args(["--console=plain", "-I"])
         .arg(&script)
         .current_dir(root);
     Ok(command)
@@ -233,9 +275,16 @@ fn java() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("java"))
 }
 
-fn keep_lines(stream: impl std::io::Read + Send + 'static, output: Arc<Mutex<Vec<String>>>) {
+fn keep_lines(
+    stream: impl std::io::Read + Send + 'static,
+    output: Arc<Mutex<Vec<String>>>,
+    lines: Option<Sender<String>>,
+) {
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            if let Some(lines) = &lines {
+                let _ = lines.send(line.clone());
+            }
             if let Ok(mut output) = output.lock() {
                 output.push(line);
                 if output.len() > OUTPUT_LIMIT {

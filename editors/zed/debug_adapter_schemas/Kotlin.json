@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "Test",
+      "description": "A test run by Gradle's test task in its file's project, with the debugger attached to the test JVM.",
+      "properties": {
+        "request": { "type": "string", "enum": ["launch"] },
+        "test": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "description": "The test's file: its Gradle project is the nearest directory with a build script." },
+            "package": { "type": "string", "description": "The test class's package." },
+            "outerClass": { "type": "string", "description": "The class holding the test class when it is nested." },
+            "class": { "type": "string", "description": "The test class." },
+            "method": { "type": "string", "description": "The test function: all of the class's tests when empty." }
+          },
+          "required": ["file", "class"]
+        }
+      },
+      "required": ["request", "test"]
+    },
+    {
+      "title": "Program",
+      "description": "`java …` or Gradle (`./gradlew bootRun`, `gradle run`): Gradle's Test and JavaExec JVMs get the debugger.",
+      "properties": {
+        "request": { "type": "string", "enum": ["launch"] },
+        "program": { "type": "string", "description": "`java`, or Gradle: `gradlew` or `gradle`." },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "The program's arguments." },
+        "cwd": { "type": "string", "description": "Where it runs: the Gradle build's root for Gradle." },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables added." }
+      },
+      "required": ["request", "program"]
+    },
+    {
+      "title": "Attach",
+      "description": "A JVM already listening for a debugger: -agentlib:jdwp=transport=dt_socket,server=y,address=5005.",
+      "properties": {
+        "request": { "type": "string", "enum": ["attach"] },
+        "host": { "type": "string", "default": "localhost" },
+        "port": { "type": "integer", "description": "The JVM's debug port." },
+        "cwd": { "type": "string", "description": "The project whose sources the frames map to." }
+      },
+      "required": ["request", "port"]
+    }
+  ]
+}

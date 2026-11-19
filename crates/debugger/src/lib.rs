@@ -127,6 +127,8 @@ pub struct Session {
     sources: SourceIndex,
     inspector: Inspector,
     exception_request: Option<i32>,
+    /// A step begun and not ended yet: cleared at the next stop.
+    step_request: Option<i32>,
     /// The thread of the latest stop.
     current_thread: Option<ThreadId>,
     ended: bool,
@@ -138,7 +140,17 @@ impl Session {
     /// suspended — set breakpoints, then [`Session::resume`]. Frames map
     /// to files under `source_roots`.
     pub fn start(launch: &Launch, source_roots: &[PathBuf]) -> Result<Session, String> {
-        let (stream, debuggee) = launch::start(launch)?;
+        Session::start_streaming(launch, source_roots, None)
+    }
+
+    /// [`Session::start`], each line the program prints sent to `lines`
+    /// as it comes (a debug console's output).
+    pub fn start_streaming(
+        launch: &Launch,
+        source_roots: &[PathBuf],
+        lines: Option<std::sync::mpsc::Sender<String>>,
+    ) -> Result<Session, String> {
+        let (stream, debuggee) = launch::start(launch, lines)?;
         let connection =
             Arc::new(Connection::open(stream).map_err(|error| format!("JDWP: {error}"))?);
         let events = connection.events().ok_or("events already taken")?;
@@ -168,6 +180,7 @@ impl Session {
             sources: SourceIndex::of(source_roots),
             inspector: Inspector::default(),
             exception_request: None,
+            step_request: None,
             current_thread: None,
             ended: false,
             methods: HashMap::new(),
@@ -309,6 +322,11 @@ impl Session {
             }
             stopped => stopped,
         };
+        if let Some(request) = self.step_request.take() {
+            let _ = self
+                .connection()
+                .clear_event_request(EventKind::SingleStep, request);
+        }
         self.current_thread = stop.thread();
         // A thread an event stopped can run `toString()`.
         self.inspector = Inspector::calling_in(stop.thread());
@@ -329,6 +347,13 @@ impl Session {
         depth: StepDepth,
         patience: Duration,
     ) -> Result<Option<Stop>, String> {
+        self.begin_step(thread, depth)?;
+        Ok(self.wait_for_stop(patience))
+    }
+
+    /// Starts a step of `thread` and lets the JVM run: the next stop (from
+    /// [`Session::wait_for_stop`]) ends it.
+    pub fn begin_step(&mut self, thread: ThreadId, depth: StepDepth) -> Result<(), String> {
         let mut modifiers = vec![Modifier::Step { thread, depth }, Modifier::Count(1)];
         modifiers.extend(
             STEP_EXCLUDED
@@ -339,12 +364,8 @@ impl Session {
             .connection()
             .set_event_request(EventKind::SingleStep, SuspendPolicy::All, &modifiers)
             .map_err(|error| error.to_string())?;
-        self.resume()?;
-        let stop = self.wait_for_stop(patience);
-        let _ = self
-            .connection()
-            .clear_event_request(EventKind::SingleStep, request);
-        Ok(stop)
+        self.step_request = Some(request);
+        self.resume()
     }
 
     /// Suspends the running JVM.

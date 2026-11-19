@@ -82,6 +82,37 @@ and tests run from the gutter. Turning `references` on in `settings` shows
 the reference counts with `"code_lens": "on"`, but clicking one does
 nothing.
 
+## Debugging
+
+The extension adds Zed's debugger for Kotlin: the adapter `Kotlin` is the
+server's `kotlin-analyzer dap` (the binary the language server runs, or
+`dap.Kotlin.binary` in the settings), over JDWP — nothing else to install
+but a JDK. A test's ▶ menu in the gutter offers *Debug* as well as *Run*
+(the `kotlin-gradle` locator): the same `gradle test --tests …`, with the
+debugger attached to the test JVM. Breakpoints, stepping, the call stack,
+variables (expanding objects, arrays and lists), the debug console's
+paths (`order.items[0].price`), and the values of names shown at the end of
+their lines while stopped (`languages/kotlin/debugger.scm`).
+
+Other sessions go in `.zed/debug.json` (schema
+`debug_adapter_schemas/Kotlin.json`), or *debugger: start* → *Launch* with
+a program `java` or `./gradlew`:
+
+```json
+[
+  { "label": "bootRun", "adapter": "Kotlin", "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/gradlew", "args": ["-p", "app", "bootRun"],
+    "cwd": "$ZED_WORKTREE_ROOT", "env": { "SPRING_PROFILES_ACTIVE": "local" } },
+  { "label": "attach :5005", "adapter": "Kotlin", "request": "attach", "port": 5005 }
+]
+```
+
+A Gradle program's `Test` and `JavaExec` JVMs get the debugger (`bootRun`
+is a `JavaExec`); attaching needs a JVM started with
+`-agentlib:jdwp=transport=dt_socket,server=y,address=5005`. Attaching to a
+process by its id isn't supported. Not yet: Kotlin's inline functions'
+lines (SMAP), coroutines' stacks, conditional breakpoints and logpoints.
+
 ## Gradle tasks
 
 With a Kotlin file open, *task: spawn* offers:

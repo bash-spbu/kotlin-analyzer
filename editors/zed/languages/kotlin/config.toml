@@ -8,6 +8,8 @@ documentation_comment = { start = "/*", prefix = "* ", end = "*/", tab_size = 1 
 collapsed_placeholder = " /* ... */ "
 autoclose_before = ";:.,=}])>"
 tab_size = 4
+# The adapter Zed debugs Kotlin with (extension.toml).
+debuggers = ["Kotlin"]
 brackets = [
     { start = "{", end = "}", close = true, newline = true },
     { start = "[", end = "]", close = true, newline = true },

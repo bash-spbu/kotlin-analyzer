@@ -9,17 +9,22 @@
 //! the PATH, else its pinned release, downloaded once like the server's.
 //! Code lenses are off unless they say (`codeLens`): Zed can't run their
 //! commands, and tests run from the gutter instead (`runnables.scm`).
+//! The same binary is the debugger (`debugging`).
 
+mod debugging;
 mod formatter;
 mod labels;
 mod release;
 
 use zed_extension_api::settings::{ContextServerSettings, LspSettings};
 use zed_extension_api::{
-    self as zed, Architecture, DownloadedFileType, LanguageServerId,
-    LanguageServerInstallationStatus, Os, Result, Worktree,
+    self as zed, Architecture, DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario,
+    DebugTaskDefinition, DownloadedFileType, LanguageServerId, LanguageServerInstallationStatus,
+    Os, Result, StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
+    TaskTemplate, Worktree,
 };
 
+use debugging::RequestKind;
 use formatter::{Formatter, FormatterAsset, Packaging};
 use labels::{Declared, Label};
 use release::{Asset, Machine, System};
@@ -117,6 +122,97 @@ impl zed::Extension for KotlinAnalyzer {
         })
     }
 
+    /// The debugger: `kotlin-analyzer dap` of the binary the language
+    /// server runs (or the one `dap.Kotlin.binary` gives), in the
+    /// worktree.
+    fn get_dap_binary(
+        &mut self,
+        adapter_name: String,
+        config: DebugTaskDefinition,
+        user_provided_debug_adapter_path: Option<String>,
+        worktree: &Worktree,
+    ) -> Result<DebugAdapterBinary, String> {
+        if adapter_name != debugging::ADAPTER {
+            return Err(format!("no debug adapter `{adapter_name}` here"));
+        }
+        let configuration: Value = zed::serde_json::from_str(&config.config)
+            .map_err(|error| format!("the configuration isn't JSON: {error}"))?;
+        let request = self.dap_request_kind(adapter_name, configuration)?;
+        let command = match user_provided_debug_adapter_path {
+            Some(path) => path,
+            None => self.server_binary_for(worktree)?,
+        };
+        Ok(DebugAdapterBinary {
+            command: Some(command),
+            arguments: vec!["dap".to_owned()],
+            envs: worktree.shell_env(),
+            cwd: Some(worktree.root_path()),
+            connection: None,
+            request_args: StartDebuggingRequestArguments {
+                configuration: config.config,
+                request,
+            },
+        })
+    }
+
+    fn dap_request_kind(
+        &mut self,
+        _adapter_name: String,
+        config: Value,
+    ) -> Result<StartDebuggingRequestArgumentsRequest, String> {
+        Ok(match debugging::request_kind(&config)? {
+            RequestKind::Launch => StartDebuggingRequestArgumentsRequest::Launch,
+            RequestKind::Attach => StartDebuggingRequestArgumentsRequest::Attach,
+        })
+    }
+
+    /// A program from the "new session" form: `java …` or Gradle.
+    fn dap_config_to_scenario(&mut self, config: DebugConfig) -> Result<DebugScenario, String> {
+        let DebugRequest::Launch(launch) = config.request else {
+            return Err(
+                "kotlin-analyzer attaches by address, not by process: use a debug.json \
+                 configuration with `\"request\": \"attach\"` and `port`"
+                    .to_owned(),
+            );
+        };
+        let configuration = debugging::program_configuration(
+            &launch.program,
+            &launch.args,
+            launch.cwd.as_deref(),
+            &launch.envs,
+        );
+        Ok(DebugScenario {
+            label: config.label,
+            adapter: config.adapter,
+            build: None,
+            config: configuration.to_string(),
+            tcp_connection: None,
+        })
+    }
+
+    /// A test task of a gutter runnable, debugged: the same test, under
+    /// the debugger.
+    fn dap_locator_create_scenario(
+        &mut self,
+        locator_name: String,
+        build_task: TaskTemplate,
+        resolved_label: String,
+        debug_adapter_name: String,
+    ) -> Option<DebugScenario> {
+        let is_ours = locator_name == debugging::LOCATOR && debug_adapter_name == debugging::ADAPTER;
+        if !is_ours {
+            return None;
+        }
+        let configuration = debugging::test_configuration(&build_task.command)?;
+        Some(DebugScenario {
+            label: resolved_label,
+            adapter: debug_adapter_name,
+            build: None,
+            config: configuration.to_string(),
+            tcp_connection: None,
+        })
+    }
+
     fn label_for_completion(
         &self,
         _language_server_id: &LanguageServerId,
@@ -187,7 +283,20 @@ impl zed::Extension for KotlinAnalyzer {
 }
 
 impl KotlinAnalyzer {
-    /// The release binary's path, downloading it first if it isn't there.
+    /// The server's binary for `worktree`, as the language server finds it:
+    /// the settings' path, the PATH, else the release.
+    fn server_binary_for(&mut self, worktree: &Worktree) -> Result<String> {
+        let configured = LspSettings::for_worktree(SERVER, worktree)
+            .ok()
+            .and_then(|settings| settings.binary)
+            .and_then(|binary| binary.path);
+        let command = match configured.or_else(|| worktree.which(SERVER)) {
+            Some(command) => command,
+            None => self.downloaded_release(None)?,
+        };
+        Ok(absolute(&command))
+    }
+
     /// The release binary's path, downloaded first if it isn't there — with
     /// the download shown as the language server's status when it's for
     /// one.

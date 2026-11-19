@@ -4,6 +4,7 @@
 mod agent;
 mod analysis_stats;
 mod anonymize;
+mod dap;
 mod diagnostics;
 mod load;
 mod log;
@@ -29,6 +30,8 @@ USAGE:
                                 definitions, references, types, outlines and
                                 diagnostics from the analysis of the file's
                                 project (the editor's server when it runs)
+    kotlin-analyzer dap         a Debug Adapter Protocol server on stdin/stdout:
+                                debugs JVM tests and programs (Zed's debugger)
     kotlin-analyzer parse <file>
                                 print a Kotlin or Java file's syntax tree
     kotlin-analyzer log-whois <root> <hash>…
@@ -50,6 +53,7 @@ fn main() -> ExitCode {
         }
         Some("parse") => parse_command(arguments.get(1)),
         Some("mcp") => agent::mcp::command(&arguments[1..]),
+        Some("dap") => dap::command(),
         Some("log-whois") => log::whois::command(&arguments[1..]),
         Some("anonymize") => anonymize::command(&arguments[1..]),
         Some("analysis-stats") => analysis_stats_command(&arguments[1..]),

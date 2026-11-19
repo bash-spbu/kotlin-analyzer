@@ -334,3 +334,52 @@ fn the_zed_extensions_label_code_parses_and_highlights_its_names() {
         assert!(found.contains(&expected), "{code}: {name} is {found:?}");
     }
 }
+
+const DEBUGGER_SAMPLE: &str = r#"
+fun total(values: List<Int>, limit: Int): Int {
+    var sum = 0
+    for (value in values) {
+        sum += value * 2
+    }
+    val (first, second) = pair
+    values.forEach { item -> println("item $item ${item + limit}") }
+    sum = sum + limit
+    sum = limit
+    if (sum > limit && first != null) return sum
+    return this.count + values.size + Totals.LIMIT
+}
+"#;
+
+#[test]
+fn the_debugger_query_names_variables_not_calls_members_or_classes() {
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    let found = captures_with_property(&language, "debugger", DEBUGGER_SAMPLE, "-");
+    let mut variables = std::collections::BTreeMap::<&str, usize>::new();
+    for capture in &found {
+        if let Some(name) = capture.strip_prefix("-: debug-variable=") {
+            *variables.entry(name).or_default() += 1;
+        }
+    }
+    // Each place a name is read or written, members, calls and classes
+    // left out.
+    assert_eq!(
+        variables,
+        std::collections::BTreeMap::from([
+            ("values", 4),
+            ("limit", 5),
+            ("sum", 7),
+            ("value", 2),
+            ("first", 2),
+            ("second", 1),
+            ("pair", 1),
+            ("item", 3),
+            ("this", 1),
+        ])
+    );
+    let scopes = found
+        .iter()
+        .filter(|capture| capture.starts_with("-: debug-scope="))
+        .count();
+    // The function's body, the loop and its body, the lambda, the `if`'s.
+    assert_eq!(scopes, 5, "{found:?}");
+}

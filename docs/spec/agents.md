@@ -71,3 +71,26 @@ thread an event stopped — no other `toString()`, as it runs the program's
 code; anything else as `Type@id`. Every stop suspends the whole JVM. A tool
 waits up to `wait` seconds (50 by default, below a client's own timeout);
 past that it says the program still runs.
+
+### For editors
+
+`kotlin-analyzer dap` is the same debugger for an editor (Zed's), over the
+Debug Adapter Protocol on stdin/stdout. A configuration (`launch` or
+`attach` arguments) is one of:
+
+| configuration | debugs |
+|---|---|
+| `{ "request": "launch", "test": { "file", "package", "outerClass", "class", "method" } }` | the test, as `debug_start` does: Gradle's test task in the file's project, `--tests pkg.Outer$Class.method` (backticks dropped, empty pieces left out) |
+| `{ "request": "launch", "program": "…/gradlew" \| "gradle", "args", "cwd", "env" }` | Gradle with `args` in the build at `cwd`: its `Test` and `JavaExec` JVMs |
+| `{ "request": "launch", "program": "java", "args", "cwd", "env" }` | `java` with `args`, the agent first |
+| `{ "request": "attach", "host", "port", "cwd" }` | a JVM listening for a debugger |
+
+`launch` is answered once the JVM has connected, the program's output
+streaming as `output` events meanwhile; then `initialized`, the editor's
+breakpoints and exception filters (`uncaught`, on by default; `all`), and
+`configurationDone` runs the JVM. Stops are `stopped` events (`breakpoint`,
+`step`, `exception` with its message, `pause`); the end is `exited` with the
+exit code, then `terminated`. Threads, frames and variable references are
+small numbers, the last two good until the program runs again; a library's
+frame has the source's name but no path, dimmed. `evaluate` takes the paths
+`debug_evaluate` does.
