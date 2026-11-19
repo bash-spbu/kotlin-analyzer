@@ -62,6 +62,9 @@ impl StablePath {
 pub(super) enum Narrowed {
     Local(LocalId),
     Property(PropertyPathId),
+    /// `this` of the implicit receiver at this depth of the receiver stack
+    /// (`if (this !is Circle) return`).
+    Receiver(u32),
 }
 
 /// A stable property read from a stable value, numbered per body.
@@ -73,9 +76,6 @@ pub(super) struct PropertyPathId(pub(super) u32);
 pub(super) struct Narrowing {
     pub(super) when_true: Vec<(Narrowed, Ty)>,
     pub(super) when_false: Vec<(Narrowed, Ty)>,
-    /// What `this is T` makes the innermost receiver when the condition
-    /// holds.
-    pub(super) receiver_when_true: Option<Ty>,
 }
 
 impl Narrowing {
@@ -83,7 +83,6 @@ impl Narrowing {
         Narrowing {
             when_true: self.when_false,
             when_false: self.when_true,
-            receiver_when_true: None,
         }
     }
 }
@@ -114,7 +113,6 @@ impl Inferrer<'_> {
                 Narrowing {
                     when_false: self.join_narrowings(&left.when_false, &right.when_false),
                     when_true: left.when_true.into_iter().chain(right.when_true).collect(),
-                    receiver_when_true: right.receiver_when_true.or(left.receiver_when_true),
                 }
             }
             "disjunction_expression" => {
@@ -135,7 +133,6 @@ impl Inferrer<'_> {
                         .into_iter()
                         .chain(right.when_false)
                         .collect(),
-                    receiver_when_true: None,
                 }
             }
             "equality_expression" => self.null_check(node),
@@ -178,7 +175,6 @@ impl Inferrer<'_> {
             when_false: self.contract_narrowings(&called, |returns| {
                 matches!(returns, Returns::Normally | Returns::Value(false))
             }),
-            receiver_when_true: None,
         }
     }
 
@@ -274,12 +270,6 @@ impl Inferrer<'_> {
         let negated = test == TypeTest::IsNot;
         self.examine_type_test(node, Some(operand), &operand_type, *target, negated);
         let target_type = self.written_type(*target);
-        if operand.kind() == "this_expression" && test == TypeTest::Is {
-            return Narrowing {
-                receiver_when_true: Some(target_type),
-                ..Narrowing::default()
-            };
-        }
         let Some(subject) = self.narrowable(operand) else {
             return Narrowing::default();
         };
@@ -397,7 +387,12 @@ impl Inferrer<'_> {
         // where the call returns.
         for lambda in called.lambdas_surely_run() {
             if let Some(end) = self.lambda_ends.get(&(lambda.start_byte() as u32)) {
-                self.flow = end.clone();
+                // What it knew of its own receiver (`apply { next!! }`)
+                // isn't known of whatever is at that depth next.
+                let mut end = end.clone();
+                let outer_receivers = self.receivers.len();
+                end.retain(|subject| !self.reads_receiver_from(subject, outer_receivers));
+                self.flow = end;
             }
         }
         self.narrow(&narrowings);
@@ -495,6 +490,10 @@ impl Inferrer<'_> {
                     if has_token(suffix, "?.") {
                         safe = true;
                         found.extend(self.narrowable(receiver));
+                    } else if has_safe_step(receiver) {
+                        // `x?.y.orEmpty()`: a call taking `x?.y` even when
+                        // it's null — its value says nothing of `x`.
+                        break;
                     }
                     current = receiver;
                 }
@@ -699,6 +698,34 @@ impl Inferrer<'_> {
                     .is_some_and(|name| StablePath::of(self.text(name)) == *path)
             }
             _ => false,
+        }
+    }
+}
+
+/// Whether a chain of calls and properties has a safe call in it.
+fn has_safe_step(node: SyntaxNode<'_>) -> bool {
+    let mut current = node;
+    loop {
+        match current.kind() {
+            "navigation_expression" => {
+                let Some(suffix) = named_children(current).last() else {
+                    return false;
+                };
+                if has_token(suffix, "?.") {
+                    return true;
+                }
+                let Some(receiver) = named_children(current).next() else {
+                    return false;
+                };
+                current = receiver;
+            }
+            "call_expression" | "parenthesized_expression" => {
+                let Some(inner) = named_children(current).next() else {
+                    return false;
+                };
+                current = inner;
+            }
+            _ => return false,
         }
     }
 }

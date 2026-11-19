@@ -311,7 +311,11 @@ impl<'db> Inferrer<'db> {
         } else {
             self.type_before_smart_casts(value, inferred)
         };
-        if declared.is_never_null() {
+        // A call's value is judged only when its type is the compiler's:
+        // a generic call's may come from a projection this model drops
+        // (`first()` of a `MutableList<in Int>` is an `Int?` there).
+        let uncertain_call = value.kind() == "call_expression" && !self.examinable(value);
+        if declared.is_never_null() && !uncertain_call {
             self.result.redundant_null_checks.push(RedundantNullCheck {
                 kind,
                 range,
@@ -420,7 +424,8 @@ impl<'db> Inferrer<'db> {
         let receivers_known = self
             .receivers
             .iter()
-            .all(|receiver| self.is_fully_known(&receiver.ty));
+            .enumerate()
+            .all(|(index, _)| self.is_fully_known(&self.receiver_type(index)));
         let site_known = match site {
             NameSite::Member(receiver) => self.is_fully_known(receiver),
             NameSite::Scope | NameSite::Static | NameSite::Package => true,
@@ -566,8 +571,14 @@ impl<'db> Inferrer<'db> {
             // A lambda's receiver comes right after the lambda's scope, a
             // class's right before its constructor parameters': only a
             // receiver of a scope nested in theirs hides them.
-            .filter(|receiver| receiver.scope_depth > depth + 1)
-            .any(|receiver| !self.types.members_named(&receiver.ty, name).is_empty());
+            .enumerate()
+            .filter(|(_, receiver)| receiver.scope_depth > depth + 1)
+            .any(|(index, _)| {
+                !self
+                    .types
+                    .members_named(&self.receiver_type(index), name)
+                    .is_empty()
+            });
         if hidden { None } else { Some(local) }
     }
 
@@ -588,7 +599,8 @@ impl<'db> Inferrer<'db> {
     pub(super) fn receivers_known(&self) -> bool {
         self.receivers
             .iter()
-            .all(|receiver| matches!(receiver.ty, Ty::Class(_)))
+            .enumerate()
+            .all(|(index, _)| matches!(self.receiver_type(index), Ty::Class(_)))
     }
 
     /// The innermost local named `name`, the depth of its scope and the
@@ -751,7 +763,6 @@ impl<'db> Inferrer<'db> {
         let alias = super::narrowing::Narrowing {
             when_true: kept(narrowing.when_true, self),
             when_false: kept(narrowing.when_false, self),
-            receiver_when_true: None,
         };
         self.condition_aliases.insert(local, alias);
     }
@@ -770,8 +781,8 @@ impl<'db> Inferrer<'db> {
         }
     }
 
-    /// A value that can't change once set: a `val`, a parameter, or a
-    /// stable property of one (only those get a path).
+    /// A value that can't change once set: a `val`, a parameter, `this`,
+    /// or a stable property of one (only those get a path).
     pub(super) fn is_stable(&self, narrowed: Narrowed) -> bool {
         match narrowed {
             Narrowed::Local(local) => matches!(
@@ -781,7 +792,7 @@ impl<'db> Inferrer<'db> {
                     | LocalKind::LambdaParameter
                     | LocalKind::ImplicitIt
             ),
-            Narrowed::Property(_) => true,
+            Narrowed::Property(_) | Narrowed::Receiver(_) => true,
         }
     }
 
@@ -1488,7 +1499,10 @@ impl<'db> Inferrer<'db> {
         } else {
             LocalKind::Value
         };
-        let value_type = written.clone().or(initialized).unwrap_or(Ty::Unknown);
+        let value_type = written
+            .clone()
+            .or(initialized.clone())
+            .unwrap_or(Ty::Unknown);
         let certain = written.is_some()
             || initializer_of(node).is_some_and(|initializer| self.examinable(initializer));
         for child in named_children(node) {
@@ -1500,6 +1514,12 @@ impl<'db> Inferrer<'db> {
                         let local = self.declare_node(name, value_type.clone(), kind);
                         if certain {
                             self.mark_certain_if_known(local, &value_type);
+                        }
+                        // `var x: String? = "a"`: as after `x = "a"`.
+                        if let (LocalKind::Variable, Some(_), Some(initialized)) =
+                            (kind, written.as_ref(), initialized.as_ref())
+                        {
+                            self.assign_local(local, initialized);
                         }
                         let delegated =
                             named_children(node).any(|part| part.kind() == "property_delegate");

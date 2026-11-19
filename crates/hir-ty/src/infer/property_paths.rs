@@ -18,6 +18,7 @@ use crate::ty::Ty;
 /// A stable property read from a stable value: its type as read.
 pub(super) struct PropertyPath {
     pub(super) ty: Ty,
+    pub(super) root: PathRoot,
 }
 
 /// The stable value a property path reads from.
@@ -100,6 +101,24 @@ impl Inferrer<'_> {
         }
     }
 
+    /// Whether `subject` is read from an implicit receiver at `depth` or
+    /// deeper: one a lambda brought into scope, gone once it ended.
+    pub(super) fn reads_receiver_from(&self, subject: Narrowed, depth: usize) -> bool {
+        let mut current = subject;
+        loop {
+            let path = match current {
+                Narrowed::Property(path) => path,
+                Narrowed::Receiver(at) => return at as usize >= depth,
+                Narrowed::Local(_) => return false,
+            };
+            match self.property_paths[path.0 as usize].root {
+                PathRoot::Receiver(at) => return at as usize >= depth,
+                PathRoot::Property(outer) => current = Narrowed::Property(outer),
+                PathRoot::Local(_) | PathRoot::Static => return false,
+            }
+        }
+    }
+
     /// How the data flow saw the property read named at `name`, if one was.
     pub(super) fn property_read_at(&self, name: SyntaxNode<'_>) -> Option<PropertyRead> {
         self.property_reads
@@ -117,6 +136,7 @@ impl Inferrer<'_> {
                 None => self.stable_read(node),
             },
             "navigation_expression" => self.stable_read(property_name(node)?),
+            "this_expression" => Some(Narrowed::Receiver(self.this_receiver(node)? as u32)),
             _ => None,
         }
     }
@@ -198,7 +218,10 @@ impl Inferrer<'_> {
             return *path;
         }
         let path = PropertyPathId(self.property_paths.len() as u32);
-        self.property_paths.push(PropertyPath { ty: ty.clone() });
+        self.property_paths.push(PropertyPath {
+            ty: ty.clone(),
+            root,
+        });
         self.path_ids.insert((root, location), path);
         path
     }

@@ -96,10 +96,13 @@ impl Inferrer<'_> {
         let range = TextRange::of(test);
         let misparsed = super::reassociation::continues_chain(test);
         let examinable = !misparsed && operand.is_none_or(|operand| self.examinable(operand));
+        // A type parameter target isn't judged: a value smart-cast to it
+        // is `X & T` to the compiler, which this model doesn't keep.
         let useless = examinable
-            && self
-                .written_target(target)
-                .is_some_and(|written| self.is_upcast(operand_type, &written.ty));
+            && self.written_target(target).is_some_and(|written| {
+                !matches!(written.ty, Ty::TypeParameter { .. })
+                    && self.is_upcast(operand_type, &written.ty)
+            });
         let finding = useless.then_some(TypeOperationFinding {
             kind: TypeOperationKind::UselessIsCheck { result: !negated },
             range,
@@ -117,7 +120,10 @@ impl Inferrer<'_> {
     ) -> Option<TypeOperationKind> {
         let value = known_value(operand_type)?;
         let target = &written.ty;
-        if self.is_useless_cast(&value, target, safe) {
+        // `require(this is T); this as T`: to the compiler `this` is
+        // `Any & T` there, which this model doesn't keep.
+        let to_type_parameter = matches!(target, Ty::TypeParameter { .. });
+        if !to_type_parameter && self.is_useless_cast(&value, target, safe) {
             let removable = TextRange::new(operand.end_byte(), node.end_byte());
             return Some(TypeOperationKind::UselessCast { removable });
         }
@@ -454,8 +460,11 @@ impl Inferrer<'_> {
                 // the member of its name is itself.
                 let is_property = self.local_kind(local) == super::LocalKind::PropertyParameter;
                 let shadowing_member = !is_property
-                    && self.receivers.iter().any(|receiver| {
-                        !self.types.members_named(&receiver.ty, spelled).is_empty()
+                    && (0..self.receivers.len()).any(|index| {
+                        !self
+                            .types
+                            .members_named(&self.receiver_type(index), spelled)
+                            .is_empty()
                     });
                 // Ways that disagree about it leave its type unjudged.
                 let unsure = self.is_unsure(super::narrowing::Narrowed::Local(local));

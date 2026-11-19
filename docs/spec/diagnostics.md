@@ -24,7 +24,7 @@ whenever something it would need is `Unknown`, it stays silent.
 | `opt-in-usage` | lint | a use of API that needs opt-in to a `WARNING` marker the code doesn't give (Kotlin's `OPT_IN_USAGE`) — see "Opt-in" below |
 | `opt-in-usage-error` | error | the same for an `ERROR` marker, `@RequiresOptIn`'s default (`OPT_IN_USAGE_ERROR`) |
 | `can-be-val` | lint | a local `var` with an initializer that the enclosing declaration never assigns again — no `name = …`, `name += …`, `name++`, `--name` of any local of the name; offers "Change to `val`" |
-| `useless-cast` | lint | `x as T` where `x`'s type is exactly `T` (`as?` of a nullable `x`: `T?`) — Kotlin 2.3 on (`USELESS_CAST`); offers "Remove the cast" — see "Casts and type checks" below |
+| `useless-cast` | lint | `x as T` where `x`'s type is exactly `T` (`as?` of a nullable `x`: `T?`), `T` not a type parameter (after `require(this is T)` the compiler sees `X & T`) — Kotlin 2.3 on (`USELESS_CAST`); offers "Remove the cast" — see "Casts and type checks" below |
 | `cast-never-succeeds` | lint | `x as T` where no value of `x`'s type can be a `T` — Kotlin 2.3 on (`CAST_NEVER_SUCCEEDS`) |
 | `unchecked-cast` | lint | `x as T` the run time can't check: to a type parameter that isn't reified, or to type arguments `x`'s type doesn't determine (`UNCHECKED_CAST`) |
 | `useless-is-check` | lint | `x is T` that is always `true` (or `x !is T` always `false`): `x`'s type is a `T` (`USELESS_IS_CHECK`) |
@@ -42,7 +42,10 @@ A value *can't be null* when its type is a class or function type without
 `?`: after smart casts for a value that can't change (a `val`, a
 parameter, a stable property — resolution.md), as declared for a `var`
 (Kotlin doesn't smart-cast every `var` our data flow narrows: one a
-lambda writes). `x!!`, `x?.f` and `x ?: y` are the compiler's data-flow
+lambda writes); a call's value only when its type is the compiler's for
+certain (not a generic call's: a use-site projection this model drops,
+`MutableList<in Int>.first()`, would make it look non-null). `x!!`,
+`x?.f` and `x ?: y` are the compiler's data-flow
 warnings, reported from language version 2.3 on (`EnableDfaWarningsInK2`)
 and not below it or when the version is unknown; a comparison with
 `null` it reports at every version. A Java type

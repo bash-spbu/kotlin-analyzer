@@ -196,11 +196,9 @@ impl<'db> Inferrer<'db> {
     /// The innermost implicit receiver's property `name`, when its type is
     /// a function type.
     fn function_property_in_scope(&mut self, name: Name) -> Option<(ItemLocation, FunctionType)> {
-        let receivers: Vec<Ty> = self
-            .receivers
-            .iter()
+        let receivers: Vec<Ty> = (0..self.receivers.len())
             .rev()
-            .map(|receiver| receiver.ty.clone())
+            .map(|index| self.receiver_type(index))
             .collect();
         for receiver in receivers {
             if let Some((location, ty)) = self.property_of(&receiver, name) {
@@ -507,12 +505,13 @@ impl<'db> Inferrer<'db> {
     /// class the name means; top-level functions.
     fn simple_levels(&mut self, name: Name, offset: usize) -> Vec<Level> {
         let mut levels = Vec::new();
-        for receiver in self.receivers.iter().rev() {
-            levels.push(Level::Members(receiver.ty.clone()));
-            levels.push(Level::MemberExtensions(receiver.ty.clone()));
+        for index in (0..self.receivers.len()).rev() {
+            let receiver = self.receiver_type(index);
+            levels.push(Level::Members(receiver.clone()));
+            levels.push(Level::MemberExtensions(receiver.clone()));
             for level in 0..TOP_LEVEL_LEVELS {
                 levels.push(Level::Extensions {
-                    receiver: receiver.ty.clone(),
+                    receiver: receiver.clone(),
                     level,
                 });
             }
@@ -620,7 +619,7 @@ impl<'db> Inferrer<'db> {
             Level::MemberExtensions(receiver) => {
                 let mut candidates = Vec::new();
                 for index in (0..self.receivers.len()).rev() {
-                    let dispatch = self.receivers[index].ty.clone();
+                    let dispatch = self.receiver_type(index);
                     for member in self.types.members_named(&dispatch, name) {
                         if self.item_kind(member.location) != ItemKind::Function {
                             continue;
@@ -1797,7 +1796,7 @@ impl<'db> Inferrer<'db> {
     /// top-level.
     fn reference_property(&mut self, name: Name) -> Option<(ItemLocation, Ty)> {
         for index in (0..self.receivers.len()).rev() {
-            let receiver = self.receivers[index].ty.clone();
+            let receiver = self.receiver_type(index);
             if let Some(found) = self.property_of(&receiver, name) {
                 return Some(found);
             }

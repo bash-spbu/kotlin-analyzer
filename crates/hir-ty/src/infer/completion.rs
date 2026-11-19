@@ -106,11 +106,9 @@ impl Inferrer<'_> {
                 local
             })
             .collect();
-        let receivers = self
-            .receivers
-            .iter()
+        let receivers = (0..self.receivers.len())
             .rev()
-            .map(|receiver| receiver.ty.clone())
+            .map(|index| self.receiver_type(index))
             .collect();
         let qualifier = qualifier.map(|typed| match typed {
             Typed::Value(ty) => Qualifier::Value(ty.clone()),

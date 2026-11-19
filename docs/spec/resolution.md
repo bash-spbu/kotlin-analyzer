@@ -114,7 +114,9 @@ way that jumps (`return`, `throw`, `break`, `continue`, a call returning
 - after an `if`, a `when` or a `?:`, what every way out knows: `if (c) s
   = Circle() else s = Square()` leaves `s` a `Shape`; `if (x == null) x =
   Default`; `x ?: return` and `x?.y ?: return` leave `x` not null. A
-  `when` without `else` also has the way where no branch was taken;
+  `when` without `else` also has the way where no branch was taken,
+  unless its branches cover every case of the subject (a sealed type's
+  subclasses, an enum's entries);
 - `x is A || x is B`, and a `when` branch `is A, is B ->`, make `x` what
   `A` and `B` have in common;
 - after a `try`, the try block's end or a `catch`'s (which starts from
@@ -128,9 +130,15 @@ way that jumps (`return`, `throw`, `break`, `continue`, a call returning
   a `for`'s entry, body end, `continue`s and `break`s merged. A
   `do`-`while`'s condition sees what its body (and each `continue`)
   narrowed and declared;
-- a local `var` assigned a value has that value's type (when it fits the
-  declared one) until assigned again; a `var` a lambda assigns is unsure
-  past the lambda, unless the lambda surely ran in place;
+- a local `var` assigned a value — or initialized with one, `var x:
+  String? = "a"` — has that value's type (when it fits the declared one)
+  until assigned again; assigned a value whose type isn't known, it's
+  unsure; a `var` a lambda assigns is unsure past the lambda, unless the
+  lambda surely ran in place;
+- `this` (an implicit receiver, `this@label`) is narrowed as a local is:
+  `if (this !is Circle) return`, `this is Circle && …`, `this as Circle`,
+  `require(this is Circle)`; what an in-place lambda knew of its own
+  receiver stays inside it;
 - `x?.f(…)` evaluates its arguments with `x` not null, and past it the
   ways where `x` was null and where the call ran merge;
 - a branch of a `when` without a subject sees every earlier condition

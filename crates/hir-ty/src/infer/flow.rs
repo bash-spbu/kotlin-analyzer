@@ -51,6 +51,11 @@ impl Flow {
         self.facts.insert(subject, fact);
     }
 
+    /// Keeps the facts about the subjects `keep` accepts.
+    pub(super) fn retain(&mut self, keep: impl Fn(Narrowed) -> bool) {
+        self.facts.retain(|subject, _| keep(*subject));
+    }
+
     /// Back to the declared type, as known as declared.
     pub(super) fn forget(&mut self, subject: Narrowed) {
         self.facts.remove(&subject);
@@ -77,7 +82,18 @@ impl Inferrer<'_> {
         match subject {
             Narrowed::Local(local) => self.local_declared_type(local),
             Narrowed::Property(path) => self.property_paths[path.0 as usize].ty.clone(),
+            Narrowed::Receiver(depth) => self
+                .receivers
+                .get(depth as usize)
+                .map(|receiver| receiver.ty.clone())
+                .unwrap_or(Ty::Unknown),
         }
+    }
+
+    /// The type of the implicit receiver at `depth` here: as smart-cast
+    /// (`if (this is Circle) radius()`), or as it came into scope.
+    pub(super) fn receiver_type(&self, depth: usize) -> Ty {
+        self.narrowed_type(Narrowed::Receiver(depth as u32))
     }
 
     /// From here on, each subject has its type (and what its being not
@@ -86,6 +102,22 @@ impl Inferrer<'_> {
         let implied = self.implied_not_null(narrowings);
         for (subject, ty) in narrowings.iter().chain(implied.iter()) {
             self.flow.set(*subject, Fact::Known(ty.clone()));
+        }
+    }
+
+    /// A `var` given a value of type `assigned` (assigned, or initialized):
+    /// from here on it has that type when it fits the declared one; when
+    /// it's not known whether it does, nothing is judged of it (`s =
+    /// shapes.first()` with the list's type unknown).
+    pub(super) fn assign_local(&mut self, local: super::LocalId, assigned: &Ty) {
+        let subject = Narrowed::Local(local);
+        let declared = self.local_declared_type(local);
+        if matches!(assigned, Ty::Nothing { .. }) {
+            self.forget(subject);
+        } else if !assigned.is_unknown() && self.types.fits(assigned, &declared) == Fit::Yes {
+            self.narrow(&[(subject, assigned.clone())]);
+        } else {
+            self.make_unsure(subject);
         }
     }
 

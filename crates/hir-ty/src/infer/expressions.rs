@@ -24,8 +24,6 @@ struct WhenSubject<'subject> {
     /// smart-cast.
     local: Option<Narrowed>,
     ty: Option<&'subject Ty>,
-    /// `when (this)`: an `is T` branch sees `this` as a `T`.
-    is_this: bool,
     /// Whether the subject's type is the one the compiler gives it (see
     /// `examinable`).
     examinable: bool,
@@ -266,7 +264,7 @@ impl Inferrer<'_> {
             return Typed::Value(ty);
         }
         for index in (0..self.receivers.len()).rev() {
-            let receiver = self.receivers[index].ty.clone();
+            let receiver = self.receiver_type(index);
             if let Some((location, ty)) = self.property_of(&receiver, name) {
                 let root = Self::implicit_root(index);
                 let ty = self.read_property(node, root, location, ty);
@@ -321,7 +319,7 @@ impl Inferrer<'_> {
     fn functions_named(&mut self, name: Name) -> Vec<ItemLocation> {
         let mut found: Vec<ItemLocation> = Vec::new();
         for index in (0..self.receivers.len()).rev() {
-            let receiver = self.receivers[index].ty.clone();
+            let receiver = self.receiver_type(index);
             found.extend(
                 self.types
                     .members_named(&receiver, name)
@@ -596,8 +594,9 @@ impl Inferrer<'_> {
         if name.as_str() != "entries" {
             return None;
         }
-        self.receivers.iter().rev().find_map(|receiver| {
-            let class = receiver.ty.class()?.class;
+        (0..self.receivers.len()).rev().find_map(|index| {
+            let receiver_type = self.receiver_type(index);
+            let class = receiver_type.class()?.class;
             let tree = hir_def::item_tree(self.db, class.container);
             let item = tree.item(class.item);
             let enum_class = match item.kind {
@@ -674,20 +673,23 @@ impl Inferrer<'_> {
     }
 
     fn this(&mut self, node: SyntaxNode<'_>) -> Ty {
+        self.this_receiver(node)
+            .map(|index| self.receiver_type(index))
+            .unwrap_or(Ty::Unknown)
+    }
+
+    /// Which implicit receiver `this` (or `this@label`) is: its depth.
+    pub(super) fn this_receiver(&self, node: SyntaxNode<'_>) -> Option<usize> {
         let label = named_children(node)
             .find(|child| child.kind() == "type_identifier" || child.kind() == "simple_identifier")
             .map(|label| self.name(label));
-        let receiver = match label {
+        match label {
             Some(label) => self
                 .receivers
                 .iter()
-                .rev()
-                .find(|receiver| receiver.label == Some(label)),
-            None => self.receivers.last(),
-        };
-        receiver
-            .map(|receiver| receiver.ty.clone())
-            .unwrap_or(Ty::Unknown)
+                .rposition(|receiver| receiver.label == Some(label)),
+            None => self.receivers.len().checked_sub(1),
+        }
     }
 
     /// `super` on its own: the supertype it names, when only one can be
@@ -971,12 +973,7 @@ impl Inferrer<'_> {
             return;
         }
         self.forget_aliased(local);
-        let declared = self.local_declared_type(local);
-        let fits = !assigned.is_unknown()
-            && !matches!(assigned, Ty::Nothing { .. })
-            && self.types.fits(assigned, &declared) == super::Fit::Yes;
-        let now = if fits { assigned.clone() } else { declared };
-        self.narrow(&[(Narrowed::Local(local), now)]);
+        self.assign_local(local, assigned);
     }
 
     /// The type an assignment's target writes: a local or property
@@ -1122,19 +1119,12 @@ impl Inferrer<'_> {
         let narrowing = self.condition(condition);
         let then_branch = branches.first().copied();
         let else_branch = branches.get(1).copied();
-        let receiver_narrowed = narrowing.receiver_when_true.clone();
         let (then_type, then_end) = self.fork(|this| {
             this.narrow(&narrowing.when_true);
-            if let Some(receiver) = &receiver_narrowed {
-                this.push_receiver(receiver.clone(), None);
-            }
             let ty = match then_branch {
                 Some(branch) => this.body_required(branch, expected, requirement.clone()),
                 None => this.types.builtin("Unit"),
             };
-            if receiver_narrowed.is_some() {
-                this.pop_receiver();
-            }
             this.end_way(&ty);
             ty
         });
@@ -1169,8 +1159,6 @@ impl Inferrer<'_> {
                     })
                     .last()
             });
-        let subject_is_this =
-            subject_value.is_some_and(|subject| subject.kind() == "this_expression");
         let mut subject_examinable = false;
         let mut not_null_when_matched = Vec::new();
         let mut branches = Vec::new();
@@ -1192,7 +1180,6 @@ impl Inferrer<'_> {
                     let subject = WhenSubject {
                         local: subject_local,
                         ty: subject_type.as_ref(),
-                        is_this: subject_is_this,
                         examinable: subject_examinable,
                         not_null_when_matched: &not_null_when_matched,
                     };
@@ -1209,7 +1196,14 @@ impl Inferrer<'_> {
                 _ => {}
             }
         }
-        if !has_else {
+        // Without `else`, no branch may run — unless the branches cover
+        // every case of the subject (an enum's entries, a sealed type's
+        // subclasses), as the compiler sees it.
+        let covered = !has_else
+            && subject_type
+                .as_ref()
+                .is_some_and(|subject_type| self.covers_all_cases(node, subject_type));
+        if !has_else && !covered {
             branch_ends.push(self.flow.clone());
         }
         self.pop_scope();
@@ -1270,12 +1264,11 @@ impl Inferrer<'_> {
         requirement: Option<super::type_mismatches::Requirement>,
     ) -> WhenBranch {
         let mut conditions: Vec<super::narrowing::Narrowing> = Vec::new();
-        let mut receivers = Vec::new();
         let mut body = None;
         for child in named_children(node) {
             match child.kind() {
                 "when_condition" => {
-                    conditions.push(self.when_condition(child, subject, &mut receivers));
+                    conditions.push(self.when_condition(child, subject));
                 }
                 "control_structure_body" => body = Some(child),
                 _ => {}
@@ -1293,24 +1286,13 @@ impl Inferrer<'_> {
             .iter()
             .flat_map(|condition| condition.when_false.iter().cloned())
             .collect();
-        // A branch with one `is T` of `this` sees `this` as a `T`.
-        let narrowed_receiver = match &receivers[..] {
-            [only] => Some(only.clone()),
-            _ => None,
-        };
         let (ty, end) = self.fork(|this| {
             this.push_scope();
             this.narrow(&when_true);
-            if let Some(receiver) = &narrowed_receiver {
-                this.push_receiver(receiver.clone(), None);
-            }
             let ty = match body {
                 Some(body) => this.body_required(body, expected, requirement),
                 None => this.types.builtin("Unit"),
             };
-            if narrowed_receiver.is_some() {
-                this.pop_receiver();
-            }
             this.pop_scope();
             this.end_way(&ty);
             ty
@@ -1387,7 +1369,6 @@ impl Inferrer<'_> {
         &mut self,
         node: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
-        receivers: &mut Vec<Ty>,
     ) -> super::narrowing::Narrowing {
         let subject_type = subject.ty;
         let mut outcome = super::narrowing::Narrowing::default();
@@ -1406,8 +1387,6 @@ impl Inferrer<'_> {
                     if let Some(local) = subject.local {
                         let narrowed = self.smart_cast(&self.narrowed_type(local), target_type);
                         outcome.when_true.push((local, narrowed));
-                    } else if subject.is_this {
-                        receivers.push(target_type);
                     }
                 }
                 "range_test" => {

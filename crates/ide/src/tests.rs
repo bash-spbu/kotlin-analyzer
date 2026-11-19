@@ -532,7 +532,6 @@ fun <R> run(block: () -> R): R = block()
             [unnecessary-not-null-assertion] 21: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
             [unnecessary-safe-call] 22: Unnecessary safe call on a receiver of non-null type `String` | Replace `?.` with `.`: "."
             [unnecessary-not-null-assertion] 24: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
-            [useless-elvis] 26: Elvis operator (`?:`) always returns the left operand of non-null type `String` | Remove the elvis operator: ""
             [unnecessary-not-null-assertion] 33: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
             [senseless-comparison] 35: Condition `right == null` is always `false`: `String` isn't nullable
             [unnecessary-not-null-assertion] 41: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: """#]],
@@ -1315,9 +1314,12 @@ fun reassignedInLoop(start: Dog, next: () -> Dog?, flag: Boolean) {
         dog = next()
     }
 }
-fun reassignedInFor(start: Dog, all: List<Dog?>) {
+fun reassignedInFor(start: Dog, all: List<Dog?>, next: () -> Dog?) {
     var dog: Dog? = start
-    for (each in all) dog = each
+    for (each in all) {
+        val found: Dog? = next()
+        dog = found
+    }
     feed(dog)
 }
 "#,
@@ -1336,7 +1338,7 @@ fun reassignedInFor(start: Dog, all: List<Dog?>) {
             [type-mismatch] 121: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 134: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 146: Argument type mismatch: expected `Dog`, actual `Dog?`
-            [type-mismatch] 153: Argument type mismatch: expected `Dog`, actual `Dog?`"#]],
+            [type-mismatch] 156: Argument type mismatch: expected `Dog`, actual `Dog?`"#]],
     );
 }
 
@@ -2680,6 +2682,45 @@ fun javaValue(lines: Reader) {
     if (line != null) println(line)
     if (line == null) return
 }
+fun initialized() {
+    var x: String? = "a"
+    x.length
+    x = null
+}
+fun assignedUnknown(shape: Shape?) {
+    var current: Shape? = shape
+    current = missing()
+    current.area()
+}
+sealed class Side
+class Left : Side()
+class Right : Side()
+fun exhaustive(side: Side, p: String?) {
+    when (side) {
+        is Left -> if (p == null) return
+        is Right -> if (p == null) return
+    }
+    p.length
+}
+fun Shape.negated(): Int {
+    if (this !is Circle) return 0
+    return area()
+}
+fun Shape.both(): Boolean = this is Circle && area() == 1
+fun Shape.cast(): Int {
+    this as Circle
+    return area()
+}
+class Node(val next: Node?)
+fun receivers(a: Node, b: Node) {
+    a.apply { next!! }
+    b.apply { next?.next }
+}
+fun String?.orEmpty(): String = this ?: ""
+class Holder(val p: String?)
+fun plainDot(h: Holder?) {
+    if (h?.p.orEmpty() == "x") h?.p
+}
 "#,
         crate::DiagnosticsConfig {
             only: vec![
@@ -2688,6 +2729,27 @@ fun javaValue(lines: Reader) {
                 crate::Check::UnnecessarySafeCall,
                 crate::Check::SenselessComparison,
             ],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect!["[unresolved-reference] 69: Unresolved reference `missing`"],
+    );
+}
+
+#[test]
+fn a_cast_to_a_type_parameter_after_a_smart_cast_is_not_judged() {
+    // `this` is `Any & T` to the compiler after `require(this is T)`; this
+    // model would see a `T` and call the cast useless.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt lang=2.3
+package b
+inline fun <reified T> Any.expect(): T {
+    require(this is T)
+    return this as T
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::UselessCast, crate::Check::UselessIsCheck],
             ..crate::DiagnosticsConfig::default()
         },
         expect![""],
