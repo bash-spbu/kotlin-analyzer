@@ -390,7 +390,13 @@ impl Inferrer<'_> {
         let Some(called) = self.called_contract(value) else {
             return;
         };
-        let narrowings = self.contract_narrowings(&called, |returns| returns == Returns::Normally);
+        let mut narrowings =
+            self.contract_narrowings(&called, |returns| returns == Returns::Normally);
+        for lambda in called.lambdas_surely_run() {
+            if let Some(end) = self.lambda_ends.get(&(lambda.start_byte() as u32)) {
+                narrowings.extend(end.iter().cloned());
+            }
+        }
         self.narrow(&narrowings);
     }
 

@@ -521,6 +521,14 @@ impl<'tree> TypeParameter<'tree> {
         named_children(self.0).find(|child| is_type(*child))
     }
 
+    /// `out` or `in` of `out T`, `in T`.
+    pub fn variance_modifier(self) -> Option<SyntaxNode<'tree>> {
+        named_children(self.0)
+            .filter(|child| child.kind() == "type_parameter_modifiers")
+            .flat_map(named_children)
+            .find(|modifier| modifier.kind() == "variance_modifier")
+    }
+
     /// `reified T`.
     pub fn is_reified(self) -> bool {
         named_children(self.0)

@@ -370,7 +370,41 @@ fn the_kotlin_standard_library_reads_with_exact_signatures() {
         Some("Value(false) => IsNull { subject: Receiver, negated: true }")
     );
     assert_eq!(render(contract("kotlin", "assert")), None);
+    // And which lambdas a function surely calls before it returns.
+    let calls_in_place = |package: &str, name: &str| {
+        contract(package, name).map(|contract| {
+            contract
+                .calls_in_place
+                .iter()
+                .map(|calls| format!("{:?} {:?}", calls.lambda, calls.invocation))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    };
+    assert_eq!(
+        calls_in_place("kotlin", "run").as_deref(),
+        Some("Parameter(0) ExactlyOnce")
+    );
+    assert_eq!(
+        calls_in_place("kotlin", "let").as_deref(),
+        Some("Parameter(0) ExactlyOnce")
+    );
     // A data class's generated members are marked; what it declares isn't.
+    // Declaration-site variance: `List<out E>`, `Comparable<in T>`,
+    // `MutableList<E>`.
+    let variances = |name: &str| {
+        class(&contents, name)
+            .type_parameters
+            .iter()
+            .map(|parameter| parameter.variance)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(variances("kotlin.collections.List"), [crate::Variance::Out]);
+    assert_eq!(variances("kotlin.Comparable"), [crate::Variance::In]);
+    assert_eq!(
+        variances("kotlin.collections.MutableList"),
+        [crate::Variance::Invariant]
+    );
     let pair = class(&contents, "kotlin.Pair");
     let synthesized = |name: &str| {
         pair.members

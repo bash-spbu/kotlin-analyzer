@@ -341,6 +341,7 @@ impl<'parse> Lowering<'parse> {
                     name: self.name(name),
                     bounds,
                     reified: false,
+                    variance: Variance::Invariant,
                 })
             })
             .collect()

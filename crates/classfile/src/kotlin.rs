@@ -13,10 +13,10 @@ use crate::class_file::{ClassFile, KotlinMetadata, latin1_bytes};
 use crate::protobuf::Reader;
 use crate::signature::NestedNames;
 use crate::{
-    ClassContents, ClassKind, ClassName, Contract, ContractCondition, ContractEffect,
-    ContractSubject, Deprecation, DeprecationOrigin, LibraryClass, LibraryType, Member, MemberKind,
-    Modifiers, Origin, PackageMembers, Returns, TypeArgument, TypeParameter, ValueParameter,
-    Variance, Visibility,
+    CallsInPlace, ClassContents, ClassKind, ClassName, Contract, ContractCondition, ContractEffect,
+    ContractSubject, Deprecation, DeprecationOrigin, Invocation, LibraryClass, LibraryType, Member,
+    MemberKind, Modifiers, Origin, PackageMembers, Returns, TypeArgument, TypeParameter,
+    ValueParameter, Variance, Visibility,
 };
 
 /// `kind` of `@kotlin.Metadata`.
@@ -842,19 +842,69 @@ fn read_function(bytes: &[u8], context: &TypeContext<'_>) -> Option<Member> {
 /// kinds (`callsInPlace`, newer conditional forms) aren't kept.
 fn read_contract(bytes: &[u8], context: &TypeContext<'_>) -> Option<Contract<LibraryType>> {
     let mut effects = Vec::new();
+    let mut calls_in_place = Vec::new();
     let mut reader = Reader::new(bytes);
     while let Some((number, value)) = reader.field() {
-        if number == 1
-            && let Some(effect) = value
-                .as_bytes()
-                .and_then(|bytes| read_effect(bytes, context))
-        {
-            effects.push(effect);
+        let Some(effect) = value.as_bytes().filter(|_| number == 1) else {
+            continue;
+        };
+        match read_calls_in_place(effect) {
+            Some(calls) => calls_in_place.push(calls),
+            None => effects.extend(read_effect(effect, context)),
         }
     }
-    (!effects.is_empty()).then(|| Contract {
+    let says_something = !effects.is_empty() || !calls_in_place.is_empty();
+    says_something.then(|| Contract {
         effects: effects.into(),
+        calls_in_place: calls_in_place.into(),
     })
+}
+
+/// A `CALLS` `Effect` (type 1): the lambda parameter its argument (2)
+/// references, and how many times it's called (4: 0 at most once, 1
+/// exactly once, 2 at least once; unknown when absent).
+fn read_calls_in_place(bytes: &[u8]) -> Option<CallsInPlace> {
+    let mut effect_type = 0;
+    let mut lambda = None;
+    let mut invocation = Invocation::Unknown;
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        match number {
+            1 => effect_type = value.as_i32().unwrap_or(0),
+            2 => lambda = value.as_bytes().and_then(referenced_parameter),
+            4 => {
+                invocation = match value.as_i32() {
+                    Some(0) => Invocation::AtMostOnce,
+                    Some(1) => Invocation::ExactlyOnce,
+                    Some(2) => Invocation::AtLeastOnce,
+                    _ => Invocation::Unknown,
+                }
+            }
+            _ => {}
+        }
+    }
+    if effect_type != 1 {
+        return None;
+    }
+    Some(CallsInPlace {
+        lambda: lambda?,
+        invocation,
+    })
+}
+
+/// The parameter an `Expression` references (2: 0 the receiver, n the
+/// n-th value parameter).
+fn referenced_parameter(bytes: &[u8]) -> Option<ContractSubject> {
+    let mut reader = Reader::new(bytes);
+    while let Some((number, value)) = reader.field() {
+        if number == 2 {
+            return Some(match value.as_i32()? {
+                0 => ContractSubject::Receiver,
+                index => ContractSubject::Parameter(index as u32 - 1),
+            });
+        }
+    }
+    None
 }
 
 /// An `Effect` message: its type (1: 0 returns a constant, 2 returns not
@@ -1070,16 +1120,25 @@ fn read_type_parameters(
     messages: &[&[u8]],
     context: &TypeContext<'_>,
 ) -> (Vec<TypeParameter>, Vec<(i32, Name)>) {
-    let mut raw: Vec<(i32, Name, Vec<RawType>)> = Vec::new();
+    let mut raw: Vec<(i32, Name, Vec<RawType>, Variance)> = Vec::new();
     for message in messages {
         let mut id = 0;
         let mut name = None;
         let mut bounds = Vec::new();
+        // 4: 0 `in`, 1 `out`, 2 (the default) invariant.
+        let mut variance = Variance::Invariant;
         let mut reader = Reader::new(message);
         while let Some((number, value)) = reader.field() {
             match number {
                 1 => id = value.as_i32().unwrap_or(0),
                 2 => name = value.as_i32().and_then(|index| context.names.name(index)),
+                4 => {
+                    variance = match value.as_i32() {
+                        Some(0) => Variance::In,
+                        Some(1) => Variance::Out,
+                        _ => Variance::Invariant,
+                    }
+                }
                 5 => bounds.extend(value.as_bytes().map(RawType::read)),
                 6 => {
                     let mut ids = Vec::new();
@@ -1090,20 +1149,21 @@ fn read_type_parameters(
             }
         }
         if let Some(name) = name {
-            raw.push((id, name, bounds));
+            raw.push((id, name, bounds, variance));
         }
     }
-    let scope: Vec<(i32, Name)> = raw.iter().map(|(id, name, _)| (*id, *name)).collect();
+    let scope: Vec<(i32, Name)> = raw.iter().map(|(id, name, _, _)| (*id, *name)).collect();
     // Bounds may mention the parameters themselves (`T : Comparable<T>`).
     let inner = context.with_scope(scope.clone());
     let parameters = raw
         .into_iter()
-        .map(|(_, name, bounds)| TypeParameter {
+        .map(|(_, name, bounds, variance)| TypeParameter {
             name,
             bounds: bounds
                 .iter()
                 .map(|bound| inner.library_type(bound))
                 .collect(),
+            variance,
         })
         .collect();
     (parameters, scope)

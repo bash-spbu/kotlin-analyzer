@@ -1,11 +1,14 @@
 //! A function's `contract { … }` as written: the first statement of its
-//! body, its `returns… implies condition` effects (the compiler reads
-//! nothing else for types). Names in a condition are the function's
-//! parameters, `this` its receiver.
+//! body, its `returns… implies condition` effects and its
+//! `callsInPlace(lambda, kind)` ones. Names in a condition are the
+//! function's parameters, `this` its receiver.
 
 use syntax::{Parse, SyntaxNode, has_token, named_children};
 
-use super::{Contract, ContractCondition, ContractEffect, ContractSubject, Returns, TypeRef};
+use super::{
+    CallsInPlace, Contract, ContractCondition, ContractEffect, ContractSubject, Invocation,
+    Returns, TypeRef,
+};
 
 /// The contract `function` (a `function_declaration`) writes, if any.
 pub(super) fn written_contract(parse: &Parse, function: SyntaxNode<'_>) -> Option<Contract> {
@@ -30,7 +33,14 @@ pub(super) fn written_contract(parse: &Parse, function: SyntaxNode<'_>) -> Optio
     let effects: Box<[ContractEffect<TypeRef>]> = named_children(effects_block)
         .filter_map(|statement| reader.effect(statement))
         .collect();
-    (!effects.is_empty()).then_some(Contract { effects })
+    let calls_in_place: Box<[CallsInPlace]> = named_children(effects_block)
+        .filter_map(|statement| reader.calls_in_place(statement))
+        .collect();
+    let says_something = !effects.is_empty() || !calls_in_place.is_empty();
+    says_something.then_some(Contract {
+        effects,
+        calls_in_place,
+    })
 }
 
 fn parameter_names<'parse>(parse: &'parse Parse, function: SyntaxNode<'_>) -> Vec<&'parse str> {
@@ -131,6 +141,40 @@ impl ConditionReader<'_> {
     }
 
     /// A parameter by its name, or `this` (the receiver).
+    /// `callsInPlace(block)`, `callsInPlace(block, InvocationKind.EXACTLY_ONCE)`.
+    fn calls_in_place(&self, statement: SyntaxNode<'_>) -> Option<CallsInPlace> {
+        if statement.kind() != "call_expression" {
+            return None;
+        }
+        let mut parts = named_children(statement);
+        if self.parse.text_of(parts.next()?) != "callsInPlace" {
+            return None;
+        }
+        let arguments: Vec<SyntaxNode<'_>> = parts
+            .next()
+            .and_then(|suffix| {
+                named_children(suffix).find(|child| child.kind() == "value_arguments")
+            })
+            .map(|arguments| {
+                named_children(arguments)
+                    .filter_map(|argument| named_children(argument).last())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let lambda = self.subject(*arguments.first()?)?;
+        let kind = arguments.get(1).map(|kind| {
+            let text = self.parse.text_of(*kind);
+            text.rsplit('.').next().unwrap_or(text)
+        });
+        let invocation = match kind {
+            Some("EXACTLY_ONCE") => Invocation::ExactlyOnce,
+            Some("AT_LEAST_ONCE") => Invocation::AtLeastOnce,
+            Some("AT_MOST_ONCE") => Invocation::AtMostOnce,
+            _ => Invocation::Unknown,
+        };
+        Some(CallsInPlace { lambda, invocation })
+    }
+
     fn subject(&self, node: SyntaxNode<'_>) -> Option<ContractSubject> {
         match node.kind() {
             "this_expression" => Some(ContractSubject::Receiver),

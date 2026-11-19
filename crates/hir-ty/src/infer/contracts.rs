@@ -41,6 +41,19 @@ impl<'tree> CalledContract<'tree> {
             .collect()
     }
 
+    /// The lambdas passed where the contract says the function surely
+    /// calls them in place before it returns (`callsInPlace(block,
+    /// EXACTLY_ONCE)` of `run`).
+    pub(super) fn lambdas_surely_run(&self) -> Vec<SyntaxNode<'tree>> {
+        self.contract
+            .calls_in_place
+            .iter()
+            .filter(|calls| calls.invocation.surely_ran())
+            .filter_map(|calls| self.subject(calls.lambda))
+            .filter_map(lambda_literal)
+            .collect()
+    }
+
     fn subject(&self, subject: ContractSubject) -> Option<SyntaxNode<'tree>> {
         match subject {
             ContractSubject::Receiver => self.receiver,
@@ -77,26 +90,30 @@ impl Inferrer<'_> {
             }
             _ => return None,
         };
-        let declaration = match self.recorded_at(name)?.reference {
-            Reference::Declaration(declaration) => declaration,
+        let (declaration, contract) = match self.recorded_at(name)?.reference {
+            Reference::Declaration(declaration) => (declaration, contract_of(self, declaration)?),
             // Overloads the call couldn't tell apart (`assertNotNull(x)`
-            // and `assertNotNull(x, message)`): their contract when they
-            // all have the same.
+            // and `assertNotNull(x, message)`): what they all say of their
+            // arguments — not which lambdas they run (`assertNotNull(x) {
+            // … }` runs one, the others take none).
             Reference::Candidates(candidates) => {
                 let first = *candidates.first()?;
-                let first_contract = contract_of(self, first)?;
+                let effects = contract_of(self, first)?.effects;
                 let shared = candidates.iter().all(|candidate| {
-                    contract_of(self, *candidate).as_ref() == Some(&first_contract)
+                    contract_of(self, *candidate).is_some_and(|other| other.effects == effects)
                 });
                 if !shared {
                     return None;
                 }
-                first
+                let contract = Contract {
+                    effects,
+                    calls_in_place: Box::new([]),
+                };
+                (first, contract)
             }
             _ => return None,
         };
         let tree = hir_def::item_tree(self.db, declaration.container);
-        let contract = tree.contract(declaration.item)?.clone();
         let Signature::Function { parameters, .. } = &tree.item(declaration.item).signature else {
             return None;
         };
@@ -204,6 +221,10 @@ fn arguments_by_parameter<'tree>(
     names: &[intern::Name],
 ) -> Vec<Option<SyntaxNode<'tree>>> {
     let mut found = vec![None; names.len()];
+    let trailing_lambda = named_children(suffix).find(|child| child.kind() == "annotated_lambda");
+    if let (Some(lambda), Some(last)) = (trailing_lambda, found.last_mut()) {
+        *last = Some(lambda);
+    }
     let Some(arguments) = named_children(suffix).find(|child| child.kind() == "value_arguments")
     else {
         return found;
@@ -234,4 +255,15 @@ fn contract_of(inferrer: &Inferrer<'_>, function: ItemLocation) -> Option<Contra
     hir_def::item_tree(inferrer.db, function.container)
         .contract(function.item)
         .cloned()
+}
+
+/// The lambda an argument is written as (`{ … }`, `label@{ … }`).
+fn lambda_literal(argument: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    match argument.kind() {
+        "lambda_literal" => Some(argument),
+        "annotated_lambda" | "labeled_expression" | "parenthesized_expression" => {
+            named_children(argument).find_map(lambda_literal)
+        }
+        _ => None,
+    }
 }

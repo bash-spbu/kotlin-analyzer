@@ -462,6 +462,11 @@ fn type_parameters(parameters: &[classfile::TypeParameter]) -> Box<[TypeParamete
             name: parameter.name,
             bounds: parameter.bounds.iter().map(type_ref).collect(),
             reified: false,
+            variance: match parameter.variance {
+                classfile::Variance::Invariant => Variance::Invariant,
+                classfile::Variance::In => Variance::In,
+                classfile::Variance::Out => Variance::Out,
+            },
         })
         .collect()
 }

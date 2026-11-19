@@ -1557,6 +1557,8 @@ impl Inferrer<'_> {
             None => Ty::Unknown,
         };
         let element = self.element_type(&iterated_type);
+        let reassigned = self.reassigned_in(node);
+        self.forget_reassigned(&reassigned);
         self.push_scope();
         match variable {
             Some(variable) if variable.kind() == "multi_variable_declaration" => {
@@ -1592,6 +1594,10 @@ impl Inferrer<'_> {
             .unwrap_or(Ty::Unknown)
     }
 
+    /// `while (c) body`, `do body while (c)`. As the compiler's data flow
+    /// does, what was known of a `var` the loop assigns is forgotten as it
+    /// enters (a later iteration may come with another value); where the
+    /// loop ends without `break`, its condition is false.
     fn while_statement(&mut self, node: SyntaxNode<'_>) {
         let children: Vec<SyntaxNode<'_>> = named_children(node).collect();
         let body = children
@@ -1602,16 +1608,96 @@ impl Inferrer<'_> {
             .iter()
             .find(|child| child.kind() != "control_structure_body" && child.kind() != "label")
             .copied();
+        let reassigned = self.reassigned_in(node);
+        self.forget_reassigned(&reassigned);
+        let ends_by_condition = !body.is_some_and(|body| self.breaks_out(body));
+        if node.kind() == "do_while_statement" {
+            self.do_while(body, condition, ends_by_condition);
+            return;
+        }
         let narrowing = condition.map(|condition| self.condition(condition));
         if let Some(body) = body {
             self.push_scope();
-            if let Some(narrowing) = &narrowing
-                && node.kind() == "while_statement"
-            {
+            if let Some(narrowing) = &narrowing {
                 self.narrow(&narrowing.when_true);
             }
             self.body(body, None);
             self.pop_scope();
+        }
+        if let (true, Some(narrowing)) = (ends_by_condition, narrowing) {
+            self.narrow(&narrowing.when_false);
+        }
+    }
+
+    /// `do body while (c)`: the body runs once at least, and the condition
+    /// sees where it ended.
+    fn do_while(
+        &mut self,
+        body: Option<SyntaxNode<'_>>,
+        condition: Option<SyntaxNode<'_>>,
+        ends_by_condition: bool,
+    ) {
+        self.push_scope();
+        if let Some(body) = body {
+            // The body's own locals are the condition's too.
+            for statement in named_children(body) {
+                self.statements(statement);
+            }
+        }
+        let narrowing = condition.map(|condition| self.condition(condition));
+        let body_end = self.pop_scope_narrowings();
+        if !ends_by_condition {
+            return;
+        }
+        self.narrow(&body_end);
+        if let Some(narrowing) = narrowing {
+            self.narrow(&narrowing.when_false);
+        }
+    }
+
+    /// Whether a loop's body can leave it but by its condition: a `break`.
+    fn breaks_out(&self, body: SyntaxNode<'_>) -> bool {
+        syntax::descendants(body)
+            .any(|part| part.kind() == "jump_expression" && self.text(part).starts_with("break"))
+    }
+
+    /// The `var`s `loop` assigns, as named where it starts.
+    fn reassigned_in(&self, loop_node: SyntaxNode<'_>) -> Vec<super::LocalId> {
+        let mut reassigned = Vec::new();
+        for part in syntax::descendants(loop_node) {
+            let target = match part.kind() {
+                "assignment" => named_children(part)
+                    .next()
+                    .filter(|target| target.kind() == "directly_assignable_expression")
+                    .and_then(|target| named_children(target).next()),
+                "postfix_expression" | "prefix_expression"
+                    if has_token(part, "++") || has_token(part, "--") =>
+                {
+                    named_children(part).find(|operand| operand.kind() == "simple_identifier")
+                }
+                _ => None,
+            };
+            let Some(name) = target.filter(|target| target.kind() == "simple_identifier") else {
+                continue;
+            };
+            let variable = self
+                .lookup_value_local(self.name(name))
+                .filter(|local| self.local_kind(*local) == LocalKind::Variable);
+            if let Some(variable) = variable
+                && !reassigned.contains(&variable)
+            {
+                reassigned.push(variable);
+            }
+        }
+        reassigned
+    }
+
+    /// Forgets what was known of `variables`: their declared types again.
+    fn forget_reassigned(&mut self, variables: &[super::LocalId]) {
+        for variable in variables {
+            self.forget_aliased(*variable);
+            let declared = self.local_declared_type(*variable);
+            self.narrow(&[(Narrowed::Local(*variable), declared)]);
         }
     }
 
@@ -1710,7 +1796,16 @@ impl Inferrer<'_> {
         if shape_unknown {
             self.leave_uncertain_scope();
         }
-        self.pop_scope();
+        let end = self.pop_scope_narrowings();
+        // A `return@label` leaves the lambda before its end.
+        let leaves_early = body.is_some_and(|body| {
+            syntax::descendants(body).any(|part| {
+                part.kind() == "jump_expression" && self.text(part).starts_with("return@")
+            })
+        });
+        if !leaves_early {
+            self.lambda_ends.insert(node.start_byte() as u32, end);
+        }
         Ty::Function(Box::new(FunctionType {
             receiver,
             parameters,

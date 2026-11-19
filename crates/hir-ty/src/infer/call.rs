@@ -14,7 +14,6 @@ use syntax::{SyntaxNode, has_token, named_children};
 use super::declarations::Inferrer;
 use super::expressions::Typed;
 use super::fit::Fit;
-use super::type_mismatches::NullCheck;
 use super::{ArgumentMismatch, Certainty, LocalId, NameSite, Reference};
 use crate::lower::{TypeScope, lower_type};
 use crate::members::{Member, class_substitution};
@@ -1015,11 +1014,6 @@ impl<'db> Inferrer<'db> {
         if self.is_multiplatform(candidate.callable.location()) {
             return;
         }
-        let null_check = if crate::members::is_java(self.db, candidate.callable.location()) {
-            NullCheck::Skipped
-        } else {
-            NullCheck::Judged
-        };
         for (argument, parameter_index) in arguments.iter().zip(parameter_of) {
             let parameter = &candidate.signature.parameters[*parameter_index];
             let (ArgumentValue::Typed { ty, .. }, Some(written)) =
@@ -1032,13 +1026,7 @@ impl<'db> Inferrer<'db> {
             if parameter.vararg || argument.spread || !independent {
                 continue;
             }
-            self.check_value(
-                super::MismatchSite::Argument,
-                written,
-                ty,
-                &declared,
-                null_check,
-            );
+            self.check_value(super::MismatchSite::Argument, written, ty, &declared);
         }
     }
 

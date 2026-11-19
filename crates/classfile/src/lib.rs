@@ -292,11 +292,37 @@ pub struct Member {
 }
 
 /// A function's contract: what holds of its arguments, given how it
-/// returned (Kotlin's `returns() implies …` and the like). `callsInPlace`
-/// says nothing about types and isn't kept.
+/// returned (Kotlin's `returns() implies …` and the like), and which
+/// lambdas it calls before it returns (`callsInPlace`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Contract<T> {
     pub effects: Box<[ContractEffect<T>]>,
+    pub calls_in_place: Box<[CallsInPlace]>,
+}
+
+/// `callsInPlace(block, kind)`: the function calls the lambda passed as
+/// `block` before it returns, `kind` many times.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct CallsInPlace {
+    pub lambda: ContractSubject,
+    pub invocation: Invocation,
+}
+
+/// How many times a function calls a lambda in place.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Invocation {
+    AtMostOnce,
+    ExactlyOnce,
+    AtLeastOnce,
+    Unknown,
+}
+
+impl Invocation {
+    /// Whether the lambda surely ran by the time the call returned: what
+    /// it narrowed holds after the call.
+    pub fn surely_ran(self) -> bool {
+        matches!(self, Invocation::ExactlyOnce | Invocation::AtLeastOnce)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -362,6 +388,7 @@ impl<T> Contract<T> {
                     implies: effect.implies.map(map),
                 })
                 .collect(),
+            calls_in_place: self.calls_in_place.clone(),
         }
     }
 }
@@ -409,6 +436,8 @@ pub struct ValueParameter {
 pub struct TypeParameter {
     pub name: Name,
     pub bounds: Vec<LibraryType>,
+    /// `out T`, `in T` where it's declared (a Java one is invariant).
+    pub variance: Variance,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

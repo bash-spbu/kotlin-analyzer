@@ -91,9 +91,19 @@ initializer, an assigned value or nested in another call's arguments
 candidate promises the same. `assert(x != null)` has no contract
 (assertions may be off) and casts nothing. Not followed: `returnsNotNull()`,
 a condition of two alternatives (`||`), a negated one, a type the call
-infers rather than writes.
+infers rather than writes. A contract's `callsInPlace(block, EXACTLY_ONCE)`
+(or `AT_LEAST_ONCE`) — `run`, `let`, `apply`, `also`, `with` — makes what
+the lambda passed as `block` narrowed where its body ends hold after the
+call (`run { requireNotNull(x) }; x.f()`); not after a safe call (`y?.let
+{ … }` may not run it), nor when the lambda can leave early (`return@run`),
+nor for overloads chosen among several.
 
 Smart casts follow the data flow within a body:
+- a loop (`while`, `do`-`while`, `for`) forgets on entering what was known
+  of each `var` it assigns, as the compiler does (another iteration may
+  come with another value); after a `while` or `do`-`while` without
+  `break`, its condition is false (`while (x == null) x = next()`), and
+  a `do`-`while`'s condition sees what its body narrowed and declared;
 - a local `var` assigned a value has that value's type (when it fits the
   declared one) until assigned again;
 - after an `if`, a `when` or a `try`, what holds is what every way out
@@ -148,7 +158,12 @@ Among applicable overloads, the most specific wins: one whose parameter types
 fit another's (a concrete type is more specific than a type parameter whose
 bounds allow it); an extension's receiver counts as a parameter. Ties go to a
 non-`vararg`, then to the one using fewer defaults, then to a non-generic one,
-then — for Java's `f(int)` against `f(Integer)` — to non-null parameters. A
+then — for Java's `f(int)` against `f(Integer)` — to non-null parameters.
+A nearer class's member hides a farther one of the same JVM signature
+only: a non-null `Long` is the JVM's `long`, a nullable one, a Java
+`Long` or a Java class's type argument a boxed `Long`, so AssertJ's
+`isGreaterThan(long)` doesn't hide the inherited `isGreaterThan(ACTUAL)`
+of `ACTUAL` = `Long`. A
 lambda fits a parameter only with the right number of parameters (`{ … }`
 counts as none or one). A Java parameter of a mutable collection type also
 takes the read-only collection. An argument breaking a callee type
@@ -201,9 +216,8 @@ its class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
 ### Not modelled yet (stays `Unknown`, never reported)
 
 - smart casts of `open` properties on a value of a final type, of
-  properties read from a `var`, to `Nothing?` after `== null`, a `var`
-  captured by a lambda that changes it, and
-  `callsInPlace` (a lambda's smart casts don't outlive it);
+  properties read from a `var`, to `Nothing?` after `== null`, and of a
+  `var` captured by a lambda that changes it;
 - members of anonymous objects (`object { val x = 1 }`);
 - declarations compiler plugins generate (`serializer()` of
   `@Serializable` classes);

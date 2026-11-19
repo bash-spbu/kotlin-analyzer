@@ -718,9 +718,15 @@ enum Wanted {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ErasedType {
     Class(ItemLocation),
+    /// A non-null `Int`, `Long`, …: the JVM's `int`, `long`, which a boxed
+    /// `Long` (nullable, a Java `Long`, a type argument from Java) isn't —
+    /// AssertJ's `isGreaterThan(long)` beside `isGreaterThan(ACTUAL)`.
+    Primitive(ItemLocation),
     OwnTypeParameter(u32),
     TypeParameter(TypeParameterId),
-    Function { parameters: usize },
+    Function {
+        parameters: usize,
+    },
 }
 
 impl ErasedType {
@@ -789,6 +795,17 @@ impl Types<'_> {
     /// one shape): the same erased receiver and parameter types. When a
     /// type isn't known, they count as different — two candidates leave a
     /// call ambiguous, where one wrongly hidden would make it a mismatch.
+    /// Whether `class` is one the JVM has a primitive for (`Int`, `Long`,
+    /// `Boolean`, `Char`, …).
+    fn is_jvm_primitive(&self, class: ItemLocation) -> bool {
+        const PRIMITIVES: [&str; 8] = [
+            "Int", "Long", "Short", "Byte", "Double", "Float", "Boolean", "Char",
+        ];
+        PRIMITIVES.iter().any(
+            |name| matches!(self.builtin(name), Ty::Class(primitive) if primitive.class == class),
+        )
+    }
+
     fn same_signature(&self, nearer: &Member, farther: &Member) -> bool {
         match (
             self.erased_signature(nearer),
@@ -803,7 +820,19 @@ impl Types<'_> {
     /// them, erased; `None` when one isn't known.
     fn erased_signature(&self, member: &Member) -> Option<Vec<ErasedType>> {
         let location = member.location;
-        let erase = |ty: &Ty| ErasedType::of(&ty.substitute(&member.substitution), location);
+        let erase = |ty: &Ty| {
+            let ty = ty.substitute(&member.substitution);
+            let primitive = match &ty {
+                Ty::Class(class) if class.nullability == Nullability::NotNull => {
+                    self.is_jvm_primitive(class.class)
+                }
+                _ => false,
+            };
+            match (primitive, &ty) {
+                (true, Ty::Class(class)) => Some(ErasedType::Primitive(class.class)),
+                _ => ErasedType::of(&ty, location),
+            }
+        };
         let tree = item_tree(self.db, location.container);
         if matches!(tree.item(location.item).kind, ItemKind::Property { .. }) {
             return self.property_receiver(location).iter().map(erase).collect();

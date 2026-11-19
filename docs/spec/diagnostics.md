@@ -85,12 +85,14 @@ the compiler never smart-casts (`feed(repo.find())`, `feed(holder.dog)`
 of a `var dog`), only where the source set's classpath is complete — a
 missing library's contract would have narrowed a local. Silent:
 - for nullability alone of anything else (an `open` property, one read
-  from a `var`, a library's), of an argument of a Java method (its
-  overloads differing in boxing alone, `isGreaterThan(long)` and
-  `isGreaterThan(Long)`, aren't all weighed), and for type arguments
-  (generic variance isn't modelled); a nullable name going where a
-  nullable value goes may be smart-cast to `Nothing?` (`if (x == null)
-  f(x)`);
+  from a `var`, a library's); a nullable name going where a nullable
+  value goes may be smart-cast to `Nothing?` (`if (x == null) f(x)`);
+- for type arguments, but those of a type parameter declared `out` or
+  `in` (`List<out E>`: `List<Car>` where a `List<Dog>` goes; `Map<K, out
+  V>`; `Comparable<in T>`): a use-site projection (`MutableList<out
+  Animal>`) isn't kept, and on an invariant parameter it would change the
+  answer; and not of a call's argument (a candidate whose parameter's
+  type arguments don't fit makes the compiler look further out);
 - for a value whose type isn't the compiler's for certain (also what
   cast checks require, below):
   - anything but a name, property, `this`, literal or call of a function

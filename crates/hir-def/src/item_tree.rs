@@ -18,8 +18,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
 pub use classfile::{
-    ContractCondition, ContractEffect, ContractSubject, DeprecatedSinceKotlin, Deprecation,
-    DeprecationLevel, DeprecationOrigin, OptInLevel, OptInMarker, Returns,
+    CallsInPlace, ContractCondition, ContractEffect, ContractSubject, DeprecatedSinceKotlin,
+    Deprecation, DeprecationLevel, DeprecationOrigin, Invocation, OptInLevel, OptInMarker, Returns,
 };
 
 /// A function's contract, its types as written (see [`classfile::Contract`]).
@@ -332,6 +332,8 @@ pub struct TypeParameter {
     pub bounds: Box<[TypeRef]>,
     /// `reified T` of an inline function: its type is known at run time.
     pub reified: bool,
+    /// `out T`, `in T` of a class: what a type argument for it may be.
+    pub variance: Variance,
 }
 
 /// What a declaration says about types, per kind of declaration.

@@ -175,7 +175,11 @@ impl<'text, 'names> Parser<'text, 'names> {
                     bounds.push(self.field_type()?);
                 }
             }
-            parameters.push(TypeParameter { name, bounds });
+            parameters.push(TypeParameter {
+                name,
+                bounds,
+                variance: Variance::Invariant,
+            });
         }
         self.position += 1;
         Some(parameters)

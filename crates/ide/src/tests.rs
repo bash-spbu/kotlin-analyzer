@@ -1261,6 +1261,57 @@ fun called(repo: Repo) {
     val dog: Dog = find()
 }
 fun returned(): Dog = find()
+fun inPlace(dog: Dog?) {
+    run { requireNotNull(dog) }
+    feed(dog)
+}
+fun inPlaceOnReceiver(dog: Dog?, other: Dog) {
+    other.let { requireNotNull(dog) }
+    feed(dog)
+}
+fun maybeRun(dog: Dog?, other: Dog?) {
+    other?.let { requireNotNull(dog) }
+    feed(dog)
+}
+fun leftEarly(dog: Dog?, flag: Boolean) {
+    run {
+        if (flag) return@run
+        requireNotNull(dog)
+    }
+    feed(dog)
+}
+fun untilFound(next: () -> Dog?) {
+    var dog: Dog? = next()
+    while (dog == null) dog = next()
+    feed(dog)
+}
+fun untilFoundOrBroken(next: () -> Dog?, flag: Boolean) {
+    var dog: Dog? = next()
+    while (dog == null) {
+        if (flag) break
+        dog = next()
+    }
+    feed(dog)
+}
+fun doUntilFound(next: () -> Dog?) {
+    var dog: Dog?
+    do {
+        dog = next()
+    } while (dog == null)
+    feed(dog)
+}
+fun reassignedInLoop(start: Dog, next: () -> Dog?, flag: Boolean) {
+    var dog: Dog? = start
+    while (flag) {
+        feed(dog)
+        dog = next()
+    }
+}
+fun reassignedInFor(start: Dog, all: List<Dog?>) {
+    var dog: Dog? = start
+    for (each in all) dog = each
+    feed(dog)
+}
 "#,
         config(),
         expect![[r#"
@@ -1272,7 +1323,69 @@ fun returned(): Dog = find()
             [type-mismatch] 98: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 99: Argument type mismatch: expected `Dog`, actual `Dog?`
             [type-mismatch] 101: Initializer type mismatch: expected `Dog`, actual `Dog?`
-            [return-type-mismatch] 103: Return type mismatch: expected `Dog`, actual `Dog?`"#]],
+            [return-type-mismatch] 103: Return type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 114: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 121: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 134: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 146: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [type-mismatch] 153: Argument type mismatch: expected `Dog`, actual `Dog?`"#]],
+    );
+}
+
+#[test]
+fn type_arguments_are_judged_by_declared_variance() {
+    // `List<out E>`, `Map<K, out V>`, `Sink<in T>`: an argument of an `out`
+    // parameter must fit, one of an `in` parameter be fitted. An invariant
+    // parameter's isn't judged: a use-site projection (`Box<out Animal>`)
+    // isn't kept. Nor is a call's argument: a candidate whose parameter's
+    // type arguments don't fit makes the compiler look further out.
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+open class Animal
+class Dog : Animal()
+class Car
+class Box<T>(val value: T)
+interface Source<out T> { fun next(): T }
+interface Sink<in T> { fun put(value: T) }
+fun walkAll(dogs: List<Dog>) {}
+fun animals(all: List<Animal>) {}
+fun use(
+    dogList: List<Dog>,
+    carList: List<Car>,
+    maybeDogs: List<Dog?>,
+    mutableDogs: MutableList<Dog>,
+    dogBox: Box<Dog>,
+    dogSource: Source<Dog>,
+    animalSink: Sink<Animal>,
+    dogSink: Sink<Dog>,
+    carsByName: Map<String, Car>,
+    carLists: List<List<Car>>,
+) {
+    walkAll(carList)
+    animals(dogList)
+    walkAll(maybeDogs)
+    walkAll(mutableDogs)
+    val box: Box<Animal> = dogBox
+    val source: Source<Animal> = dogSource
+    val sink: Sink<Dog> = animalSink
+    val wrongSink: Sink<Animal> = dogSink
+    val dogsByName: Map<String, Dog> = carsByName
+    val dogLists: List<List<Dog>> = carLists
+    val anyLists: List<List<Any>> = carLists
+}
+fun returned(cars: List<Car>): List<Dog> = cars
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::TypeMismatch, crate::Check::ReturnTypeMismatch],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [type-mismatch] 29: Initializer type mismatch: expected `Sink<Animal>`, actual `Sink<Dog>`
+            [type-mismatch] 30: Initializer type mismatch: expected `Map<String, Dog>`, actual `Map<String, Car>`
+            [type-mismatch] 31: Initializer type mismatch: expected `List<List<Dog>>`, actual `List<List<Car>>`
+            [return-type-mismatch] 34: Return type mismatch: expected `List<Dog>`, actual `List<Car>`"#]],
     );
 }
 
@@ -1928,6 +2041,40 @@ fn a_partly_resolved_classpath_calls_nothing_missing() {
         &fixture("//- /app/b/Use.kt classpath=partial"),
         crate::DiagnosticsConfig::default(),
         expect![[""]],
+    );
+}
+
+#[test]
+fn java_overloads_that_differ_in_boxing_alone_are_both_seen() {
+    // AssertJ's `isGreaterThan(long)` beside the inherited
+    // `isGreaterThan(ACTUAL)` with `ACTUAL` = `Long`: two JVM methods, so
+    // a `Long?` goes to the boxed one; where only `long` is, it can't.
+    check_diagnostics(
+        r#"
+//- /app/a/ComparableAssert.java
+package a;
+public class ComparableAssert<ACTUAL> {
+    public void isGreaterThan(ACTUAL other) {}
+}
+//- /app/a/LongAssert.java
+package a;
+public class LongAssert extends ComparableAssert<Long> {
+    public void isGreaterThan(long other) {}
+    public void isLessThan(long other) {}
+}
+//- /app/b/Use.kt
+package b
+import a.LongAssert
+fun check(assertion: LongAssert, bound: Long?) {
+    assertion.isGreaterThan(bound)
+    assertion.isLessThan(bound)
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::TypeMismatch, crate::Check::ArgumentMismatch],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect!["[type-mismatch] 5: Argument type mismatch: expected `Long`, actual `Long?`"],
     );
 }
 

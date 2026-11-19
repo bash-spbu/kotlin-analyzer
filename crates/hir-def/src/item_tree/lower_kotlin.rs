@@ -500,10 +500,19 @@ impl<'parse> Lowering<'parse> {
                     .iter()
                     .filter(|(constrained, _)| *constrained == name)
                     .map(|(_, bound)| bound.clone());
+                let variance = match parameter
+                    .variance_modifier()
+                    .map(|modifier| self.text(modifier))
+                {
+                    Some("out") => Variance::Out,
+                    Some("in") => Variance::In,
+                    _ => Variance::Invariant,
+                };
                 Some(TypeParameter {
                     name,
                     bounds: written_beside.into_iter().chain(from_where).collect(),
                     reified: parameter.is_reified(),
+                    variance,
                 })
             })
             .collect()

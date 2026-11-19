@@ -308,15 +308,31 @@ class Array<T>(val size: Int) {
 }
 class IntArray(val size: Int)
 abstract class Enum<E : Enum<E>>(val name: String, val ordinal: Int)
-fun <T> T.also(block: (T) -> Unit): T = TODO()
-fun <T, R> T.let(block: (T) -> R): R = TODO()
-fun <T> T.apply(block: T.() -> Unit): T = TODO()
+fun <T> T.also(block: (T) -> Unit): T {
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }
+    return TODO()
+}
+fun <T, R> T.let(block: (T) -> R): R {
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }
+    return TODO()
+}
+fun <T> T.apply(block: T.() -> Unit): T {
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }
+    return TODO()
+}
+fun <R> run(block: () -> R): R {
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }
+    return TODO()
+}
 fun TODO(): Nothing = TODO()
 annotation class RequiresOptIn(val message: String = "", val level: Level = Level.ERROR) {
     enum class Level { WARNING, ERROR }
 }
 annotation class OptIn(vararg val markerClass: Any)
-fun <T, R> with(receiver: T, block: T.() -> R): R = TODO()
+fun <T, R> with(receiver: T, block: T.() -> R): R {
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }
+    return TODO()
+}
 fun <T : Any> requireNotNull(value: T?): T {
     contract { returns() implies (value != null) }
     return TODO()

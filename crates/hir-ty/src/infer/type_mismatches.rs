@@ -21,16 +21,8 @@ use super::expressions::Typed;
 use super::fit::Fit;
 use super::narrowing::NullKnowledge;
 use super::{MismatchSite, TypeMismatch};
-use crate::ty::{Nullability, Ty};
-
-/// Whether a value that may be null is judged where one that can't goes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum NullCheck {
-    Judged,
-    /// A Java method's: its overloads that differ in boxing alone
-    /// (`isGreaterThan(long)`, `isGreaterThan(Long)`) aren't all weighed.
-    Skipped,
-}
+use crate::ty::{ClassType, Nullability, Ty};
+use hir_def::item_tree::Variance;
 
 /// The classes the compiler converts an integer literal between
 /// (`fun f(): Long = 1`).
@@ -129,13 +121,7 @@ impl Inferrer<'_> {
             Meets::Itself => {
                 let typed = self.typed_inner(node, expected);
                 let ty = self.value_of(typed.clone());
-                self.check_value(
-                    requirement.site,
-                    node,
-                    &ty,
-                    &requirement.ty,
-                    NullCheck::Judged,
-                );
+                self.check_value(requirement.site, node, &ty, &requirement.ty);
                 typed
             }
         }
@@ -212,7 +198,6 @@ impl Inferrer<'_> {
         value: SyntaxNode<'_>,
         actual: &Ty,
         expected: &Ty,
-        null_check: NullCheck,
     ) {
         // A Java value's type (`T!`) may come through generics this
         // inference doesn't follow (a builder's `build(): T`).
@@ -227,10 +212,9 @@ impl Inferrer<'_> {
         // receivers for members, and almost every value fits anyway.
         let class_mismatch = !from_java
             && !may_be_null_only
-            && self.class_mismatch(actual, expected)
+            && (self.class_mismatch(actual, expected) || self.argument_mismatch(actual, expected))
             && self.examinable(value);
-        let mismatch = class_mismatch
-            || null_check == NullCheck::Judged && self.null_mismatch(value, actual, expected);
+        let mismatch = class_mismatch || self.null_mismatch(value, actual, expected);
         let finding = mismatch.then(|| TypeMismatch {
             site,
             range: salient_range(value),
@@ -283,6 +267,71 @@ impl Inferrer<'_> {
             .types
             .fits(&actual.clone().non_null(), &Ty::Class(required.clone()));
         fit == Fit::No && !self.has_supertype_named_like(actual_class, required.class)
+    }
+
+    /// A value whose class fits the required one but one of whose type
+    /// arguments can't be the required one's: `List<Car>` where a
+    /// `List<Dog>` goes. Only for a type parameter declared `out` or `in`
+    /// (`List<out E>`, `Comparable<in T>`): a use-site projection
+    /// (`MutableList<out Animal>`) isn't kept, and on an invariant
+    /// parameter it would change the answer.
+    fn argument_mismatch(&self, actual: &Ty, expected: &Ty) -> bool {
+        let (Ty::Class(actual_class), Ty::Class(expected_class)) = (actual, expected) else {
+            return false;
+        };
+        let expect_class =
+            self.is_expect(actual_class.class) || self.is_expect(expected_class.class);
+        if expect_class {
+            return false;
+        }
+        let required = match self.types.read_only_collection(expected_class) {
+            Some(read_only) => ClassType {
+                class: read_only,
+                ..expected_class.clone()
+            },
+            None => expected_class.clone(),
+        };
+        let Some(as_required) = self.types.as_supertype(actual, required.class) else {
+            return false;
+        };
+        let tree = hir_def::item_tree(self.db, required.class.container);
+        let parameters = &tree.item(required.class.item).type_parameters;
+        let arguments = as_required.arguments.iter().zip(required.arguments.iter());
+        arguments
+            .zip(parameters.iter())
+            .any(
+                |((actual_argument, required_argument), parameter)| match parameter.variance {
+                    Variance::Out => self.cannot_be(actual_argument, required_argument),
+                    Variance::In => self.cannot_be(required_argument, actual_argument),
+                    Variance::Invariant => false,
+                },
+            )
+    }
+
+    /// Whether a value of type `value` surely can't go where `expected`
+    /// does, both known for certain (no star, type parameter, Java or
+    /// function type in them).
+    fn cannot_be(&self, value: &Ty, expected: &Ty) -> bool {
+        let judged = |ty: &Ty| {
+            matches!(ty, Ty::Class(_))
+                && !ty.has_type_parameter()
+                && ty.nullability() != Nullability::Platform
+        };
+        if !judged(value) || !judged(expected) {
+            return false;
+        }
+        match self.types.fits(value, expected) {
+            Fit::No => match (value, expected) {
+                (Ty::Class(value_class), Ty::Class(expected_class)) => {
+                    let differ_in_null_only = value_class.class == expected_class.class;
+                    differ_in_null_only
+                        || !self.has_supertype_named_like(value_class, expected_class.class)
+                }
+                _ => false,
+            },
+            Fit::Yes => self.argument_mismatch(value, expected),
+            Fit::Unknown => false,
+        }
     }
 
     /// Whether `class_type` or a supertype has `class`'s qualified name.

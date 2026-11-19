@@ -118,6 +118,9 @@ pub(crate) struct Inferrer<'db> {
         (super::property_paths::PathRoot, ItemLocation),
         super::narrowing::PropertyPathId,
     >,
+    /// What each lambda (by its start) had narrowed where its body ends: what
+    /// holds after a call that surely runs it in place (`run { x!! }`).
+    pub(super) lambda_ends: FxHashMap<u32, Vec<(Narrowed, Ty)>>,
     /// How the data flow saw each property read, by its name's start.
     pub(super) property_reads: FxHashMap<u32, super::property_paths::PropertyRead>,
     /// The condition inferred last (where it starts), and what it narrows.
@@ -176,6 +179,7 @@ impl<'db> Inferrer<'db> {
             property_paths: Vec::new(),
             path_ids: FxHashMap::default(),
             property_reads: FxHashMap::default(),
+            lambda_ends: FxHashMap::default(),
             last_condition: None,
             condition_aliases: FxHashMap::default(),
         }
