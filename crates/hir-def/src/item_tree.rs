@@ -154,6 +154,14 @@ impl ItemTree {
         pretty::header(self.item(index))
     }
 
+    /// A Java declaration's signature as Java writes it (`static String
+    /// join(String separator, String... parts)`), with simple type names;
+    /// `parameter_names`, when given (from its source), instead of the
+    /// ones a class file may lack (`p0`, `p1`).
+    pub fn java_signature(&self, index: ItemId, parameter_names: Option<&[String]>) -> String {
+        pretty::java_header(self, index, parameter_names)
+    }
+
     /// The tree as text, for snapshot tests and debugging.
     pub fn pretty(&self) -> String {
         pretty::print(self)

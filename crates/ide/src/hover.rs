@@ -26,7 +26,7 @@ pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<Ho
     };
     let tree = hir::item_tree(db, location.container);
     let item = tree.item(location.item);
-    let mut markdown = signature_block(&declaration_signature(db, location));
+    let mut markdown = declaration_block(db, location);
     if let Some(ty) = name.ty.as_ref().filter(|ty| !ty.is_unknown())
         && type_depends_on_use(&tree, location)
     {
@@ -82,15 +82,28 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
 /// A declaration as completion documents it: its whole signature, its
 /// KDoc or Javadoc, where it's declared.
 pub(crate) fn declaration_markdown(db: &RootDatabase, location: ItemLocation) -> String {
-    let mut markdown = signature_block(&declaration_signature(db, location));
+    let mut markdown = declaration_block(db, location);
     push_documentation_and_place(db, location, &mut markdown);
     markdown
+}
+
+/// The declaration's signature in a code block: a Java one as Java,
+/// with the parameter names its source writes; a Kotlin one with its
+/// default values.
+fn declaration_block(db: &RootDatabase, location: ItemLocation) -> String {
+    if is_java(db, location) {
+        let names = with_declaration_node(db, location, java_parameter_names);
+        let signature =
+            hir::item_tree(db, location.container).java_signature(location.item, names.as_deref());
+        return signature_block(&signature, CodeLanguage::Java);
+    }
+    signature_block(&kotlin_signature(db, location), CodeLanguage::Kotlin)
 }
 
 /// The declaration's signature with the default values its source writes
 /// (`currency: String = "EUR"`); `…` for one too long to show, and for all
 /// of a compiled library's without sources.
-fn declaration_signature(db: &RootDatabase, location: ItemLocation) -> String {
+fn kotlin_signature(db: &RootDatabase, location: ItemLocation) -> String {
     let signature = hir::item_tree(db, location.container).signature(location.item);
     let Some(defaults) = with_declaration_node(db, location, written_defaults) else {
         return signature;
@@ -107,6 +120,35 @@ fn declaration_signature(db: &RootDatabase, location: ItemLocation) -> String {
         written.push_str(rest);
     }
     written
+}
+
+/// Declared in Java: a workspace `.java` file, or a library's class
+/// compiled from Java.
+fn is_java(db: &RootDatabase, location: ItemLocation) -> bool {
+    match location.container {
+        ItemContainer::File(file) => hir::parse(db, file).language() == Language::Java,
+        ItemContainer::Library(_) => hir::item_tree(db, location.container)
+            .item(location.item)
+            .modifiers
+            .contains(hir::Modifiers::PLATFORM),
+    }
+}
+
+/// The parameter names a Java method or constructor's source writes —
+/// what a class file may not keep.
+fn java_parameter_names(parse: &syntax::Parse, declaration: SyntaxNode<'_>) -> Option<Vec<String>> {
+    let parameters = declaration.child_by_field_name("parameters")?;
+    let names = syntax::named_children(parameters)
+        .filter_map(|parameter| match parameter.kind() {
+            "formal_parameter" => parameter.child_by_field_name("name"),
+            "spread_parameter" => syntax::named_children(parameter)
+                .find(|child| child.kind() == "variable_declarator")
+                .and_then(|declarator| declarator.child_by_field_name("name")),
+            _ => None,
+        })
+        .map(|name| parse.text_of(name).to_owned())
+        .collect();
+    Some(names)
 }
 
 /// How a signature shows that a parameter has a default value.
@@ -190,11 +232,37 @@ const SIGNATURE_WIDTH: usize = 60;
 ///     entityId: EntityPk?,
 /// ): Unit
 /// ```
-fn signature_block(signature: &str) -> String {
-    format!("```kotlin\n{}\n```", wrapped_signature(signature))
+fn signature_block(signature: &str, language: CodeLanguage) -> String {
+    format!(
+        "```{}\n{}\n```",
+        language.fence_name(),
+        wrapped_signature(signature, language)
+    )
 }
 
-fn wrapped_signature(signature: &str) -> String {
+/// The language a signature is written in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CodeLanguage {
+    Kotlin,
+    Java,
+}
+
+impl CodeLanguage {
+    fn fence_name(self) -> &'static str {
+        match self {
+            CodeLanguage::Kotlin => "kotlin",
+            CodeLanguage::Java => "java",
+        }
+    }
+
+    /// Kotlin's style ends a parameter list a parameter per line with a
+    /// comma; Java doesn't allow one.
+    fn trailing_comma(self) -> bool {
+        self == CodeLanguage::Kotlin
+    }
+}
+
+fn wrapped_signature(signature: &str, language: CodeLanguage) -> String {
     if signature.len() <= SIGNATURE_WIDTH {
         return signature.to_owned();
     }
@@ -208,8 +276,13 @@ fn wrapped_signature(signature: &str) -> String {
         return signature.to_owned();
     }
     let mut wrapped = signature[..=parameters.start].to_owned();
-    for parameter in split {
-        wrapped.push_str(&format!("\n    {parameter},"));
+    let last = split.len() - 1;
+    for (index, parameter) in split.iter().enumerate() {
+        let comma = index < last || language.trailing_comma();
+        wrapped.push_str(&format!(
+            "\n    {parameter}{}",
+            if comma { "," } else { "" }
+        ));
     }
     wrapped.push('\n');
     wrapped.push_str(&signature[parameters.end..]);
@@ -425,12 +498,16 @@ mod tests {
 
     #[test]
     fn a_long_signature_gets_a_parameter_per_line_and_a_short_one_stays() {
-        assert_eq!(wrapped_signature("fun total(): Long"), "fun total(): Long");
+        assert_eq!(
+            wrapped_signature("fun total(): Long", CodeLanguage::Kotlin),
+            "fun total(): Long"
+        );
         assert_eq!(
             wrapped_signature(
                 "fun <T : Comparable<T>> addAuditLog(operation: Map<String, T>, \
                  entityId: EntityPk? = null, label: String = \"a, (b)\", \
-                 onDone: (Int, String) -> Unit = {}): Unit"
+                 onDone: (Int, String) -> Unit = {}): Unit",
+                CodeLanguage::Kotlin,
             ),
             "fun <T : Comparable<T>> addAuditLog(\n    \
              operation: Map<String, T>,\n    \
@@ -441,16 +518,27 @@ mod tests {
         );
         let class = "class Money(val amount: Long, val currency: Currency, val scale: Int)";
         assert_eq!(
-            wrapped_signature(class),
+            wrapped_signature(class, CodeLanguage::Kotlin),
             "class Money(\n    val amount: Long,\n    val currency: Currency,\n    val scale: Int,\n)"
         );
         let one_parameter =
             "fun register(handler: (AuditLogOperation, AuditLogOperationResult) -> Unit): Unit";
-        assert_eq!(wrapped_signature(one_parameter), one_parameter);
+        assert_eq!(
+            wrapped_signature(one_parameter, CodeLanguage::Kotlin),
+            one_parameter
+        );
+        // Java has no trailing comma.
+        assert_eq!(
+            wrapped_signature(
+                "void success(long durationMs, String operation, String tenant, String region)",
+                CodeLanguage::Java,
+            ),
+            "void success(\n    long durationMs,\n    String operation,\n    String tenant,\n    String region\n)"
+        );
         let long_without_parameters =
             "val someVeryLongPropertyName: Map<String, List<SomeVeryLongTypeName>>";
         assert_eq!(
-            wrapped_signature(long_without_parameters),
+            wrapped_signature(long_without_parameters, CodeLanguage::Kotlin),
             long_without_parameters
         );
     }

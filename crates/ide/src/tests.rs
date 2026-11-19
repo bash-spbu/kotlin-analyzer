@@ -4357,3 +4357,63 @@ class WithoutJUnit {
         runsWithoutTheLibrary: references"#]]
     .assert_eq(&lenses_of(&fixture, "/app/orders/WithoutJUnit.kt"));
 }
+
+#[test]
+fn hover_shows_a_java_declaration_as_java() {
+    let fixture = Fixture::parse(
+        r#"
+//- /app/a/Metrics.java
+package a;
+import java.util.List;
+import java.util.Map;
+public abstract class Metrics {
+    protected Metrics(int capacity) {}
+    public static String join(String separator, String... parts) { return ""; }
+    public abstract void success(long durationMs, String operation, String result, String tenant, String region);
+    private final Map<String, List<? extends Number>> recorded = null;
+}
+//- /app/b/Use.kt
+package b
+import a.Metrics
+fun use(metrics: Metrics) {
+    Metrics.join(",", "a")
+    metrics.success(1, "a", "b", "c", "d")
+}
+"#,
+    );
+    let file = fixture.file("/app/b/Use.kt");
+    let text = fixture.vfs.contents(file).unwrap().clone();
+    let hover_of = |name: &str| {
+        let offset = text.find(name).unwrap() + 1;
+        analysis(&fixture)
+            .hover(file, offset)
+            .unwrap()
+            .unwrap()
+            .markdown
+    };
+    expect![[r#"
+        ```java
+        static String join(String separator, String... parts)
+        ```
+
+        ---
+
+        in `a.Metrics`"#]]
+    .assert_eq(&hover_of("join("));
+    // Long, with several parameters: a parameter per line.
+    expect![[r#"
+        ```java
+        abstract void success(
+            long durationMs,
+            String operation,
+            String result,
+            String tenant,
+            String region
+        )
+        ```
+
+        ---
+
+        in `a.Metrics`"#]]
+    .assert_eq(&hover_of("success("));
+}

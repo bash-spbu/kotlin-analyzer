@@ -1,10 +1,11 @@
-//! [`ItemTree`] as Kotlin-like text, one declaration per line.
+//! [`ItemTree`] as Kotlin-like text, one declaration per line; a Java
+//! declaration's signature as Java.
 
 use std::fmt::Write;
 
 use super::{
-    ClassKind, ImportTarget, Item, ItemId, ItemKind, ItemTree, Parameter, Signature, TypeArgument,
-    TypeParameter, TypeRef, Variance, Visibility,
+    ClassKind, ImportTarget, Item, ItemId, ItemKind, ItemTree, Modifiers, Parameter, Signature,
+    TypeArgument, TypeParameter, TypeRef, Variance, Visibility,
 };
 
 pub(super) fn print(tree: &ItemTree) -> String {
@@ -241,5 +242,254 @@ pub fn type_text(type_ref: &TypeRef) -> String {
         TypeRef::Primitive { name } => name.to_string(),
         TypeRef::Array { element } => format!("{}[]", type_text(element)),
         TypeRef::Unreadable => "<?>".to_owned(),
+    }
+}
+
+/// A Java declaration's signature as Java writes it.
+pub(crate) fn java_header(
+    tree: &ItemTree,
+    index: ItemId,
+    parameter_names: Option<&[String]>,
+) -> String {
+    let item = tree.item(index);
+    let mut words: Vec<String> = Vec::new();
+    match item.visibility {
+        Visibility::Public | Visibility::Internal | Visibility::PackagePrivate => {}
+        Visibility::Protected => words.push("protected".to_owned()),
+        Visibility::Private => words.push("private".to_owned()),
+    }
+    for (flag, word) in [
+        (Modifiers::STATIC, "static"),
+        (Modifiers::ABSTRACT, "abstract"),
+        (Modifiers::FINAL, "final"),
+    ] {
+        if item.modifiers.contains(flag) {
+            words.push(word.to_owned());
+        }
+    }
+    let type_parameters = java_type_parameters(&item.type_parameters);
+    match (&item.kind, &item.signature) {
+        (ItemKind::Class(kind), _) => {
+            let keyword = match kind {
+                ClassKind::Interface => "interface",
+                ClassKind::Enum => "enum",
+                ClassKind::Annotation => "@interface",
+                ClassKind::Class | ClassKind::Object | ClassKind::CompanionObject => "class",
+            };
+            words.push(keyword.to_owned());
+            words.push(format!("{}{type_parameters}", item.name));
+        }
+        (
+            ItemKind::Function | ItemKind::Constructor,
+            Signature::Function {
+                parameters,
+                return_type,
+                ..
+            },
+        ) => {
+            if !type_parameters.is_empty() {
+                words.push(type_parameters);
+            }
+            let name = match (item.kind, item.parent) {
+                (ItemKind::Constructor, Some(class)) => tree.item(class).name.to_string(),
+                _ => {
+                    let returned = return_type.as_ref().map_or("void".to_owned(), java_type);
+                    words.push(returned);
+                    item.name.to_string()
+                }
+            };
+            words.push(format!(
+                "{name}({})",
+                java_parameters(parameters, parameter_names)
+            ));
+        }
+        (ItemKind::Property { .. }, Signature::Property { type_ref, .. }) => {
+            if let Some(type_ref) = type_ref {
+                words.push(java_type(type_ref));
+            }
+            words.push(item.name.to_string());
+        }
+        _ => words.push(item.name.to_string()),
+    }
+    words.join(" ")
+}
+
+fn java_type_parameters(parameters: &[TypeParameter]) -> String {
+    if parameters.is_empty() {
+        return String::new();
+    }
+    let parameters: Vec<String> = parameters
+        .iter()
+        .map(|parameter| {
+            let bounds: Vec<String> = parameter.bounds.iter().map(java_type).collect();
+            if bounds.is_empty() {
+                parameter.name.to_string()
+            } else {
+                format!("{} extends {}", parameter.name, bounds.join(" & "))
+            }
+        })
+        .collect();
+    format!("<{}>", parameters.join(", "))
+}
+
+/// `long id, String... names`: a vararg's array as `...`.
+fn java_parameters(parameters: &[Parameter], names: Option<&[String]>) -> String {
+    let names = names.filter(|names| names.len() == parameters.len());
+    let parameters: Vec<String> = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            let name = names.map_or(parameter.name.as_str(), |names| names[index].as_str());
+            let written = parameter
+                .type_ref
+                .as_ref()
+                .map_or("?".to_owned(), java_type);
+            let written = match (parameter.vararg, written.strip_suffix("[]")) {
+                (true, Some(element)) => format!("{element}..."),
+                (true, None) => format!("{written}..."),
+                (false, _) => written,
+            };
+            format!("{written} {name}")
+        })
+        .collect();
+    parameters.join(", ")
+}
+
+/// A type as Java writes it, by its simple name: `Map<String, ? extends
+/// Number>`, `Map.Entry<K, V>`, `long[]`.
+fn java_type(type_ref: &TypeRef) -> String {
+    let arguments_text = |arguments: &[TypeArgument]| -> String {
+        if arguments.is_empty() {
+            return String::new();
+        }
+        let arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| match argument {
+                TypeArgument::Star => "?".to_owned(),
+                TypeArgument::Type { variance, type_ref } => match variance {
+                    Variance::Invariant => java_type(type_ref),
+                    Variance::Out => format!("? extends {}", java_type(type_ref)),
+                    Variance::In => format!("? super {}", java_type(type_ref)),
+                },
+            })
+            .collect();
+        format!("<{}>", arguments.join(", "))
+    };
+    match type_ref {
+        TypeRef::Named { segments, .. } => {
+            // Leading lower-case segments are the package (`java.util`).
+            let classes: Vec<String> = segments
+                .iter()
+                .skip_while(|segment| {
+                    segment
+                        .name
+                        .as_str()
+                        .starts_with(|char: char| char.is_ascii_lowercase())
+                        && segments.len() > 1
+                })
+                .map(|segment| format!("{}{}", segment.name, arguments_text(&segment.arguments)))
+                .collect();
+            if classes.is_empty() {
+                type_text(type_ref)
+            } else {
+                classes.join(".")
+            }
+        }
+        TypeRef::Qualified { classes, .. } => classes
+            .iter()
+            .map(|class| format!("{}{}", class.name, arguments_text(&class.arguments)))
+            .collect::<Vec<_>>()
+            .join("."),
+        TypeRef::TypeParameter { name, .. } => name.to_string(),
+        TypeRef::Primitive { name } => name.to_string(),
+        TypeRef::Array { element } => format!("{}[]", java_type(element)),
+        TypeRef::Function { .. } | TypeRef::Unreadable => type_text(type_ref),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use intern::{Name, Path};
+
+    use super::*;
+    use crate::item_tree::TypeSegment;
+
+    fn class(package: &str, names: &[&str], arguments: Vec<TypeArgument>) -> TypeRef {
+        let last = names.len() - 1;
+        TypeRef::Qualified {
+            package: Path::parse(package),
+            classes: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| TypeSegment {
+                    name: Name::new(name),
+                    arguments: if index == last {
+                        arguments.clone().into_boxed_slice()
+                    } else {
+                        Box::new([])
+                    },
+                })
+                .collect(),
+            nullable: true,
+        }
+    }
+
+    #[test]
+    fn a_class_files_types_read_as_java_with_simple_names() {
+        let string = class("java.lang", &["String"], Vec::new());
+        assert_eq!(java_type(&string), "String");
+        let entry = class(
+            "java.util",
+            &["Map", "Entry"],
+            vec![
+                TypeArgument::Type {
+                    variance: Variance::Invariant,
+                    type_ref: string.clone(),
+                },
+                TypeArgument::Type {
+                    variance: Variance::Out,
+                    type_ref: class("java.lang", &["Number"], Vec::new()),
+                },
+            ],
+        );
+        assert_eq!(java_type(&entry), "Map.Entry<String, ? extends Number>");
+        let longs = TypeRef::Array {
+            element: Box::new(TypeRef::Primitive {
+                name: Name::new("long"),
+            }),
+        };
+        assert_eq!(java_type(&longs), "long[]");
+        let wildcard = class("java.util", &["List"], vec![TypeArgument::Star]);
+        assert_eq!(java_type(&wildcard), "List<?>");
+
+        let names = vec!["first".to_owned(), "rest".to_owned()];
+        let parameters = [
+            Parameter {
+                name: Name::new("p0"),
+                type_ref: Some(TypeRef::Primitive {
+                    name: Name::new("long"),
+                }),
+                has_default: false,
+                vararg: false,
+            },
+            Parameter {
+                name: Name::new("p1"),
+                type_ref: Some(TypeRef::Array {
+                    element: Box::new(string),
+                }),
+                has_default: false,
+                vararg: true,
+            },
+        ];
+        assert_eq!(java_parameters(&parameters, None), "long p0, String... p1");
+        assert_eq!(
+            java_parameters(&parameters, Some(&names)),
+            "long first, String... rest"
+        );
+        // Names that don't match the parameters are not used.
+        assert_eq!(
+            java_parameters(&parameters, Some(&names[..1])),
+            "long p0, String... p1"
+        );
     }
 }
