@@ -221,6 +221,8 @@ fn argument_names(parse: &syntax::Parse, node: SyntaxNode<'_>) -> Option<Vec<Str
 
 /// The documentation of the declaration the item `label` at `offset`
 /// names.
+/// What resolving an item shows next to it: the whole signature (the
+/// label shows what fits), its documentation, where it's declared.
 pub(crate) fn documentation(
     db: &RootDatabase,
     file: FileId,
@@ -231,7 +233,7 @@ pub(crate) fn documentation(
         .items
         .into_iter()
         .find(|item| item.label == label)?;
-    crate::hover::documentation(db, item.declaration?)
+    Some(crate::hover::declaration_markdown(db, item.declaration?))
 }
 
 enum Context {

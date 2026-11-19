@@ -264,8 +264,9 @@ impl Analysis {
         self.with_db(|db| goto_definition::goto_definition(db, file, offset))
     }
 
-    /// The documentation of what the completion item `label` offered at
-    /// `offset` names (`completionItem/resolve`).
+    /// What the completion item `label` offered at `offset` names, as
+    /// `completionItem/resolve` documents it: its whole signature, its
+    /// documentation, where it's declared.
     pub fn completion_documentation(
         &self,
         file: FileId,

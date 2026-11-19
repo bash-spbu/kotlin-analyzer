@@ -26,7 +26,7 @@ pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<Ho
     };
     let tree = hir::item_tree(db, location.container);
     let item = tree.item(location.item);
-    let mut markdown = format!("```kotlin\n{}\n```", tree.signature(location.item));
+    let mut markdown = signature_block(&tree.signature(location.item));
     if let Some(ty) = name.ty.as_ref().filter(|ty| !ty.is_unknown())
         && type_depends_on_use(&tree, location)
     {
@@ -39,24 +39,7 @@ pub(crate) fn hover(db: &RootDatabase, file: FileId, offset: usize) -> Option<Ho
             hir::display_type(db, ty)
         ));
     }
-    if let Some(documentation) = documentation(db, location) {
-        markdown.push_str("\n\n---\n\n");
-        markdown.push_str(&documentation);
-    }
-    let place = match item.parent {
-        Some(parent) => {
-            let parent = tree.item(parent).name;
-            if tree.package.is_root() {
-                parent.to_string()
-            } else {
-                format!("{}.{parent}", tree.package)
-            }
-        }
-        None => tree.package.to_string(),
-    };
-    if !place.is_empty() {
-        markdown.push_str(&format!("\n\n---\n\nin `{place}`"));
-    }
+    push_documentation_and_place(db, location, &mut markdown);
     Some(HoverResult {
         markdown,
         range: name.range,
@@ -94,6 +77,132 @@ fn local_signature(db: &RootDatabase, local: &Local) -> String {
         LocalKind::Function => format!("fun {}: {ty}", local.name),
         LocalKind::Class => format!("class {}", local.name),
     }
+}
+
+/// A declaration as completion documents it: its whole signature, its
+/// KDoc or Javadoc, where it's declared.
+pub(crate) fn declaration_markdown(db: &RootDatabase, location: ItemLocation) -> String {
+    let tree = hir::item_tree(db, location.container);
+    let mut markdown = signature_block(&tree.signature(location.item));
+    push_documentation_and_place(db, location, &mut markdown);
+    markdown
+}
+
+/// Adds the declaration's documentation, then `in package.Class`.
+fn push_documentation_and_place(db: &RootDatabase, location: ItemLocation, markdown: &mut String) {
+    if let Some(documentation) = documentation(db, location) {
+        markdown.push_str("\n\n---\n\n");
+        markdown.push_str(&documentation);
+    }
+    let tree = hir::item_tree(db, location.container);
+    let place = match tree.item(location.item).parent {
+        Some(parent) => {
+            let parent = tree.item(parent).name;
+            if tree.package.is_root() {
+                parent.to_string()
+            } else {
+                format!("{}.{parent}", tree.package)
+            }
+        }
+        None => tree.package.to_string(),
+    };
+    if !place.is_empty() {
+        markdown.push_str(&format!("\n\n---\n\nin `{place}`"));
+    }
+}
+
+/// Signatures longer than this get one parameter per line.
+const SIGNATURE_WIDTH: usize = 60;
+
+/// The signature in a `kotlin` code block; a long one with a parameter
+/// per line, as Kotlin's style writes it:
+///
+/// ```text
+/// fun addAuditLog(
+///     operation: AuditLogOperation,
+///     entityId: EntityPk?,
+/// ): Unit
+/// ```
+fn signature_block(signature: &str) -> String {
+    format!("```kotlin\n{}\n```", wrapped_signature(signature))
+}
+
+fn wrapped_signature(signature: &str) -> String {
+    if signature.len() <= SIGNATURE_WIDTH {
+        return signature.to_owned();
+    }
+    let Some(parameters) = parameter_list(signature) else {
+        return signature.to_owned();
+    };
+    let inside = &signature[parameters.start + 1..parameters.end];
+    let split = top_level_parts(inside);
+    if split.is_empty() {
+        return signature.to_owned();
+    }
+    let mut wrapped = signature[..=parameters.start].to_owned();
+    for parameter in split {
+        wrapped.push_str(&format!("\n    {parameter},"));
+    }
+    wrapped.push('\n');
+    wrapped.push_str(&signature[parameters.end..]);
+    wrapped
+}
+
+/// The byte range of the signature's parameter list, from its `(` to its
+/// `)`: the first parenthesis outside type parameters (`fun <T> f(…)`).
+fn parameter_list(signature: &str) -> Option<std::ops::Range<usize>> {
+    let mut angle_depth = 0usize;
+    let mut previous = ' ';
+    let mut open = None;
+    let mut depth = 0usize;
+    for (index, char) in signature.char_indices() {
+        match char {
+            '<' if open.is_none() => angle_depth += 1,
+            '>' if open.is_none() && previous != '-' => angle_depth = angle_depth.saturating_sub(1),
+            '(' if open.is_none() && angle_depth == 0 => {
+                open = Some(index);
+                depth = 1;
+            }
+            '(' if open.is_some() => depth += 1,
+            ')' if open.is_some() => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open?..index);
+                }
+            }
+            _ => {}
+        }
+        previous = char;
+    }
+    None
+}
+
+/// `text` split at its top-level commas — not those in brackets, type
+/// arguments or strings — each part trimmed.
+fn top_level_parts(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut previous = ' ';
+    let mut start = 0;
+    for (index, char) in text.char_indices() {
+        match char {
+            '"' if previous != '\\' => in_string = !in_string,
+            _ if in_string => {}
+            '(' | '[' | '{' | '<' => depth += 1,
+            '>' if previous == '-' => {}
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        previous = char;
+    }
+    parts.push(text[start..].trim());
+    parts.retain(|part| !part.is_empty());
+    parts
 }
 
 /// The KDoc or Javadoc comment just before the declaration, cleaned up.
@@ -193,6 +302,35 @@ fn inline_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_signature_gets_a_parameter_per_line_and_a_short_one_stays() {
+        assert_eq!(wrapped_signature("fun total(): Long"), "fun total(): Long");
+        assert_eq!(
+            wrapped_signature(
+                "fun <T : Comparable<T>> addAuditLog(operation: Map<String, T>, \
+                 entityId: EntityPk? = null, label: String = \"a, (b)\", \
+                 onDone: (Int, String) -> Unit = {}): Unit"
+            ),
+            "fun <T : Comparable<T>> addAuditLog(\n    \
+             operation: Map<String, T>,\n    \
+             entityId: EntityPk? = null,\n    \
+             label: String = \"a, (b)\",\n    \
+             onDone: (Int, String) -> Unit = {},\n\
+             ): Unit"
+        );
+        let class = "class Money(val amount: Long, val currency: Currency, val scale: Int)";
+        assert_eq!(
+            wrapped_signature(class),
+            "class Money(\n    val amount: Long,\n    val currency: Currency,\n    val scale: Int,\n)"
+        );
+        let long_without_parameters =
+            "val someVeryLongPropertyName: Map<String, List<SomeVeryLongTypeName>>";
+        assert_eq!(
+            wrapped_signature(long_without_parameters),
+            long_without_parameters
+        );
+    }
 
     #[test]
     fn comments_lose_their_frame_and_javadoc_tags_become_markdown() {

@@ -3208,9 +3208,14 @@ fun use(account: Long) {
     let documentation = analysis(&fixture)
         .completion_documentation(file, offset - 1, "charge")
         .unwrap();
+    // The whole signature, a parameter per line when long: the menu shows
+    // what of it fits.
     assert_eq!(
         documentation.as_deref(),
-        Some("Charges [amount] to an account.")
+        Some(
+            "```kotlin\nfun charge(\n    amount: Long,\n    currency: String,\n    note: String = …,\n)\n```\n\n\
+             ---\n\nCharges [amount] to an account.\n\n---\n\nin `b`"
+        )
     );
     let documentation = analysis(&fixture)
         .completion_documentation(file, offset - 1, "account")
