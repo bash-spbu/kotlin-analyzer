@@ -363,8 +363,9 @@ fun written(): Int = 1
 interface Shape
 class Circle : Shape
 class Square : Shape
-fun shapes() {
+fun shapes(flag: Boolean) {
     val both = listOf(Circle(), Square())
+    val mixed = if (flag) listOf("a") else listOf(1)
 }
 "#,
     );
@@ -389,7 +390,8 @@ fun shapes() {
         name: String
         : List<Int>
         it: String
-        both: List<Shape>"#]]
+        both: List<Shape>
+        mixed: List<*>"#]]
     .assert_eq(&rendered.join("\n"));
 }
 

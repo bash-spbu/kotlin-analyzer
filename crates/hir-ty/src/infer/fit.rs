@@ -357,6 +357,18 @@ impl Types<'_> {
         }
     }
 
+    /// Whether `value`, seen as `wider`'s class, has `wider`'s arguments.
+    fn arguments_agree(&self, value: &Ty, wider: &Ty) -> bool {
+        let Ty::Class(wider_class) = wider else {
+            return true;
+        };
+        if wider_class.arguments.is_empty() {
+            return true;
+        }
+        self.as_supertype(value, wider_class.class)
+            .is_some_and(|as_wider| as_wider.arguments == wider_class.arguments)
+    }
+
     fn common_supertype(&self, first: &Ty, second: &Ty) -> Ty {
         if first == second {
             return first.clone();
@@ -368,10 +380,18 @@ impl Types<'_> {
         // Failure>`, yet their common type isn't the second. Only types
         // known throughout may stand for both.
         let known_throughout = !first.has_unknown_part() && !second.has_unknown_part();
-        if known_throughout && self.fits(first, second) == Fit::Yes {
+        // `fits` compares classes only: `List<Int>` "fits" `List<String>`.
+        // One stands for both only when the arguments agree too.
+        if known_throughout
+            && self.fits(first, second) == Fit::Yes
+            && self.arguments_agree(first, second)
+        {
             return second.clone();
         }
-        if known_throughout && self.fits(second, first) == Fit::Yes {
+        if known_throughout
+            && self.fits(second, first) == Fit::Yes
+            && self.arguments_agree(second, first)
+        {
             return first.clone();
         }
         let (Ty::Class(first_class), Ty::Class(second_class)) = (first, second) else {
