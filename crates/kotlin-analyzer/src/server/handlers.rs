@@ -28,6 +28,8 @@ pub(super) struct Snapshot {
     /// The file the request is about, when it names one the server knows.
     pub(super) request_file: Option<FileId>,
     pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
+    /// The semantic tokens last sent per file, for deltas.
+    pub(super) sent_tokens: Arc<super::semantic_tokens::SentTokens>,
 }
 
 /// How many results `workspace/symbol` returns at most.
@@ -37,6 +39,11 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
     #[cfg(test)]
     if request.method == "kotlin-analyzer/testPanic" {
         panic!("a test panic about `{}`", request.params["secret"]);
+    }
+    #[cfg(test)]
+    if request.method == "kotlin-analyzer/testSlow" {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return Response::new_ok(request.id, "slow");
     }
     let id = request.id.clone();
     let result =

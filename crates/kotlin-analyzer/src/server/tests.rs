@@ -483,3 +483,157 @@ fn a_class_name_in_an_inlay_hint_links_to_its_declaration() {
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn a_cancelled_request_is_answered_cancelled_once_and_the_server_goes_on() {
+    let root = workspace("cancel");
+    let sources = root.join("src/main/kotlin/app");
+    std::fs::write(sources.join("First.kt"), "package app\nclass First\n").unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+
+    let slow = RequestId::from(1000);
+    client
+        .connection
+        .sender
+        .send(Message::Request(Request::new(
+            slow.clone(),
+            "kotlin-analyzer/testSlow".to_owned(),
+            Value::Null,
+        )))
+        .unwrap();
+    client.notify("$/cancelRequest", json!({ "id": 1000 }));
+    let mut answers = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    while std::time::Instant::now() < deadline {
+        match client
+            .connection
+            .receiver
+            .recv_timeout(Duration::from_millis(50))
+        {
+            Ok(Message::Response(response)) if response.id == slow => answers.push(response),
+            Ok(Message::Request(request)) => client.answer(request),
+            Ok(Message::Notification(notification)) => client.unread.push(notification),
+            _ => {}
+        }
+    }
+    let [answer] = &answers[..] else {
+        panic!("one answer to the cancelled request: {answers:?}");
+    };
+    let error = answer
+        .response_result
+        .as_ref()
+        .expect_err("answered with an error");
+    assert_eq!(error.code, lsp_server::ErrorCode::RequestCanceled as i32);
+    assert_eq!(client.workspace_symbols("First"), vec!["First"]);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_incremental_change_edits_the_open_text() {
+    let root = workspace("incremental");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("Edited.kt");
+    let text = "package app\nfun broken( {\n";
+    std::fs::write(&file, text).unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    client.open(&file, text);
+    assert!(!client.diagnostics_of(&file).is_empty());
+    // `broken( {` → `fixed() {}` in two ranged changes.
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri(&file), "version": 2 },
+            "contentChanges": [
+                { "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 11 } }, "text": "fixed()" },
+                { "range": { "start": { "line": 1, "character": 13 }, "end": { "line": 1, "character": 13 } }, "text": "}" },
+            ],
+        }),
+    );
+    assert!(client.diagnostics_of(&file).is_empty());
+    assert_eq!(client.workspace_symbols("fixed"), vec!["fixed"]);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn semantic_tokens_come_whole_as_a_delta_and_for_a_range() {
+    let root = workspace("tokens");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("Tokens.kt");
+    let text = "package app\nclass Box(val size: Int)\nfun make(): Box = Box(1)\n";
+    std::fs::write(&file, text).unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    client.open(&file, text);
+    let document = json!({ "uri": uri(&file) });
+    let numbers = |value: &Value| -> Vec<u64> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|number| number.as_u64().unwrap())
+            .collect()
+    };
+    let first = client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": document }),
+    );
+    let first_id = first["resultId"].as_str().expect("a result id").to_owned();
+    let mut sent = numbers(&first["data"]);
+
+    // A line inserted after the class: the function's tokens change.
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri(&file), "version": 2 },
+            "contentChanges": [{
+                "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 0 } },
+                "text": "val made = make()\n",
+            }],
+        }),
+    );
+    client.diagnostics_of(&file);
+    let delta = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({ "textDocument": document, "previousResultId": first_id }),
+    );
+    let edits = delta["edits"].as_array().expect("a delta, not the whole");
+    for edit in edits.iter().rev() {
+        let start = edit["start"].as_u64().unwrap() as usize;
+        let deleted = edit["deleteCount"].as_u64().unwrap() as usize;
+        let inserted = edit.get("data").map(numbers).unwrap_or_default();
+        sent.splice(start..start + deleted, inserted);
+    }
+    let whole = client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": document }),
+    );
+    assert_eq!(sent, numbers(&whole["data"]));
+    // An unknown previous id: everything again.
+    let stale = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({ "textDocument": document, "previousResultId": "no-such-id" }),
+    );
+    assert_eq!(numbers(&stale["data"]), numbers(&whole["data"]));
+
+    // The class's line alone: `Box` and `size` (with no standard library
+    // in this workspace, `Int` resolves to nothing: no token).
+    let range = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument": document,
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 2, "character": 0 } },
+        }),
+    );
+    let in_range = numbers(&range["data"]);
+    assert_eq!(in_range.len() / 5, 2, "{in_range:?}");
+    assert_eq!(
+        in_range[0], 1,
+        "the first token's line, from the file's start"
+    );
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

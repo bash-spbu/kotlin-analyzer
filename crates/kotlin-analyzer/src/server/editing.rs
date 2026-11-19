@@ -7,14 +7,15 @@ use ide::{CompletionKind, FoldKind, TokenKind};
 use lsp_server::Request;
 use lsp_types::request::{
     Completion, DocumentHighlightRequest, FoldingRangeRequest, PrepareRenameRequest, References,
-    Rename, Request as _, ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest,
+    Rename, Request as _, ResolveCompletionItem, SemanticTokensFullDeltaRequest,
+    SemanticTokensFullRequest, SemanticTokensRangeRequest, SignatureHelpRequest,
 };
 use vfs::{FileId, LineIndex};
 
 use super::convert;
 use super::handlers::Snapshot;
 
-const METHODS: [&str; 9] = [
+const METHODS: [&str; 11] = [
     Completion::METHOD,
     ResolveCompletionItem::METHOD,
     SignatureHelpRequest::METHOD,
@@ -23,6 +24,8 @@ const METHODS: [&str; 9] = [
     PrepareRenameRequest::METHOD,
     Rename::METHOD,
     SemanticTokensFullRequest::METHOD,
+    SemanticTokensFullDeltaRequest::METHOD,
+    SemanticTokensRangeRequest::METHOD,
     FoldingRangeRequest::METHOD,
 ];
 
@@ -53,9 +56,12 @@ pub(super) fn handle(snapshot: &Snapshot, request: Request) -> Answer {
             params::<PrepareRenameRequest>(request).map(|params| prepare_rename(snapshot, params))
         }
         Rename::METHOD => params::<Rename>(request).and_then(|params| rename(snapshot, params)),
-        SemanticTokensFullRequest::METHOD => {
-            params::<SemanticTokensFullRequest>(request).map(|_| semantic_tokens(snapshot))
-        }
+        SemanticTokensFullRequest::METHOD => params::<SemanticTokensFullRequest>(request)
+            .map(|_| super::semantic_tokens::full(snapshot)),
+        SemanticTokensFullDeltaRequest::METHOD => params::<SemanticTokensFullDeltaRequest>(request)
+            .map(|params| super::semantic_tokens::delta(snapshot, &params.previous_result_id)),
+        SemanticTokensRangeRequest::METHOD => params::<SemanticTokensRangeRequest>(request)
+            .map(|params| super::semantic_tokens::range(snapshot, params.range)),
         FoldingRangeRequest::METHOD => {
             params::<FoldingRangeRequest>(request).map(|_| folding(snapshot))
         }
@@ -366,44 +372,6 @@ pub(super) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
             .map(|name| lsp_types::SemanticTokenModifier::new(name))
             .collect(),
     }
-}
-
-fn semantic_tokens(snapshot: &Snapshot) -> ide::Cancellable<serde_json::Value> {
-    let Some((file, text, index)) = document(snapshot)? else {
-        return Ok(serde_json::Value::Null);
-    };
-    let mut data = Vec::new();
-    let (mut previous_line, mut previous_start) = (0, 0);
-    for token in snapshot.analysis.semantic_tokens(file)? {
-        let start = convert::position(&index, &text, token.range.start as usize);
-        let end = convert::position(&index, &text, token.range.end as usize);
-        if start.line != end.line {
-            continue;
-        }
-        let delta_line = start.line - previous_line;
-        let delta_start = if delta_line == 0 {
-            start.character - previous_start
-        } else {
-            start.character
-        };
-        data.push(lsp_types::SemanticToken {
-            delta_line,
-            delta_start,
-            length: end.character - start.character,
-            token_type: TokenKind::ALL
-                .iter()
-                .position(|kind| *kind == token.kind)
-                .unwrap_or(0) as u32,
-            token_modifiers_bitset: token.modifiers.0,
-        });
-        previous_line = start.line;
-        previous_start = start.character;
-    }
-    let tokens = lsp_types::SemanticTokens {
-        result_id: None,
-        data,
-    };
-    Ok(serde_json::to_value(tokens).unwrap_or_default())
 }
 
 fn folding(snapshot: &Snapshot) -> ide::Cancellable<serde_json::Value> {

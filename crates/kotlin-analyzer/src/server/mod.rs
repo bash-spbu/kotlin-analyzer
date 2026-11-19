@@ -11,12 +11,14 @@ mod editing;
 mod gradle_export;
 mod handlers;
 mod library_sources;
+mod semantic_tokens;
 mod settings;
 #[cfg(test)]
 mod tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select};
@@ -174,7 +176,9 @@ fn log_session_start(
 
 fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         definition_provider: Some(OneOf::Left(true)),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
@@ -201,7 +205,8 @@ fn capabilities() -> ServerCapabilities {
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 lsp_types::SemanticTokensOptions {
                     legend: editing::semantic_tokens_legend(),
-                    full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                    full: Some(lsp_types::SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                    range: Some(true),
                     ..lsp_types::SemanticTokensOptions::default()
                 },
             ),
@@ -326,6 +331,11 @@ struct GlobalState {
     refreshes: ClientRefreshes,
     /// For the log: how many requests the client sent.
     requests_received: u64,
+    /// The requests sent to the pool and not answered yet, each with what
+    /// tells its job it was cancelled.
+    in_flight: FxHashMap<RequestId, Arc<AtomicBool>>,
+    /// The semantic tokens last sent per open file (see `semantic_tokens`).
+    sent_tokens: Arc<semantic_tokens::SentTokens>,
 }
 
 impl GlobalState {
@@ -364,6 +374,8 @@ impl GlobalState {
             next_diagnostics_generation: 0,
             refreshes: ClientRefreshes::default(),
             requests_received: 0,
+            in_flight: FxHashMap::default(),
+            sent_tokens: Arc::default(),
         }
     }
 
@@ -532,7 +544,12 @@ impl GlobalState {
 
     fn on_task(&mut self, task: Task) {
         match task {
-            Task::Response(response) => self.respond(response),
+            Task::Response(response) => {
+                // A request the client cancelled was answered then.
+                if self.in_flight.remove(&response.id).is_some() {
+                    self.respond(response);
+                }
+            }
             Task::ModelExported { export, took } => self.on_export(export, took),
             Task::Loaded { generation, loaded } => {
                 if generation != self.load_generation {
@@ -799,10 +816,17 @@ impl GlobalState {
             loaded: self.loaded,
             request_file,
             diagnostics_config: self.diagnostics_config.clone(),
+            sent_tokens: self.sent_tokens.clone(),
         };
         let sender = self.task_sender.clone();
         let received = Instant::now();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.in_flight.insert(request.id.clone(), cancelled.clone());
         self.pool.spawn(move || {
+            // Cancelled while it waited for a worker: nothing to compute.
+            if cancelled.load(Ordering::SeqCst) {
+                return;
+            }
             let started = Instant::now();
             let request_id = request.id.clone();
             let context = Context::Request { id, method, file };
@@ -825,6 +849,29 @@ impl GlobalState {
             log_response(&response, id, method, file, timing);
             let _ = sender.send(Task::Response(response));
         });
+    }
+
+    /// `$/cancelRequest`: a request not answered yet is answered
+    /// "cancelled" now; its work is skipped if it hasn't started, and its
+    /// answer dropped when it comes (a computation already running goes
+    /// on until done or an edit cancels it).
+    fn cancel_request(&mut self, id: lsp_types::NumberOrString) {
+        let id = match id {
+            lsp_types::NumberOrString::Number(number) => RequestId::from(number),
+            lsp_types::NumberOrString::String(text) => RequestId::from(text),
+        };
+        let Some(cancelled) = self.in_flight.remove(&id) else {
+            return;
+        };
+        cancelled.store(true, Ordering::SeqCst);
+        Event::debug("request-cancelled")
+            .number("id", request_number(&id))
+            .emit();
+        self.respond(Response::new_err(
+            id,
+            lsp_server::ErrorCode::RequestCanceled as i32,
+            "cancelled".to_owned(),
+        ));
     }
 
     /// A file as the log names it.
@@ -870,6 +917,13 @@ impl GlobalState {
     }
 
     fn on_notification(&mut self, notification: Notification) {
+        let notification = match cast_notification::<notification::Cancel>(notification) {
+            Ok(params) => {
+                self.cancel_request(params.id);
+                return;
+            }
+            Err(notification) => notification,
+        };
         let notification =
             match cast_notification::<notification::DidOpenTextDocument>(notification) {
                 Ok(params) => {
@@ -897,13 +951,17 @@ impl GlobalState {
                     let Some(path) = convert::path_of(&params.text_document.uri) else {
                         return;
                     };
-                    // Full sync: the last change carries the whole text.
+                    // Incremental sync: each change edits the text as the
+                    // ones before it left it.
                     let changes = params.content_changes.len();
-                    let Some(change) = params.content_changes.into_iter().last() else {
-                        return;
-                    };
-                    let shape = TextShape::of(&change.text);
-                    let file = self.vfs.set_contents(&path, Some(Arc::from(change.text)));
+                    let current = self
+                        .vfs
+                        .file_id(&path)
+                        .and_then(|file| self.vfs.contents(file).cloned())
+                        .unwrap_or_default();
+                    let text = convert::apply_changes(&current, params.content_changes);
+                    let shape = TextShape::of(&text);
+                    let file = self.vfs.set_contents(&path, Some(Arc::from(text)));
                     self.open_documents
                         .insert(file, params.text_document.version);
                     shape
@@ -958,6 +1016,7 @@ impl GlobalState {
                     .emit();
                 self.open_documents.remove(&file);
                 self.diagnostics_generations.remove(&file);
+                self.sent_tokens.forget(file);
             }
             // The disk's version is the file's text again.
             let on_disk = std::fs::read_to_string(&path).ok().map(Arc::from);
@@ -1121,6 +1180,7 @@ const KNOWN_METHODS: &[&str] = &[
     "workspace/symbol",
     "textDocument/foldingRange",
     "textDocument/semanticTokens/full",
+    "textDocument/semanticTokens/full/delta",
     "textDocument/semanticTokens/range",
     "textDocument/inlayHint",
     "inlayHint/resolve",

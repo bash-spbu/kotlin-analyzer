@@ -1,7 +1,11 @@
 # LSP
 
-Over stdio, LSP 3.17. Text sync: full documents. Positions use UTF-16
-columns. While the workspace is being loaded, `$/progress` reports it under
+Over stdio, LSP 3.17. Text sync: incremental (each change replaces a
+range, as the changes before it left the text; one without a range replaces
+it all). Positions use UTF-16 columns. `$/cancelRequest` answers a request
+not answered yet with `RequestCancelled` at once: its work is skipped when
+it hasn't started, and its result dropped when it comes (a computation
+already running goes on until done or an edit cancels it). While the workspace is being loaded, `$/progress` reports it under
 the token `kotlin-analyzer/loading`, created (`window/workDoneProgress/create`)
 right after `initialize` returns. Requests that need the workspace answer
 empty until it has loaded; once it has, the client is asked to refresh
@@ -31,7 +35,9 @@ first): what one file declares changes what another's code means.
 | `textDocument/documentSymbol` | the file's declarations as a tree |
 | `workspace/symbol` | workspace declarations (and, for queries of 3+ characters, library classes) matching the query fuzzily |
 | `textDocument/foldingRange` | multi-line class and function bodies, blocks, lambdas, `when`s, the import list, block comments (a body and its block fold once) |
-| `textDocument/semanticTokens/full` | every name classified by what it resolves to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, and decorator for an annotation's name where it annotates (`@Name`, `@Name(…)`, `@param:Name`; `Name::class` stays a class or interface); modifiers: declaration, readonly (`val`, non-`var` locals), static, deprecated. *(Later: `/range`, defaultLibrary.)* |
+| `textDocument/semanticTokens/full` | every name classified by what it resolves to: class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, namespace, and decorator for an annotation's name where it annotates (`@Name`, `@Name(…)`, `@param:Name`; `Name::class` stays a class or interface); modifiers: declaration, readonly (`val`, non-`var` locals), static, deprecated. *(Later: defaultLibrary.)* |
+| `textDocument/semanticTokens/full/delta` | what changed since the tokens sent with `previousResultId` (the last sent for the file): one edit between their common start and end; all the tokens when that id isn't the last |
+| `textDocument/semanticTokens/range` | the tokens overlapping the range |
 | `textDocument/inlayHint` | inferred types of what writes none: local `val`/`var` (and destructured components), except where a constructor call makes it obvious (`val box = Box(…)`); a lambda's untyped parameters; `it: T` after the `{` of a lambda with an implicit `it`; an expression-bodied function's result after its parameters (`fun total() = …`). Each class name in a hint is a label part linked to its declaration — a workspace class's at once, a library's on `inlayHint/resolve` (read from its sources archive when it has one) |
 | `textDocument/codeAction` | the fixes of the diagnostics in the range: "Import `a.b.C`", "Remove the unused import", "Add `package …`", "Add the missing branches" (of a `when`, each `case -> TODO()`) |
 | `textDocument/publishDiagnostics` | see diagnostics.md; published with the document version they were computed for |
