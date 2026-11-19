@@ -200,6 +200,9 @@ pub struct BodyStatistics {
     pub resolved: usize,
     /// Of those, the ones whose value's type is known.
     pub typed: usize,
+    /// Of those whose type isn't known, the ones whose type is an error:
+    /// what it names (a declared type) resolves to nothing.
+    pub error_typed: usize,
     /// Of those, classes named as qualifiers and named arguments' labels:
     /// no value, no type.
     pub qualifiers: usize,
@@ -223,6 +226,7 @@ impl BodyStatistics {
         self.resolved += other.resolved;
         self.qualifiers += other.qualifiers;
         self.typed += other.typed;
+        self.error_typed += other.error_typed;
         self.candidates += other.candidates;
         self.unresolved += other.unresolved;
         for (name, count) in other.unresolved_names {
@@ -298,6 +302,9 @@ pub(crate) fn body_statistics(db: &RootDatabase, files: &[hir::FileId]) -> BodyS
                     if !resolved.ty.is_unknown() {
                         statistics.typed += 1;
                         continue;
+                    }
+                    if resolved.ty.is_error() {
+                        statistics.error_typed += 1;
                     }
                     let what = match resolved.reference {
                         hir::Reference::Declaration(location) => {

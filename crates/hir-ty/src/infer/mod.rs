@@ -390,7 +390,7 @@ pub fn infer_file(db: &dyn SourceDatabase, file: SourceFile) -> Arc<InferenceRes
 /// The type of a workspace declaration that doesn't write one: a
 /// function's expression body's (`Unit` for a block body), a property's
 /// initializer's, getter's or delegate's. A declaration whose type depends
-/// on itself is `Unknown`.
+/// on itself is an error.
 #[salsa::tracked(returns(clone), cycle_result = unknown_declaration_type, lru = 4096)]
 pub fn declaration_type(db: &dyn SourceDatabase, file: SourceFile, item: ItemId) -> Ty {
     if file.language(db) != Language::Kotlin {
@@ -408,5 +408,5 @@ fn unknown_declaration_type(
     _file: SourceFile,
     _item: ItemId,
 ) -> Ty {
-    Ty::Unknown
+    Ty::Error
 }

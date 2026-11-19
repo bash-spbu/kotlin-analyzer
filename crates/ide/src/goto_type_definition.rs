@@ -80,6 +80,6 @@ fn collect_classes(ty: &Ty, classes: &mut Vec<ItemLocation>) {
                 collect_classes(part, classes);
             }
         }
-        Ty::TypeParameter { .. } | Ty::Nothing { .. } | Ty::Unknown => {}
+        Ty::TypeParameter { .. } | Ty::Nothing { .. } | Ty::Unknown | Ty::Error => {}
     }
 }

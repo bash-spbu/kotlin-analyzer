@@ -588,7 +588,7 @@ fn known_value(ty: &Ty) -> Option<Ty> {
     let known = match ty {
         Ty::Class(class) => class.arguments.iter().all(is_known_argument),
         Ty::TypeParameter { .. } => true,
-        Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown => false,
+        Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
     };
     known.then(|| ty.clone())
 }
@@ -600,7 +600,7 @@ fn is_known_argument(argument: &Ty) -> bool {
                 && class.arguments.iter().all(is_known_argument)
         }
         Ty::TypeParameter { nullability, .. } => *nullability != Nullability::Platform,
-        Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown => false,
+        Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
     }
 }
 
@@ -620,7 +620,7 @@ fn mentions_parameter_of(ty: &Ty, owner: ItemLocation) -> bool {
             .iter()
             .any(|argument| mentions_parameter_of(argument, owner)),
         Ty::Function(_) => true,
-        Ty::Nothing { .. } | Ty::Unknown => false,
+        Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
     }
 }
 

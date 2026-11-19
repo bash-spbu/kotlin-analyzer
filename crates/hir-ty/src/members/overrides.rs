@@ -46,7 +46,7 @@ impl ErasedType {
                 parameters: function_type.parameters.len()
                     + usize::from(function_type.receiver.is_some()),
             }),
-            Ty::Nothing { .. } | Ty::Unknown => None,
+            Ty::Nothing { .. } | Ty::Unknown | Ty::Error => None,
         }
     }
 }

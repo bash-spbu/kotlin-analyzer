@@ -128,7 +128,7 @@ val missing: Missing = TODO()
             entry: Map.Entry<String, List<Int>>?
             star: List<*>
             list: ArrayList<String>
-            missing: {unknown}"#]],
+            missing: {error}"#]],
     );
 }
 
@@ -677,7 +677,7 @@ fun use() {
 }
 
 #[test]
-fn self_referencing_declarations_are_unknown_not_a_hang() {
+fn self_referencing_declarations_are_errors_not_a_hang() {
     check_inference(
         r#"
 //- /app/Use.kt
@@ -689,9 +689,30 @@ fun use() {
 }
 "#,
         expect![[r#"
-            pong@2 -> app.pong: {unknown}
-            ping@3 -> app.ping: {unknown}
-            ping@5 -> app.ping: {unknown}"#]],
+            pong@2 -> app.pong: {error}
+            ping@3 -> app.ping: {error}
+            ping@5 -> app.ping: {error}"#]],
+    );
+}
+
+#[test]
+fn what_resolves_to_nothing_is_an_error_not_an_unknown() {
+    check_inference(
+        r#"
+//- /app/Use.kt
+package app
+fun use(written: NoSuchType, values: List<NoSuchType>) {
+    val missing = nothingHasThisName()
+    missing
+    written
+    values
+}
+"#,
+        expect![[r#"
+            nothingHasThisName@3 -> ?
+            missing@4 -> local missing@3: {error}
+            written@5 -> local written@2: {error}
+            values@6 -> local values@2: List<{error}>"#]],
     );
 }
 

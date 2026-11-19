@@ -3,7 +3,7 @@
 //! and its `it` (`{ it: Order -> …`), an expression-bodied function's
 //! result (`fun total() = …` shows `: Long` after its parameters).
 
-use hir::{FileId, ItemKind, LocalKind, RootDatabase, Signature, SourceDatabase, Ty};
+use hir::{FileId, ItemKind, LocalKind, RootDatabase, Signature, SourceDatabase};
 use syntax::{Language, SyntaxNode, TextRange, named_children};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -40,7 +40,7 @@ pub(crate) fn inlay_hints(
             )
         })
         .filter(|(_, local)| in_range(local.name_range))
-        .filter(|(_, local)| !matches!(local.ty, Ty::Unknown))
+        .filter(|(_, local)| !local.ty.is_unknown())
         .filter_map(|(_, local)| {
             let label = hir::display_type(db, &local.ty);
             // `it` has no name written: its hint follows the lambda's `{`.

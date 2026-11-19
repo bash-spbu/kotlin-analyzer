@@ -185,7 +185,7 @@ impl Types<'_> {
             added_base
         } else {
             match self.common_type(&[known_base, added_base]) {
-                Ty::Unknown => return None,
+                Ty::Unknown | Ty::Error => return None,
                 common => common,
             }
         };

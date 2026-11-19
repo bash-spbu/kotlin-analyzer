@@ -174,7 +174,12 @@ nullability: a Java class may override a Kotlin property's getter
 
 ## Types in bodies
 
-Every expression gets a type, or `Unknown`. A call's type parameters are
+Every expression gets a type, or none known. What isn't known is one of two
+things, both silent: `Unknown` — what the analysis doesn't model or couldn't
+infer (overloads it can't tell apart, a type argument it can't follow) — or an
+error — what the source names resolves to nothing (a type or a name nothing
+is found for, a type that can't be read, a declaration whose type depends on
+itself), shown as `{error}`. A call's type parameters are
 inferred from, in this order of evidence: explicit type arguments, the
 receiver (`List<String>.map` binds `T`), the arguments (each inferred with its
 parameter's type expected), the type the context expects (`val x:
@@ -215,7 +220,7 @@ and `componentN` for destructuring; the companions of superclasses are
 implicit receivers in subclasses.
 
 A declaration without a written type gets its body's type; one whose type
-depends on itself is `Unknown`.
+depends on itself is an error.
 
 A class's primary-constructor parameters are visible in its initializers
 (property initializers, `init` blocks, supertype arguments), not in its

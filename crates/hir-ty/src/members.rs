@@ -276,7 +276,7 @@ impl<'db> Types<'db> {
                     bounds
                 }
             }
-            Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown => Vec::new(),
+            Ty::Function(_) | Ty::Nothing { .. } | Ty::Unknown | Ty::Error => Vec::new(),
         }
     }
 

@@ -345,7 +345,7 @@ impl Inferrer<'_> {
             && target
                 .arguments
                 .iter()
-                .any(|argument| *argument != Ty::Unknown && !declared.arguments.contains(argument));
+                .any(|argument| !argument.is_unknown() && !declared.arguments.contains(argument));
         if declared.arguments.is_empty() || written_arguments {
             return target;
         }

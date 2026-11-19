@@ -178,6 +178,10 @@ fn report_bodies(host: &AnalysisHost, vfs: &Vfs, files: &[vfs::FileId]) {
         statistics.qualifiers,
     );
     println!(
+        "    of the values whose type isn't known, an error (a type naming nothing found): {}",
+        statistics.error_typed,
+    );
+    println!(
         "  candidates    : {} ({:.1}%)",
         statistics.candidates,
         percent(statistics.candidates)

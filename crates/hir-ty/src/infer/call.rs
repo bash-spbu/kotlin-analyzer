@@ -224,11 +224,16 @@ impl<'db> Inferrer<'db> {
             return result;
         }
         // A property of function type, called: `handler(event)`.
-        if let Typed::Value(Ty::Function(function)) = self.identifier(callee) {
+        let callee_value = self.identifier(callee);
+        if let Typed::Value(Ty::Function(function)) = callee_value {
             return self.invoke(Some(*function), arguments);
         }
         self.type_remaining(arguments);
-        Ty::Unknown
+        match callee_value {
+            // Nothing has the name.
+            Typed::Value(Ty::Error) => Ty::Error,
+            _ => Ty::Unknown,
+        }
     }
 
     /// The innermost implicit receiver's property `name`, when its type is
@@ -306,7 +311,7 @@ impl<'db> Inferrer<'db> {
     /// isn't known.
     fn qualified_levels(&mut self, receiver: &Typed, safe: bool, name: Name) -> Option<Vec<Level>> {
         match receiver {
-            Typed::Value(Ty::Unknown) => None,
+            Typed::Value(Ty::Unknown | Ty::Error) => None,
             Typed::Value(receiver_type) => {
                 let mut levels = Vec::new();
                 if !safe && receiver_type.nullability() == Nullability::Nullable {
@@ -371,10 +376,10 @@ impl<'db> Inferrer<'db> {
         }
         self.type_remaining(arguments);
         // A function value's members (`invoke`) aren't modelled.
-        if !matches!(receiver, Typed::Value(Ty::Function(_))) {
-            self.record_unresolved(name_node, name_site(receiver));
+        if matches!(receiver, Typed::Value(Ty::Function(_))) {
+            return Ty::Unknown;
         }
-        Ty::Unknown
+        self.record_unresolved(name_node, name_site(receiver))
     }
 
     /// `receiver.name(arguments)` once `receiver` is inferred.
@@ -491,8 +496,7 @@ impl<'db> Inferrer<'db> {
             Some(result) => result,
             None => {
                 self.type_remaining(&mut arguments);
-                self.record_unresolved(function, NameSite::Member(receiver));
-                Ty::Unknown
+                self.record_unresolved(function, NameSite::Member(receiver))
             }
         }
     }
@@ -1640,7 +1644,7 @@ impl<'db> Inferrer<'db> {
                 None => return self.lambda_fits_class(class),
             },
             Ty::Nothing { .. } => return Fit::No,
-            Ty::TypeParameter { .. } | Ty::Unknown => return Fit::Unknown,
+            Ty::TypeParameter { .. } | Ty::Unknown | Ty::Error => return Fit::Unknown,
         };
         let declared = declared_lambda_parameters(node);
         let fits = match declared {
@@ -1896,8 +1900,7 @@ impl<'db> Inferrer<'db> {
                     Some(receiver_type) => NameSite::Member(receiver_type.clone()),
                     None => NameSite::Scope,
                 };
-                self.record_unresolved(name_node, site);
-                Ty::Unknown
+                self.record_unresolved(name_node, site)
             }
             [only] => {
                 let ty = self.reference_type(*only, receiver_type.as_ref());

@@ -190,7 +190,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                     },
                     nullability,
                 },
-                _ => Ty::Unknown,
+                _ => Ty::Error,
             }
         }
         TypeRef::Qualified {
@@ -208,7 +208,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                 Resolution::Declaration(class) => {
                     class_type(db, scope, class, arguments, nullability, depth)
                 }
-                _ => Ty::Unknown,
+                _ => Ty::Error,
             }
         }
         TypeRef::TypeParameter { name, nullable } => match type_parameter_named(db, scope, *name) {
@@ -216,7 +216,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                 parameter,
                 nullability: nullability(scope, *nullable),
             },
-            None => Ty::Unknown,
+            None => Ty::Error,
         },
         TypeRef::Function {
             receiver,
@@ -262,7 +262,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
             builtin(db, scope.from, "kotlin", "Array", vec![element])
                 .with_nullability(nullability(scope, false))
         }
-        TypeRef::Unreadable => Ty::Unknown,
+        TypeRef::Unreadable => Ty::Error,
     }
 }
 

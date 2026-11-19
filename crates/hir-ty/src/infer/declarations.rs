@@ -270,7 +270,9 @@ impl<'db> Inferrer<'db> {
         self.result.names.get(&(node.start_byte() as u32)).cloned()
     }
 
-    pub(super) fn record_unresolved(&mut self, name: SyntaxNode<'_>, site: NameSite) {
+    /// Records that nothing has the name `name` at `site`; the name's
+    /// value is an error.
+    pub(super) fn record_unresolved(&mut self, name: SyntaxNode<'_>, site: NameSite) -> Ty {
         let spelled = self.name(name);
         let certainty = self.lookup_certainty(spelled, &site);
         self.result.unresolved.push(UnresolvedName {
@@ -279,6 +281,7 @@ impl<'db> Inferrer<'db> {
             site,
             certainty,
         });
+        Ty::Error
     }
 
     pub(super) fn record_argument_mismatch(&mut self, mismatch: ArgumentMismatch) {
@@ -435,7 +438,7 @@ impl<'db> Inferrer<'db> {
     /// bounds').
     fn is_fully_known(&self, ty: &Ty) -> bool {
         match ty {
-            Ty::Unknown => false,
+            Ty::Unknown | Ty::Error => false,
             Ty::Class(class) => self.types.hierarchy_complete(class.class),
             // A bound that is another type parameter is judged where that
             // one is used (bounds may refer to each other in a cycle).
@@ -1275,7 +1278,7 @@ impl<'db> Inferrer<'db> {
                 (BlockEnd::Unreachable, _) | (_, Ty::Nothing { nullable: false }) => {
                     BlockEnd::Unreachable
                 }
-                (_, Ty::Unknown) => BlockEnd::Unknown,
+                (_, Ty::Unknown | Ty::Error) => BlockEnd::Unknown,
                 (known, _) => known,
             };
         }

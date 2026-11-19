@@ -42,8 +42,15 @@ pub enum Ty {
     Nothing {
         nullable: bool,
     },
-    /// Not known: every check on it stays silent.
+    /// What the analysis doesn't model or couldn't infer (overloads it
+    /// can't tell apart, a type argument it can't follow, a star
+    /// projection's): every check on it stays silent.
     Unknown,
+    /// What the source names resolves to nothing: a type or a name nothing
+    /// is found for, a type that can't be read, a declaration whose type
+    /// depends on itself. Silent as `Unknown` — the miss is reported where
+    /// it's found, if it's reported at all.
+    Error,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -64,8 +71,13 @@ pub struct FunctionType {
 }
 
 impl Ty {
+    /// Whether nothing is known of it: not inferred, or an error.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Ty::Unknown)
+        matches!(self, Ty::Unknown | Ty::Error)
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, Ty::Error)
     }
 
     /// Whether `parameter` appears anywhere in the type.
@@ -88,7 +100,7 @@ impl Ty {
                         .any(|value| value.mentions(parameter))
                     || function.result.mentions(parameter)
             }
-            Ty::Nothing { .. } | Ty::Unknown => false,
+            Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
         }
     }
 
@@ -106,14 +118,14 @@ impl Ty {
                     || function.parameters.iter().any(Ty::has_type_parameter)
                     || function.result.has_type_parameter()
             }
-            Ty::Nothing { .. } | Ty::Unknown => false,
+            Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
         }
     }
 
     /// Whether any part of the type is unknown (`Pair<String, *>`).
     pub fn has_unknown_part(&self) -> bool {
         match self {
-            Ty::Unknown => true,
+            Ty::Unknown | Ty::Error => true,
             Ty::Class(class) => class.arguments.iter().any(Ty::has_unknown_part),
             Ty::Function(function) => {
                 let receiver_unknown = function.receiver.as_ref().is_some_and(Ty::has_unknown_part);
@@ -132,7 +144,7 @@ impl Ty {
         match self {
             Ty::Class(class) => class.nullability == Nullability::NotNull,
             Ty::Function(function) => function.nullability == Nullability::NotNull,
-            Ty::TypeParameter { .. } | Ty::Nothing { .. } | Ty::Unknown => false,
+            Ty::TypeParameter { .. } | Ty::Nothing { .. } | Ty::Unknown | Ty::Error => false,
         }
     }
 
@@ -142,7 +154,7 @@ impl Ty {
             Ty::TypeParameter { nullability, .. } => *nullability,
             Ty::Function(function) => function.nullability,
             Ty::Nothing { nullable } => Nullability::of(*nullable),
-            Ty::Unknown => Nullability::Platform,
+            Ty::Unknown | Ty::Error => Nullability::Platform,
         }
     }
 
@@ -164,7 +176,7 @@ impl Ty {
             Ty::Nothing { .. } => Ty::Nothing {
                 nullable: nullability == Nullability::Nullable,
             },
-            Ty::Unknown => Ty::Unknown,
+            Ty::Unknown | Ty::Error => self,
         }
     }
 
@@ -245,7 +257,7 @@ impl Ty {
                 suspend: function.suspend,
                 nullability: function.nullability,
             })),
-            Ty::Nothing { .. } | Ty::Unknown => self.clone(),
+            Ty::Nothing { .. } | Ty::Unknown | Ty::Error => self.clone(),
         }
     }
 }

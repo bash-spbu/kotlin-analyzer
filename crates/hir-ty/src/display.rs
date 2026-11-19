@@ -96,6 +96,7 @@ fn write(db: &dyn SourceDatabase, ty: &Ty, text: &mut String) {
             }
         }
         Ty::Unknown => text.push_str("{unknown}"),
+        Ty::Error => text.push_str("{error}"),
     }
 }
 

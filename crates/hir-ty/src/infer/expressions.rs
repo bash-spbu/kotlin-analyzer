@@ -337,8 +337,7 @@ impl Inferrer<'_> {
             self.record(node, Reference::Candidates(functions.into()), Ty::Unknown);
             return Typed::Value(Ty::Unknown);
         }
-        self.record_unresolved(node, NameSite::Scope);
-        Typed::Value(Ty::Unknown)
+        Typed::Value(self.record_unresolved(node, NameSite::Scope))
     }
 
     /// The functions named `name` an unqualified call could reach: members
@@ -537,13 +536,12 @@ impl Inferrer<'_> {
                         // aren't modelled.
                         let modelled = !receiver_type.is_unknown()
                             && !matches!(receiver_type, Ty::Function(_));
-                        if modelled {
-                            self.record_unresolved(
-                                name_node,
-                                NameSite::Member(receiver_type.clone()),
-                            );
+                        if !modelled {
+                            return Typed::Value(Ty::Unknown);
                         }
-                        Typed::Value(Ty::Unknown)
+                        Typed::Value(
+                            self.record_unresolved(name_node, NameSite::Member(receiver_type)),
+                        )
                     }
                 }
             }
@@ -612,8 +610,7 @@ impl Inferrer<'_> {
             self.record(name_node, Reference::Declaration(class), entries.clone());
             return Typed::Value(entries);
         }
-        self.record_unresolved(name_node, NameSite::Static);
-        Typed::Value(Ty::Unknown)
+        Typed::Value(self.record_unresolved(name_node, NameSite::Static))
     }
 
     /// `entries` inside an enum (or its companion) means the enum's.
@@ -677,8 +674,7 @@ impl Inferrer<'_> {
         if hir_def::def_map::package_prefix_exists(self.db, self.file, &subpackage) {
             return Typed::Package(subpackage);
         }
-        self.record_unresolved(name_node, NameSite::Package);
-        Typed::Value(Ty::Unknown)
+        Typed::Value(self.record_unresolved(name_node, NameSite::Package))
     }
 
     // --- simple expressions -------------------------------------------------
@@ -1075,15 +1071,8 @@ impl Inferrer<'_> {
                             self.record(name_node, Reference::Declaration(location), ty.clone());
                             ty
                         }
-                        None => {
-                            if !receiver_type.is_unknown() {
-                                self.record_unresolved(
-                                    name_node,
-                                    NameSite::Member(receiver_type.clone()),
-                                );
-                            }
-                            Ty::Unknown
-                        }
+                        None if receiver_type.is_unknown() => Ty::Unknown,
+                        None => self.record_unresolved(name_node, NameSite::Member(receiver_type)),
                     },
                     Typed::Class(class) => {
                         let value = self.static_member(class, name_node, name);

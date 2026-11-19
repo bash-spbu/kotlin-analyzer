@@ -279,7 +279,7 @@ impl Inferrer<'_> {
                 return Fact::Unsure;
             }
             match self.types.common_type(&[one, other]) {
-                Ty::Unknown => return Fact::Unsure,
+                Ty::Unknown | Ty::Error => return Fact::Unsure,
                 common => common,
             }
         };
