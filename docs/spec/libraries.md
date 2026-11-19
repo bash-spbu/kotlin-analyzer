@@ -45,15 +45,37 @@ a Kotlin class (with `@Metadata`) as Kotlin, a Java class as Java; the
 other declarations compiled from the same source file together (a Kotlin
 file's top-level functions); members as constructors, properties,
 functions, nested classes; signatures, modifiers, supertypes and enum
-entries as recorded, types by their simple names with imports, bodies
-`{ /* compiled code */ }`, Kotlin parameters with defaults
-`/* = … */`. Nothing runs: no JVM, no decompiler of bodies — a reading aid
-for a library's API, not its source. A call lands on the constructor
+entries as recorded, types by their simple names with imports, Kotlin
+parameters with defaults `/* = … */`. A Java class's method bodies (and its
+static initializer, `static { … }`) are decompiled where they run straight
+through (`classfile`'s `decompile`, below); every other body is
+`{ /* compiled code */ }`. Nothing runs: no JVM — a reading aid for a
+library's API, not its source.
+
+#### Decompiled bodies
+
+A body's bytecode replays on its operand stack with expressions in place
+of values: `aload_0; getfield name; areturn` is `return this.name;`. Read:
+constants, locals (named and typed by `LocalVariableTable`, generic types by
+`LocalVariableTypeTable`; else `varN` declared with `var`), fields, calls
+(`super.…`, `super(…)`, `this(…)`), `new`, arrays, arithmetic, casts
+(Java's implicit widening left out), `instanceof`, class literals, string
+concatenation (`invokedynamic`, or `StringBuilder` chains), `return`,
+`throw`; a literal as its target's type writes it (`true`, `'A'`).
+Parameters are named as the body names them. A body is decompiled whole
+or not at all: anything else — branches (`if`, loops, `switch`, `&&`,
+`?:`), `try`/`catch`, lambdas, values kept on the stack across statements
+(`i++` inside an expression, array initializers) — leaves it compiled
+code. About two thirds of a Java library's bodies read (slf4j-api 69%,
+guava 72%, jackson-databind 63%). Kotlin classes keep their bodies out.
+Tests compile a class back from its decompiled text and run a program
+against it, which must print the same. A call lands on the constructor
 called, a `constructor` of its own (the class files don't say which is
 primary).
 
 The file starts with a header: where it comes from (the JAR), why (no
-sources JAR, or one not declaring it), that only declarations are shown,
+sources JAR, or one not declaring it), what is shown (declarations, and
+which bodies),
 and that the code is its authors', under the library's license. It is
 written to `library-sources/<archive>-<hash>/decompiled/<package>/<source
 file>` beside extracted sources; its code lens is a banner of the header's

@@ -715,12 +715,17 @@ fn decompiled_declaration_source(
     let file_name = recorded_file
         .filter(|file| file.ends_with(&format!(".{extension}")))
         .unwrap_or_else(|| format!("{}.{extension}", tree.item(top_level).name));
+    let bodies = match language {
+        StubLanguage::Java => compiled_bodies(&tree, &items, compiled),
+        StubLanguage::Kotlin => crate::decompiled::CompiledBodies::default(),
+    };
     let text: Arc<str> = Arc::from(crate::decompiled::render(
         &tree,
         &items,
         language,
         &file_name_of(compiled),
         &missing,
+        &bodies,
     ));
     let entry = format!("decompiled/{}{file_name}", package_directory(db, package));
     let names = chain_names(&tree, &chain);
@@ -732,6 +737,22 @@ fn decompiled_declaration_source(
         name_range: ranges.name_range,
         full_range: ranges.range,
         origin: SourceOrigin::Decompiled(missing),
+    })
+}
+
+/// The decompiled bodies of Java classes' methods, their class files read
+/// from the compiled archive (a JAR's; the JDK's `ct.sym` has no bodies).
+fn compiled_bodies(
+    tree: &ItemTree,
+    items: &[ItemId],
+    compiled: &std::path::Path,
+) -> crate::decompiled::CompiledBodies {
+    let Ok(mut archive) = classfile::Archive::open(compiled) else {
+        return crate::decompiled::CompiledBodies::default();
+    };
+    crate::decompiled::CompiledBodies::of(tree, items, &mut |binary| {
+        let index = archive.index_of(&format!("{binary}.class"))?;
+        archive.read(index)
     })
 }
 

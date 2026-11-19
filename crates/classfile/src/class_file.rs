@@ -25,17 +25,85 @@ pub(crate) mod access {
     pub(crate) const ENUM: u16 = 0x4000;
 }
 
-/// One constant-pool entry, kept only in the forms declarations read.
+/// One constant-pool entry.
 #[derive(Clone, Debug)]
-enum Constant {
+pub(crate) enum Constant {
     Utf8(String),
     Class {
         name_index: u16,
     },
     Integer(i32),
+    Float(f32),
+    Long(i64),
+    Double(f64),
+    String {
+        utf8_index: u16,
+    },
+    /// A field, method or interface method: its class and `NameAndType`.
+    Reference {
+        class_index: u16,
+        name_and_type_index: u16,
+    },
+    NameAndType {
+        name_index: u16,
+        descriptor_index: u16,
+    },
+    MethodHandle {
+        reference_index: u16,
+    },
+    InvokeDynamic {
+        bootstrap_index: u16,
+        name_and_type_index: u16,
+    },
+    /// A method type, module, package or dynamic constant: nothing read.
     Other,
     /// The unusable slot after a long or double.
     Gap,
+}
+
+/// A method's `Code` attribute, as decompiling reads it.
+#[derive(Debug, Default)]
+pub(crate) struct Code {
+    pub(crate) bytes: Vec<u8>,
+    /// How many `try` ranges it has: none in a body without handlers.
+    pub(crate) exception_handlers: usize,
+    pub(crate) local_variables: Vec<LocalVariable>,
+}
+
+/// A `LocalVariableTable` entry, its generic type from
+/// `LocalVariableTypeTable` when that has one.
+#[derive(Clone, Debug)]
+pub(crate) struct LocalVariable {
+    pub(crate) start: u32,
+    pub(crate) length: u32,
+    pub(crate) name: String,
+    pub(crate) descriptor: String,
+    pub(crate) signature: Option<String>,
+    pub(crate) slot: u16,
+}
+
+impl LocalVariable {
+    /// Whether it is in scope at `pc` (its range's end included: a store's
+    /// next instruction may be where its scope starts or ends).
+    pub(crate) fn covers(&self, pc: u32) -> bool {
+        self.start <= pc && pc <= self.start + self.length
+    }
+}
+
+/// A `BootstrapMethods` entry: the method handle and its static arguments'
+/// constant-pool indices.
+#[derive(Clone, Debug)]
+pub(crate) struct BootstrapMethod {
+    pub(crate) method_handle: u16,
+    pub(crate) arguments: Vec<u16>,
+}
+
+/// Whether a parse keeps what decompiling needs: method bodies, the
+/// constant pool, bootstrap methods. Declarations need none of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Bodies {
+    Skipped,
+    Kept,
 }
 
 #[derive(Debug)]
@@ -50,6 +118,8 @@ pub(crate) struct Member {
     /// The internal names of its other annotations
     /// (`kotlinx/coroutines/ExperimentalCoroutinesApi`).
     pub(crate) annotations: Vec<String>,
+    /// Its body, when the parse keeps bodies and it has one.
+    pub(crate) code: Option<Code>,
 }
 
 /// What `InnerClasses` says about one nested class.
@@ -95,6 +165,9 @@ pub(crate) struct ClassFile {
     /// `@RequiresOptIn(level, message)`: an annotation class that marks
     /// API needing opt-in.
     pub(crate) opt_in_marker: Option<OptInMarker>,
+    /// The constant pool, when the parse keeps bodies.
+    pub(crate) pool: Vec<Constant>,
+    pub(crate) bootstrap_methods: Vec<BootstrapMethod>,
 }
 
 struct Bytes<'data> {
@@ -134,6 +207,11 @@ const MAGIC: u32 = 0xCAFE_BABE;
 
 impl ClassFile {
     pub(crate) fn parse(data: &[u8]) -> Option<ClassFile> {
+        ClassFile::parse_keeping(data, Bodies::Skipped)
+    }
+
+    /// Parses a class file, keeping its methods' bodies when asked.
+    pub(crate) fn parse_keeping(data: &[u8], bodies: Bodies) -> Option<ClassFile> {
         let mut bytes = Bytes { data, position: 0 };
         if bytes.u32()? != MAGIC {
             return None;
@@ -152,8 +230,8 @@ impl ClassFile {
         for _ in 0..interface_count {
             interfaces.push(class_name(&pool, bytes.u16()?)?);
         }
-        let fields = read_members(&mut bytes, &pool)?;
-        let methods = read_members(&mut bytes, &pool)?;
+        let fields = read_members(&mut bytes, &pool, Bodies::Skipped)?;
+        let methods = read_members(&mut bytes, &pool, bodies)?;
         let mut class = ClassFile {
             access,
             name,
@@ -168,6 +246,8 @@ impl ClassFile {
             deprecation: None,
             annotations: Vec::new(),
             opt_in_marker: None,
+            pool: Vec::new(),
+            bootstrap_methods: Vec::new(),
         };
         let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
@@ -184,6 +264,9 @@ impl ClassFile {
                 "SourceFile" => class.source_file = utf8(&pool, body.u16()?).map(str::to_owned),
                 "Deprecated" => found.in_javadoc = true,
                 "InnerClasses" => class.inner_classes = read_inner_classes(&mut body, &pool)?,
+                "BootstrapMethods" if bodies == Bodies::Kept => {
+                    class.bootstrap_methods = read_bootstrap_methods(&mut body)?;
+                }
                 "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations" => {
                     let annotations = read_annotations(&mut body, &pool)?;
                     found.add(&annotations);
@@ -199,8 +282,126 @@ impl ClassFile {
             }
         }
         class.deprecation = found.deprecation();
+        if bodies == Bodies::Kept {
+            class.pool = pool;
+        }
         Some(class)
     }
+
+    pub(crate) fn utf8(&self, index: u16) -> Option<&str> {
+        utf8(&self.pool, index)
+    }
+
+    pub(crate) fn class_name_at(&self, index: u16) -> Option<String> {
+        class_name(&self.pool, index)
+    }
+
+    pub(crate) fn constant(&self, index: u16) -> Option<&Constant> {
+        self.pool.get(index as usize)
+    }
+
+    /// A field or method reference: its class's binary name, its name and
+    /// descriptor.
+    pub(crate) fn reference(&self, index: u16) -> Option<(String, &str, &str)> {
+        let Constant::Reference {
+            class_index,
+            name_and_type_index,
+        } = self.constant(index)?
+        else {
+            return None;
+        };
+        let (name, descriptor) = self.name_and_type(*name_and_type_index)?;
+        Some((self.class_name_at(*class_index)?, name, descriptor))
+    }
+
+    pub(crate) fn name_and_type(&self, index: u16) -> Option<(&str, &str)> {
+        let Constant::NameAndType {
+            name_index,
+            descriptor_index,
+        } = self.constant(index)?
+        else {
+            return None;
+        };
+        Some((self.utf8(*name_index)?, self.utf8(*descriptor_index)?))
+    }
+}
+
+fn read_bootstrap_methods(bytes: &mut Bytes<'_>) -> Option<Vec<BootstrapMethod>> {
+    let count = bytes.u16()?;
+    let mut methods = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let method_handle = bytes.u16()?;
+        let argument_count = bytes.u16()?;
+        let mut arguments = Vec::with_capacity(argument_count as usize);
+        for _ in 0..argument_count {
+            arguments.push(bytes.u16()?);
+        }
+        methods.push(BootstrapMethod {
+            method_handle,
+            arguments,
+        });
+    }
+    Some(methods)
+}
+
+/// A `Code` attribute: the bytecode, how many handlers, and the local
+/// variables' names and types.
+fn read_code(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Code> {
+    bytes.u16()?;
+    bytes.u16()?;
+    let length = bytes.u32()? as usize;
+    let code_bytes = bytes.take(length)?.to_vec();
+    let exception_handlers = bytes.u16()? as usize;
+    bytes.take(exception_handlers * 8)?;
+    let mut local_variables: Vec<LocalVariable> = Vec::new();
+    let mut signatures: Vec<(u32, u16, String)> = Vec::new();
+    let attribute_count = bytes.u16()?;
+    for _ in 0..attribute_count {
+        let attribute_name = utf8(pool, bytes.u16()?)?;
+        let length = bytes.u32()? as usize;
+        let mut body = Bytes {
+            data: bytes.take(length)?,
+            position: 0,
+        };
+        let is_table = attribute_name == "LocalVariableTable";
+        let is_type_table = attribute_name == "LocalVariableTypeTable";
+        if !is_table && !is_type_table {
+            continue;
+        }
+        let count = body.u16()?;
+        for _ in 0..count {
+            let start = u32::from(body.u16()?);
+            let length = u32::from(body.u16()?);
+            let name = utf8(pool, body.u16()?)?.to_owned();
+            let descriptor = utf8(pool, body.u16()?)?.to_owned();
+            let slot = body.u16()?;
+            if is_table {
+                local_variables.push(LocalVariable {
+                    start,
+                    length,
+                    name,
+                    descriptor,
+                    signature: None,
+                    slot,
+                });
+            } else {
+                signatures.push((start, slot, descriptor));
+            }
+        }
+    }
+    for (start, slot, signature) in signatures {
+        if let Some(variable) = local_variables
+            .iter_mut()
+            .find(|variable| variable.start == start && variable.slot == slot)
+        {
+            variable.signature = Some(signature);
+        }
+    }
+    Some(Code {
+        bytes: code_bytes,
+        exception_handlers,
+        local_variables,
+    })
 }
 
 fn read_constant_pool(bytes: &mut Bytes<'_>) -> Option<Vec<Constant>> {
@@ -215,14 +416,16 @@ fn read_constant_pool(bytes: &mut Bytes<'_>) -> Option<Vec<Constant>> {
                 Constant::Utf8(decode_modified_utf8(bytes.take(length)?))
             }
             3 => Constant::Integer(bytes.u32()? as i32),
-            4 => {
-                bytes.u32()?;
-                Constant::Other
-            }
+            4 => Constant::Float(f32::from_bits(bytes.u32()?)),
             5 | 6 => {
-                bytes.u32()?;
-                bytes.u32()?;
-                pool[index] = Constant::Other;
+                let high = u64::from(bytes.u32()?);
+                let low = u64::from(bytes.u32()?);
+                let bits = (high << 32) | low;
+                pool[index] = if tag == 5 {
+                    Constant::Long(bits as i64)
+                } else {
+                    Constant::Double(f64::from_bits(bits))
+                };
                 index += 1;
                 if index < count {
                     pool[index] = Constant::Gap;
@@ -233,19 +436,35 @@ fn read_constant_pool(bytes: &mut Bytes<'_>) -> Option<Vec<Constant>> {
             7 => Constant::Class {
                 name_index: bytes.u16()?,
             },
-            8 | 16 | 19 | 20 => {
+            8 => Constant::String {
+                utf8_index: bytes.u16()?,
+            },
+            16 | 19 | 20 => {
                 bytes.u16()?;
                 Constant::Other
             }
-            9..=12 | 17 | 18 => {
+            9..=11 => Constant::Reference {
+                class_index: bytes.u16()?,
+                name_and_type_index: bytes.u16()?,
+            },
+            12 => Constant::NameAndType {
+                name_index: bytes.u16()?,
+                descriptor_index: bytes.u16()?,
+            },
+            18 => Constant::InvokeDynamic {
+                bootstrap_index: bytes.u16()?,
+                name_and_type_index: bytes.u16()?,
+            },
+            17 => {
                 bytes.u16()?;
                 bytes.u16()?;
                 Constant::Other
             }
             15 => {
                 bytes.u8()?;
-                bytes.u16()?;
-                Constant::Other
+                Constant::MethodHandle {
+                    reference_index: bytes.u16()?,
+                }
             }
             _ => return None,
         };
@@ -304,7 +523,7 @@ fn class_name(pool: &[Constant], index: u16) -> Option<String> {
     }
 }
 
-fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>> {
+fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant], bodies: Bodies) -> Option<Vec<Member>> {
     let count = bytes.u16()?;
     let mut members = Vec::with_capacity(count as usize);
     for _ in 0..count {
@@ -319,6 +538,7 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             parameter_names: Vec::new(),
             deprecation: None,
             annotations: Vec::new(),
+            code: None,
         };
         let mut found = Deprecations::default();
         let attribute_count = bytes.u16()?;
@@ -333,6 +553,7 @@ fn read_members(bytes: &mut Bytes<'_>, pool: &[Constant]) -> Option<Vec<Member>>
             match attribute_name {
                 "Signature" => member.signature = utf8(pool, body.u16()?).map(str::to_owned),
                 "Deprecated" => found.in_javadoc = true,
+                "Code" if bodies == Bodies::Kept => member.code = read_code(&mut body, pool),
                 "MethodParameters" => {
                     let count = body.u8()?;
                     for _ in 0..count {

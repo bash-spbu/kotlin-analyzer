@@ -15,6 +15,7 @@
 //! `hir-def` lowers into item trees.
 
 mod class_file;
+pub mod decompile;
 mod java;
 mod jvm_descriptor;
 mod kotlin;

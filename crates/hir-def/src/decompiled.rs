@@ -1,8 +1,9 @@
 //! A library's declarations as a source file, when its sources aren't to
 //! be had: rendered from what its class files record — signatures,
-//! modifiers, supertypes — with every body left out. A reading aid, as an
-//! IDE shows a compiled class without sources; not a decompiler of method
-//! bodies.
+//! modifiers, supertypes — and, in a Java class, the bodies `classfile`'s
+//! decompiler reads back (those that run straight through); every other
+//! body left out. A reading aid, as an IDE shows a compiled class without
+//! sources, not the library's code.
 //!
 //! A Kotlin class's file is Kotlin (from its `@Metadata`), a Java class's
 //! Java. Types are written by their simple names, imported, unless two
@@ -21,6 +22,12 @@ use crate::item_tree::{
     TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
 };
 use crate::resolver::{DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES};
+use classfile::decompile::{
+    BinaryOperator, Body, DecompiledMethod, Expression, Literal, Owner, Receiver, Statement,
+    decompile_class, parameter_descriptors,
+};
+use classfile::{ClassName, LibraryType};
+use rustc_hash::FxHashMap;
 
 /// Why a declaration's text is rendered rather than read.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -56,23 +63,234 @@ impl StubLanguage {
     }
 }
 
+/// A method's body as its class file has it, decompiled.
+pub struct MethodBody {
+    body: Body,
+    /// The method's parameters' names, from its local variables.
+    parameter_names: Vec<String>,
+}
+
+/// The decompiled bodies of a file's methods and static initializers, by
+/// item.
+#[derive(Default)]
+pub struct CompiledBodies {
+    methods: FxHashMap<ItemId, MethodBody>,
+    static_initializers: FxHashMap<ItemId, Body>,
+}
+
+impl CompiledBodies {
+    /// The bodies of the Java classes among `items` and their nested
+    /// classes: each class's file (by its binary name, `a/b/Outer$Inner`,
+    /// from `read_class`) decompiled, its methods matched to the items by
+    /// name and parameters.
+    pub fn of(
+        tree: &ItemTree,
+        items: &[ItemId],
+        read_class: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) -> CompiledBodies {
+        let mut bodies = CompiledBodies::default();
+        let package: Vec<String> = tree
+            .package
+            .segments()
+            .iter()
+            .map(|segment| segment.to_string())
+            .collect();
+        for item in items {
+            let is_class = matches!(tree.item(*item).kind, ItemKind::Class(_));
+            if is_class {
+                let binary = package
+                    .iter()
+                    .cloned()
+                    .chain([tree.item(*item).name.to_string()])
+                    .collect::<Vec<_>>()
+                    .join("/");
+                bodies.read_class(tree, *item, &binary, read_class);
+            }
+        }
+        bodies
+    }
+
+    fn read_class(
+        &mut self,
+        tree: &ItemTree,
+        class: ItemId,
+        binary: &str,
+        read_class: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) {
+        let item = tree.item(class);
+        if StubLanguage::of(item) != StubLanguage::Java {
+            return;
+        }
+        let decompiled = read_class(binary).and_then(|bytes| decompile_class(&bytes));
+        if let Some(decompiled) = &decompiled {
+            for child in item.children.iter() {
+                if let Some(body) = matching_body(tree.item(*child), &decompiled.methods) {
+                    self.methods.insert(*child, body);
+                }
+            }
+            let static_initializer = decompiled
+                .methods
+                .iter()
+                .find(|method| method.name == "<clinit>")
+                .and_then(|method| method.body.as_ref().ok())
+                .filter(|body| {
+                    body.statements
+                        .iter()
+                        .any(|statement| *statement != Statement::Return(None))
+                });
+            if let Some(body) = static_initializer {
+                self.static_initializers.insert(class, body.clone());
+            }
+        }
+        for child in item.children.iter() {
+            let nested = tree.item(*child);
+            if matches!(nested.kind, ItemKind::Class(_)) {
+                let nested_binary = format!("{binary}${}", nested.name);
+                self.read_class(tree, *child, &nested_binary, read_class);
+            }
+        }
+    }
+
+    /// How many methods have a body: for the header.
+    pub fn len(&self) -> usize {
+        self.methods.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+    }
+}
+
+/// The decompiled body of a method or constructor item: the class file's
+/// method of its name whose parameters match — by count (a constructor of
+/// an inner class takes its outer instance first), then, among overloads,
+/// by their types' simple names.
+fn matching_body(item: &Item, methods: &[DecompiledMethod]) -> Option<MethodBody> {
+    let jvm_name = match item.kind {
+        ItemKind::Constructor => "<init>".to_owned(),
+        ItemKind::Function => item.name.to_string(),
+        _ => return None,
+    };
+    let Signature::Function { parameters, .. } = &item.signature else {
+        return None;
+    };
+    let wanted: Vec<String> = parameters
+        .iter()
+        .map(|parameter| {
+            let simple = parameter
+                .type_ref
+                .as_ref()
+                .map_or("*".to_owned(), simple_type_name);
+            if parameter.vararg {
+                format!("{simple}[]")
+            } else {
+                simple
+            }
+        })
+        .collect();
+    let candidates: Vec<(&DecompiledMethod, Vec<&str>)> = methods
+        .iter()
+        .filter(|method| method.name == jvm_name)
+        .filter_map(|method| {
+            let descriptors = parameter_descriptors(&method.descriptor)?;
+            let takes_outer_instance =
+                item.kind == ItemKind::Constructor && descriptors.len() == wanted.len() + 1;
+            let own = if takes_outer_instance {
+                descriptors[1..].to_vec()
+            } else {
+                descriptors
+            };
+            (own.len() == wanted.len()).then_some((method, own))
+        })
+        .collect();
+    let chosen = match candidates.as_slice() {
+        [only] => only,
+        _ => candidates.iter().find(|(_, descriptors)| {
+            descriptors.iter().zip(&wanted).all(|(descriptor, wanted)| {
+                wanted == "*" || descriptor_simple_name(descriptor) == *wanted
+            })
+        })?,
+    };
+    let (method, own) = chosen;
+    let body = method.body.as_ref().ok()?.clone();
+    let skipped = method.parameter_names.len() - own.len();
+    Some(MethodBody {
+        body,
+        parameter_names: method.parameter_names[skipped..].to_vec(),
+    })
+}
+
+/// `int`, `String`, `Entry`, `long[]`: a type's simple name; `*` for a
+/// type parameter, which matches anything.
+fn simple_type_name(type_ref: &TypeRef) -> String {
+    match type_ref {
+        TypeRef::Qualified { classes, .. }
+        | TypeRef::Named {
+            segments: classes, ..
+        } => classes
+            .last()
+            .map_or("*".to_owned(), |class| class.name.to_string()),
+        TypeRef::Primitive { name } => name.to_string(),
+        TypeRef::Array { element } => format!("{}[]", simple_type_name(element)),
+        _ => "*".to_owned(),
+    }
+}
+
+/// [`simple_type_name`] of a descriptor: `I` is `int`, `[Ljava/util/Map$Entry;`
+/// is `Entry[]`.
+fn descriptor_simple_name(descriptor: &str) -> String {
+    if let Some(element) = descriptor.strip_prefix('[') {
+        return format!("{}[]", descriptor_simple_name(element));
+    }
+    if let Some(class) = descriptor
+        .strip_prefix('L')
+        .and_then(|rest| rest.strip_suffix(';'))
+    {
+        let simple = class.rsplit('/').next().unwrap_or(class);
+        return simple.rsplit('$').next().unwrap_or(simple).to_owned();
+    }
+    match descriptor {
+        "Z" => "boolean",
+        "B" => "byte",
+        "C" => "char",
+        "S" => "short",
+        "I" => "int",
+        "J" => "long",
+        "F" => "float",
+        "D" => "double",
+        _ => "*",
+    }
+    .to_owned()
+}
+
 /// The file's text: its header, package, imports and `items` (top-level
-/// items of `tree`, in one language), each with its members.
+/// items of `tree`, in one language), each with its members — and their
+/// `bodies` where there are some.
 pub fn render(
     tree: &ItemTree,
     items: &[ItemId],
     language: StubLanguage,
     library_name: &str,
     missing: &MissingSources,
+    bodies: &CompiledBodies,
 ) -> String {
     let mut imports = Imports::new(&tree.package, language);
     for item in items {
         imports.collect_item(tree, *item);
     }
+    for body in bodies
+        .methods
+        .values()
+        .map(|method| &method.body)
+        .chain(bodies.static_initializers.values())
+    {
+        imports.collect_body(body);
+    }
     let mut renderer = Renderer {
         tree,
         imports: &imports,
         language,
+        bodies,
         text: String::new(),
     };
     renderer.header(library_name, missing);
@@ -106,6 +324,7 @@ struct Renderer<'tree> {
     tree: &'tree ItemTree,
     imports: &'tree Imports,
     language: StubLanguage,
+    bodies: &'tree CompiledBodies,
     text: String,
 }
 
@@ -121,11 +340,19 @@ impl Renderer<'_> {
             StubLanguage::Kotlin => {
                 "bodies are left out, and parameters with defaults marked /* = … */."
             }
-            StubLanguage::Java => "bodies are left out.",
+            StubLanguage::Java if self.bodies.is_empty() => "bodies are left out.",
+            StubLanguage::Java => {
+                "bodies are decompiled where they run straight through, others left out."
+            }
+        };
+        let shown = if self.bodies.is_empty() {
+            "Only the declarations are shown, as the class files record them;"
+        } else {
+            "The declarations are shown as the class files record them;"
         };
         let lines = [
             format!("Decompiled by kotlin-analyzer from {library_name}: {why}."),
-            "Only the declarations are shown, as the class files record them;".to_owned(),
+            shown.to_owned(),
             left_out.to_owned(),
             String::new(),
             "A reading aid, not the library's source: the code is its authors',".to_owned(),
@@ -361,7 +588,7 @@ impl Renderer<'_> {
                     words.extend(self.java_supertypes(*kind, supertypes));
                 }
                 let _ = writeln!(self.text, "{} {{", words.join(" "));
-                self.java_class_body(item, *kind, depth);
+                self.java_class_body(index, *kind, depth);
                 return;
             }
             (
@@ -400,20 +627,37 @@ impl Renderer<'_> {
                         item.name.to_string()
                     }
                 };
-                words.push(format!("{name}({})", self.java_parameters(parameters)));
-                let body = if is_abstract {
-                    ";".to_owned()
-                } else {
-                    format!(" {COMPILED_CODE}")
-                };
-                let _ = writeln!(self.text, "{}{body}", words.join(" "));
+                let decompiled = self.bodies.methods.get(&index);
+                let names = decompiled.map(|method| method.parameter_names.as_slice());
+                words.push(format!(
+                    "{name}({})",
+                    self.java_parameters(parameters, names)
+                ));
+                let header = words.join(" ");
+                match decompiled {
+                    Some(method) => {
+                        let _ = writeln!(self.text, "{header} {{");
+                        self.java_statements(&method.body, depth + 1);
+                        self.indent(depth);
+                        self.text.push_str("}\n");
+                    }
+                    None if is_abstract => {
+                        let _ = writeln!(self.text, "{header};");
+                    }
+                    None => {
+                        let _ = writeln!(self.text, "{header} {COMPILED_CODE}");
+                    }
+                }
                 return;
             }
-            (ItemKind::Property { .. }, Signature::Property { type_ref, .. }) => {
-                for (flag, word) in [(Modifiers::STATIC, "static"), (Modifiers::FINAL, "final")] {
-                    // An interface's fields are static and final by being its.
-                    if item.modifiers.contains(flag) && !in_interface {
-                        words.push(word.to_owned());
+            (ItemKind::Property { mutable }, Signature::Property { type_ref, .. }) => {
+                // An interface's fields are static and final by being its.
+                if !in_interface {
+                    if item.modifiers.contains(Modifiers::STATIC) {
+                        words.push("static".to_owned());
+                    }
+                    if !mutable {
+                        words.push("final".to_owned());
                     }
                 }
                 let type_text = type_ref
@@ -427,7 +671,9 @@ impl Renderer<'_> {
         let _ = writeln!(self.text, "{};", words.join(" "));
     }
 
-    fn java_class_body(&mut self, item: &Item, kind: ClassKind, depth: usize) {
+    /// Enum entries, members, then the static initializer when decompiled.
+    fn java_class_body(&mut self, class: ItemId, kind: ClassKind, depth: usize) {
+        let item = self.tree.item(class);
         let (entries, members) = entries_and_members(self.tree, item);
         if kind == ClassKind::Enum {
             let names: Vec<String> = entries
@@ -442,6 +688,13 @@ impl Renderer<'_> {
         }
         for member in members {
             self.java_item(member, depth + 1);
+        }
+        if let Some(body) = self.bodies.static_initializers.get(&class) {
+            self.indent(depth + 1);
+            self.text.push_str("static {\n");
+            self.java_statements(body, depth + 2);
+            self.indent(depth + 1);
+            self.text.push_str("}\n");
         }
         self.indent(depth);
         self.text.push_str("}\n");
@@ -507,10 +760,14 @@ impl Renderer<'_> {
         format!("<{}>", parameters.join(", "))
     }
 
-    fn java_parameters(&self, parameters: &[Parameter]) -> String {
+    /// The parameters, named as `names` says when given (a decompiled
+    /// body's, which uses them).
+    fn java_parameters(&self, parameters: &[Parameter], names: Option<&[String]>) -> String {
+        let names = names.filter(|names| names.len() == parameters.len());
         let parameters: Vec<String> = parameters
             .iter()
-            .map(|parameter| {
+            .enumerate()
+            .map(|(index, parameter)| {
                 let written = parameter
                     .type_ref
                     .as_ref()
@@ -520,10 +777,297 @@ impl Renderer<'_> {
                     (true, None) => format!("{written}..."),
                     (false, _) => written,
                 };
-                format!("{written} {}", parameter.name)
+                let name = names.map_or(parameter.name.as_str(), |names| names[index].as_str());
+                format!("{written} {name}")
             })
             .collect();
         parameters.join(", ")
+    }
+
+    /// A body's statements, one per line; the `return;` ending a method
+    /// and a constructor's `super()` left out, as Java leaves them.
+    fn java_statements(&mut self, body: &Body, depth: usize) {
+        let last = body.statements.len().saturating_sub(1);
+        for (position, statement) in body.statements.iter().enumerate() {
+            let line = match statement {
+                Statement::Return(None) if position == last => continue,
+                Statement::SuperConstructor(arguments) if arguments.is_empty() => continue,
+                Statement::Expression(expression) => format!("{};", self.expression(expression)),
+                Statement::Declare {
+                    type_ref,
+                    name,
+                    value,
+                } => {
+                    let type_text = type_ref
+                        .as_ref()
+                        .map_or("var".to_owned(), |type_ref| self.library_type(type_ref));
+                    format!("{type_text} {name} = {};", self.expression(value))
+                }
+                Statement::Assign { target, value } => {
+                    format!("{} = {};", self.expression(target), self.expression(value))
+                }
+                Statement::Increment { name, by } => match by {
+                    1 => format!("{name}++;"),
+                    -1 => format!("{name}--;"),
+                    by if *by < 0 => format!("{name} -= {};", -i64::from(*by)),
+                    by => format!("{name} += {by};"),
+                },
+                Statement::Return(Some(value)) => format!("return {};", self.expression(value)),
+                Statement::Return(None) => "return;".to_owned(),
+                Statement::Throw(thrown) => format!("throw {};", self.expression(thrown)),
+                Statement::SuperConstructor(arguments) => {
+                    format!("super({});", self.arguments(arguments))
+                }
+                Statement::ThisConstructor(arguments) => {
+                    format!("this({});", self.arguments(arguments))
+                }
+            };
+            self.indent(depth);
+            self.text.push_str(&line);
+            self.text.push('\n');
+        }
+    }
+
+    fn library_type(&self, type_ref: &LibraryType) -> String {
+        self.java_type(&crate::library::type_ref(type_ref))
+    }
+
+    fn class_name(&self, class: &ClassName) -> String {
+        self.java_type(&class_type(class))
+    }
+
+    fn arguments(&self, arguments: &[Expression]) -> String {
+        arguments
+            .iter()
+            .map(|argument| self.expression(argument))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// An expression, parenthesized where an operand binds looser than its
+    /// place needs.
+    fn operand(&self, expression: &Expression, at_least: u8) -> String {
+        let text = self.expression(expression);
+        if precedence(expression) < at_least {
+            format!("({text})")
+        } else {
+            text
+        }
+    }
+
+    fn expression(&self, expression: &Expression) -> String {
+        match expression {
+            Expression::This => "this".to_owned(),
+            Expression::Local(name) => name.clone(),
+            Expression::Literal(literal) => java_literal(literal),
+            Expression::Field { owner, name } => match owner {
+                Owner::Instance(object) => format!("{}.{name}", self.operand(object, PRIMARY)),
+                Owner::Static(class) => format!("{}.{name}", self.class_name(class)),
+            },
+            Expression::Call {
+                receiver,
+                name,
+                arguments,
+            } => {
+                let receiver = match receiver {
+                    Receiver::Instance(object) => self.operand(object, PRIMARY),
+                    Receiver::Static(class) => self.class_name(class),
+                    Receiver::Super => "super".to_owned(),
+                };
+                format!("{receiver}.{name}({})", self.arguments(arguments))
+            }
+            Expression::New { class, arguments } => {
+                format!(
+                    "new {}({})",
+                    self.class_name(class),
+                    self.arguments(arguments)
+                )
+            }
+            Expression::NewArray { element, length } => {
+                let element = self.library_type(element);
+                // `new int[3][]`, not `new int[][3]`: the length goes first.
+                let (base, dimensions) = match element.find('[') {
+                    Some(position) => element.split_at(position),
+                    None => (element.as_str(), ""),
+                };
+                format!("new {base}[{}]{dimensions}", self.expression(length))
+            }
+            Expression::ArrayElement { array, index } => {
+                format!(
+                    "{}[{}]",
+                    self.operand(array, PRIMARY),
+                    self.expression(index)
+                )
+            }
+            Expression::ArrayLength(array) => format!("{}.length", self.operand(array, PRIMARY)),
+            Expression::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let level = binary_precedence(*operator);
+                format!(
+                    "{} {} {}",
+                    self.operand(left, level),
+                    binary_symbol(*operator),
+                    self.operand(right, level + 1)
+                )
+            }
+            Expression::Negate(operand) => {
+                let nested_minus = matches!(
+                    operand.as_ref(),
+                    Expression::Negate(_)
+                        | Expression::Literal(
+                            Literal::Int(i32::MIN..=-1) | Literal::Long(i64::MIN..=-1)
+                        )
+                );
+                if nested_minus {
+                    format!("-({})", self.expression(operand))
+                } else {
+                    format!("-{}", self.operand(operand, UNARY))
+                }
+            }
+            Expression::Cast { to, operand } => {
+                format!(
+                    "({}) {}",
+                    self.library_type(to),
+                    self.operand(operand, UNARY)
+                )
+            }
+            Expression::InstanceOf { operand, type_ref } => format!(
+                "{} instanceof {}",
+                self.operand(operand, RELATIONAL),
+                self.library_type(type_ref)
+            ),
+            Expression::Concatenation(pieces) => {
+                let is_text = |piece: Option<&Expression>| {
+                    matches!(piece, Some(Expression::Literal(Literal::String(_))))
+                };
+                // Unless one of the first two is text, `+` would add them.
+                let starts_as_text = is_text(pieces.first()) || is_text(pieces.get(1));
+                let mut parts: Vec<String> = Vec::new();
+                if !starts_as_text {
+                    parts.push("\"\"".to_owned());
+                }
+                parts.extend(pieces.iter().map(|piece| self.operand(piece, ADDITIVE + 1)));
+                parts.join(" + ")
+            }
+            Expression::ClassLiteral(type_ref) => format!("{}.class", self.library_type(type_ref)),
+        }
+    }
+}
+
+const PRIMARY: u8 = 16;
+const UNARY: u8 = 14;
+const CAST: u8 = 13;
+const ADDITIVE: u8 = 11;
+const RELATIONAL: u8 = 9;
+
+/// How tightly an expression binds, as Java's grammar ranks it.
+fn precedence(expression: &Expression) -> u8 {
+    match expression {
+        Expression::Binary { operator, .. } => binary_precedence(*operator),
+        Expression::Concatenation(_) => ADDITIVE,
+        Expression::InstanceOf { .. } => RELATIONAL,
+        Expression::Cast { .. } => CAST,
+        Expression::Negate(_) => UNARY,
+        Expression::Literal(Literal::Int(i32::MIN..=-1) | Literal::Long(i64::MIN..=-1)) => UNARY,
+        _ => PRIMARY,
+    }
+}
+
+fn binary_precedence(operator: BinaryOperator) -> u8 {
+    match operator {
+        BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Remainder => 12,
+        BinaryOperator::Add | BinaryOperator::Subtract => ADDITIVE,
+        BinaryOperator::ShiftLeft
+        | BinaryOperator::ShiftRight
+        | BinaryOperator::UnsignedShiftRight => 10,
+        BinaryOperator::And => 7,
+        BinaryOperator::Xor => 6,
+        BinaryOperator::Or => 5,
+    }
+}
+
+fn binary_symbol(operator: BinaryOperator) -> &'static str {
+    match operator {
+        BinaryOperator::Add => "+",
+        BinaryOperator::Subtract => "-",
+        BinaryOperator::Multiply => "*",
+        BinaryOperator::Divide => "/",
+        BinaryOperator::Remainder => "%",
+        BinaryOperator::ShiftLeft => "<<",
+        BinaryOperator::ShiftRight => ">>",
+        BinaryOperator::UnsignedShiftRight => ">>>",
+        BinaryOperator::And => "&",
+        BinaryOperator::Or => "|",
+        BinaryOperator::Xor => "^",
+    }
+}
+
+/// A literal as Java writes it.
+fn java_literal(literal: &Literal) -> String {
+    match literal {
+        Literal::Null => "null".to_owned(),
+        Literal::Boolean(value) => value.to_string(),
+        Literal::Int(value) => value.to_string(),
+        Literal::Long(value) => format!("{value}L"),
+        Literal::Float(value) if value.is_nan() => "Float.NaN".to_owned(),
+        Literal::Float(value) if value.is_infinite() => {
+            let sign = if *value > 0.0 { "POSITIVE" } else { "NEGATIVE" };
+            format!("Float.{sign}_INFINITY")
+        }
+        Literal::Float(value) => format!("{value:?}F"),
+        Literal::Double(value) if value.is_nan() => "Double.NaN".to_owned(),
+        Literal::Double(value) if value.is_infinite() => {
+            let sign = if *value > 0.0 { "POSITIVE" } else { "NEGATIVE" };
+            format!("Double.{sign}_INFINITY")
+        }
+        Literal::Double(value) => format!("{value:?}"),
+        Literal::Char(unit) => format!("'{}'", escaped_units(&[*unit], '\'')),
+        Literal::String(text) => {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            format!("\"{}\"", escaped_units(&units, '"'))
+        }
+    }
+}
+
+/// UTF-16 units as Java source writes them inside `quote`s: escapes for
+/// the quote, `\\`, controls and anything outside printable ASCII.
+fn escaped_units(units: &[u16], quote: char) -> String {
+    let mut text = String::new();
+    for unit in units {
+        match char::from_u32(u32::from(*unit)) {
+            Some('\\') => text.push_str("\\\\"),
+            Some('\n') => text.push_str("\\n"),
+            Some('\t') => text.push_str("\\t"),
+            Some('\r') => text.push_str("\\r"),
+            Some(char) if char == quote => {
+                text.push('\\');
+                text.push(char);
+            }
+            Some(char) if (' '..='~').contains(&char) => text.push(char),
+            _ => {
+                let _ = write!(text, "\\u{unit:04x}");
+            }
+        }
+    }
+    text
+}
+
+/// A class as a type reference: no type arguments.
+fn class_type(class: &ClassName) -> TypeRef {
+    TypeRef::Qualified {
+        package: class.package.clone(),
+        classes: class
+            .classes
+            .iter()
+            .map(|name| TypeSegment {
+                name: *name,
+                arguments: Box::new([]),
+            })
+            .collect(),
+        nullable: false,
     }
 }
 
@@ -744,6 +1288,92 @@ impl Imports {
         }
         for child in item.children.iter() {
             self.collect_item(tree, *child);
+        }
+    }
+
+    /// The classes a decompiled body names.
+    fn collect_body(&mut self, body: &Body) {
+        for statement in &body.statements {
+            match statement {
+                Statement::Expression(expression)
+                | Statement::Return(Some(expression))
+                | Statement::Throw(expression) => self.collect_expression(expression),
+                Statement::Declare {
+                    type_ref, value, ..
+                } => {
+                    if let Some(type_ref) = type_ref {
+                        self.collect(&crate::library::type_ref(type_ref));
+                    }
+                    self.collect_expression(value);
+                }
+                Statement::Assign { target, value } => {
+                    self.collect_expression(target);
+                    self.collect_expression(value);
+                }
+                Statement::SuperConstructor(arguments) | Statement::ThisConstructor(arguments) => {
+                    arguments
+                        .iter()
+                        .for_each(|argument| self.collect_expression(argument));
+                }
+                Statement::Increment { .. } | Statement::Return(None) => {}
+            }
+        }
+    }
+
+    fn collect_expression(&mut self, expression: &Expression) {
+        match expression {
+            Expression::This | Expression::Local(_) | Expression::Literal(_) => {}
+            Expression::Field { owner, .. } => match owner {
+                Owner::Instance(object) => self.collect_expression(object),
+                Owner::Static(class) => self.collect(&class_type(class)),
+            },
+            Expression::Call {
+                receiver,
+                arguments,
+                ..
+            } => {
+                match receiver {
+                    Receiver::Instance(object) => self.collect_expression(object),
+                    Receiver::Static(class) => self.collect(&class_type(class)),
+                    Receiver::Super => {}
+                }
+                arguments
+                    .iter()
+                    .for_each(|argument| self.collect_expression(argument));
+            }
+            Expression::New { class, arguments } => {
+                self.collect(&class_type(class));
+                arguments
+                    .iter()
+                    .for_each(|argument| self.collect_expression(argument));
+            }
+            Expression::NewArray { element, length } => {
+                self.collect(&crate::library::type_ref(element));
+                self.collect_expression(length);
+            }
+            Expression::ArrayElement { array, index } => {
+                self.collect_expression(array);
+                self.collect_expression(index);
+            }
+            Expression::ArrayLength(operand) | Expression::Negate(operand) => {
+                self.collect_expression(operand)
+            }
+            Expression::Binary { left, right, .. } => {
+                self.collect_expression(left);
+                self.collect_expression(right);
+            }
+            Expression::Cast { to, operand } => {
+                self.collect(&crate::library::type_ref(to));
+                self.collect_expression(operand);
+            }
+            Expression::InstanceOf { operand, type_ref } => {
+                self.collect_expression(operand);
+                self.collect(&crate::library::type_ref(type_ref));
+            }
+            Expression::Concatenation(pieces) => pieces
+                .iter()
+                .for_each(|piece| self.collect_expression(piece)),
+            Expression::ClassLiteral(type_ref) => self.collect(&crate::library::type_ref(type_ref)),
         }
     }
 

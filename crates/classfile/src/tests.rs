@@ -555,3 +555,109 @@ fn an_entry_larger_than_the_limit_is_refused_whatever_its_header_claims() {
     assert!(crate::read_at_most(&data[..], 10, 50).is_none());
     assert!(crate::read_at_most(&data[..], 1 << 40, 1000).is_none());
 }
+
+#[test]
+fn bodies_that_run_straight_through_decompile_and_others_say_why_not() {
+    let directory = std::env::temp_dir().join(format!("ka-decompile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(directory.join("demo")).unwrap();
+    std::fs::write(
+        directory.join("demo/Shapes.java"),
+        r#"package demo;
+import java.util.function.Supplier;
+public abstract class Shapes {
+    public int side;
+    public int area() { return side * side; }
+    public int loop(int count) { int sum = 0; for (int index = 0; index < count; index++) sum += index; return sum; }
+    public boolean positive() { return side > 0; }
+    public Supplier<Integer> lazy() { return () -> side; }
+    public int guarded() { try { return side / 0; } catch (ArithmeticException failure) { return -1; } }
+    public synchronized void locked() { side = 1; }
+    public int[] initialized() { return new int[] { 1, 2 }; }
+    public abstract int perimeter();
+}
+"#,
+    )
+    .unwrap();
+    let compiled = std::process::Command::new("javac")
+        .arg("-g")
+        .arg("-d")
+        .arg(&directory)
+        .arg(directory.join("demo/Shapes.java"))
+        .status();
+    if !compiled.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: javac unavailable");
+        return;
+    }
+    let bytes = std::fs::read(directory.join("demo/Shapes.class")).unwrap();
+    let decompiled = crate::decompile::decompile_class(&bytes).unwrap();
+    let outcome = |name: &str| {
+        let method = decompiled
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        method.body.as_ref().map(|_| ()).map_err(|why| *why)
+    };
+    use crate::decompile::Unsupported;
+    assert_eq!(outcome("area"), Ok(()));
+    assert_eq!(outcome("<init>"), Ok(()));
+    assert_eq!(outcome("loop"), Err(Unsupported::Branches));
+    assert_eq!(outcome("positive"), Err(Unsupported::Branches));
+    assert_eq!(outcome("lazy"), Err(Unsupported::Lambda));
+    assert_eq!(outcome("guarded"), Err(Unsupported::ExceptionHandlers));
+    assert_eq!(outcome("initialized"), Err(Unsupported::StackShape));
+    assert_eq!(outcome("perimeter"), Err(Unsupported::NoCode));
+    // `synchronized` on the method is a flag, not code: its body is plain.
+    assert_eq!(outcome("locked"), Ok(()));
+    let area = decompiled
+        .methods
+        .iter()
+        .find(|method| method.name == "area")
+        .unwrap();
+    use crate::decompile::{BinaryOperator, Expression, Owner, Statement};
+    let side = || Expression::Field {
+        owner: Owner::Instance(Box::new(Expression::This)),
+        name: "side".to_owned(),
+    };
+    assert_eq!(
+        area.body.as_ref().unwrap().statements,
+        [Statement::Return(Some(Expression::Binary {
+            operator: BinaryOperator::Multiply,
+            left: Box::new(side()),
+            right: Box::new(side()),
+        }))]
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn most_of_a_java_librarys_bodies_run_straight_through() {
+    let Some(jar) = cached_jar("org.slf4j", "slf4j-api") else {
+        eprintln!("skipped: no slf4j-api in the Gradle cache");
+        return;
+    };
+    let mut archive = crate::Archive::open(&jar).unwrap();
+    let (mut decompiled, mut bodies) = (0, 0);
+    for index in 0..archive.len() {
+        let is_class = archive
+            .name(index)
+            .is_some_and(|name| name.ends_with(".class"));
+        let Some(bytes) = archive.read(index).filter(|_| is_class) else {
+            continue;
+        };
+        let class = crate::decompile::decompile_class(&bytes).expect("parses");
+        for method in class.methods {
+            match method.body {
+                Ok(_) => decompiled += 1,
+                Err(crate::decompile::Unsupported::NoCode) => continue,
+                Err(_) => {}
+            }
+            bodies += 1;
+        }
+    }
+    let share = decompiled as f64 / bodies as f64;
+    eprintln!("{}: {decompiled} of {bodies} bodies", jar.display());
+    // 69% for 2.0.17: the rest branch, mostly.
+    assert!(share > 0.6, "{decompiled} of {bodies}");
+}

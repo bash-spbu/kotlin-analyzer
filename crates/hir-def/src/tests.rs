@@ -1023,7 +1023,7 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         crate::library::SourceOrigin::Decompiled(crate::decompiled::MissingSources::NoArchive)
     ));
     for expected in [
-        "it comes without a sources jar.\n// Only the declarations are shown, as the class files record them;\n// bodies are left out.\n",
+        "it comes without a sources jar.\n// The declarations are shown as the class files record them;\n// bodies are decompiled where they run straight through, others left out.\n",
         "package org.slf4j;\n",
         "import org.slf4j.event.Level;\n",
         "public interface Logger {\n",
@@ -1045,12 +1045,292 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         "{}",
         level.text
     );
+    // A body that runs straight through, decompiled, its parameter named
+    // as it names it; one that branches, left compiled.
     let factory = source_of("org.slf4j", "LoggerFactory");
+    for expected in [
+        "    public static Logger getLogger(String name) {\n        ILoggerFactory iLoggerFactory = LoggerFactory.getILoggerFactory();\n        return iLoggerFactory.getLogger(name);\n    }\n",
+        "    public static Logger getLogger(Class<?> p0) { /* compiled code */ }\n",
+    ] {
+        assert!(
+            factory.text.contains(expected),
+            "{expected:?} in\n{}",
+            factory.text
+        );
+    }
+}
+
+/// A Java class whose methods all run straight through: each decompiled.
+const STRAIGHT_JAVA: &str = r#"package demo;
+
+public class Account {
+    public final String owner;
+    public long balance;
+    public static int created;
+    public static String prefix;
+
+    static {
+        prefix = "ACC-";
+        created = 0;
+    }
+
+    public Account(String owner, long balance) {
+        this.owner = owner;
+        this.balance = balance;
+        created = created + 1;
+    }
+
+    public Account(String owner) {
+        this(owner, 100L);
+    }
+
+    public String getOwner() { return owner; }
+    public String describe() { return prefix + owner + ": " + balance; }
+    public String labelled(int count) { return "count " + count + " of " + owner; }
+    public long doubled() { return balance * 2; }
+    public void deposit(long amount) { balance = balance + amount; }
+    public static Account open(String owner) {
+        Account account = new Account(owner);
+        account.deposit(5);
+        return account;
+    }
+    public int mixed(int a, int b) {
+        int sum = a + b;
+        sum += 3;
+        return (sum << 2) ^ (a % 3) - -b;
+    }
+    public double ratio(int a, double b) { return a / b; }
+    public boolean isRich() { return true; }
+    public char initial() { return 'A'; }
+    public float fraction() { return 0.25F; }
+    public String text() { return "quote\" tab\t newline\n unicode é \\ end"; }
+    public int length(int[] values) { return values.length; }
+    public int first(int[] values) { return values[0]; }
+    public void setFirst(int[] values, int value) { values[0] = value; }
+    public int narrow(long value) { return (int) value; }
+    public boolean isString(Object value) { return value instanceof String; }
+    public Class<?> type() { return String.class; }
+    public String built(int a) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(a);
+        return builder.toString();
+    }
+    public void fail(String message) { throw new IllegalStateException(message); }
+    public long negate(long value) { return -value; }
+    public int[] array(int size) { return new int[size]; }
+    public long widened(int value) { return value; }
+}
+"#;
+
+/// Calls every method of `Account`, printing what each gives.
+const STRAIGHT_JAVA_DRIVER: &str = r#"import demo.Account;
+
+public class Main {
+    public static void main(String[] arguments) {
+        Account account = new Account("ann", 10L);
+        Account opened = Account.open("bob");
+        System.out.println(account.getOwner() + "|" + account.describe() + "|" + account.labelled(3));
+        System.out.println(account.doubled() + "|" + opened.balance + "|" + Account.created + "|" + Account.prefix);
+        account.deposit(7);
+        System.out.println(account.balance + "|" + account.mixed(7, 4) + "|" + account.ratio(1, 4.0));
+        System.out.println(account.isRich() + "|" + account.initial() + "|" + account.fraction() + "|" + account.text());
+        int[] values = account.array(3);
+        account.setFirst(values, 9);
+        System.out.println(account.length(values) + "|" + account.first(values) + "|" + account.narrow(1L << 33 | 5));
+        System.out.println(account.isString("x") + "|" + account.isString(1) + "|" + account.type().getName() + "|" + account.built(42));
+        System.out.println(account.negate(5) + "|" + account.widened(-3));
+        try {
+            account.fail("boom");
+        } catch (IllegalStateException failure) {
+            System.out.println("caught " + failure.getMessage());
+        }
+    }
+}
+"#;
+
+/// Runs `command`, its standard output on success; `None` if it can't run.
+fn run_tool(command: &mut std::process::Command) -> Option<String> {
+    let output = command.output().ok()?;
     assert!(
-        factory
-            .text
-            .contains("    public static Logger getLogger(String p0) { /* compiled code */ }\n"),
-        "{}",
-        factory.text
+        output.status.success(),
+        "{command:?} failed:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
+    let root = std::env::temp_dir().join(format!("ka-decompiled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for directory in [
+        "src/demo",
+        "classes",
+        "main",
+        "decompiled/demo",
+        "decompiled-classes",
+    ] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    std::fs::write(root.join("src/demo/Account.java"), STRAIGHT_JAVA).unwrap();
+    std::fs::write(root.join("Main.java"), STRAIGHT_JAVA_DRIVER).unwrap();
+    let javac = |arguments: &[&std::ffi::OsStr]| {
+        run_tool(std::process::Command::new("javac").args(arguments))
+    };
+    let path = |relative: &str| root.join(relative).into_os_string();
+    let compiled = javac(&[
+        "-g".as_ref(),
+        "-d".as_ref(),
+        &path("classes"),
+        &path("src/demo/Account.java"),
+    ]);
+    if compiled.is_none() {
+        eprintln!("skipped: no javac");
+        return;
+    }
+    let Some(_) = run_tool(
+        std::process::Command::new("jar")
+            .arg("cf")
+            .arg(root.join("account.jar"))
+            .arg("-C")
+            .arg(root.join("classes"))
+            .arg("."),
+    ) else {
+        eprintln!("skipped: no jar");
+        return;
+    };
+    // The class as a library without sources: its file, rendered.
+    let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
+    let source = base_db::LibrarySource {
+        archive: root.join("account.jar"),
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = crate::library::index_library(&source).unwrap();
+    parsed
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let account = crate::def_map::visible_top_level(
+        db,
+        file,
+        &Path::parse("demo"),
+        intern::Name::new("Account"),
+    )
+    .into_iter()
+    .next()
+    .unwrap();
+    let rendered = crate::library::library_declaration_source(db, account).unwrap();
+    assert!(
+        !rendered.text.contains("compiled code"),
+        "every body decompiled:\n{}",
+        rendered.text
+    );
+    for expected in [
+        "        this(owner, 100L);\n",
+        "        return \"\" + Account.prefix + this.owner + \": \" + this.balance;\n",
+        "        sum += 3;\n",
+        "        return sum << 2 ^ a % 3 - -b;\n",
+        "        return true;\n",
+        "        return 'A';\n",
+        "    static {\n        Account.prefix = \"ACC-\";\n",
+    ] {
+        assert!(
+            rendered.text.contains(expected),
+            "{expected:?} in\n{}",
+            rendered.text
+        );
+    }
+    std::fs::write(
+        root.join("decompiled/demo/Account.java"),
+        rendered.text.as_bytes(),
+    )
+    .unwrap();
+
+    // The program compiled once, against the original; run with it, then
+    // with the decompiled class compiled again in its place.
+    javac(&[
+        "-cp".as_ref(),
+        &path("classes"),
+        "-d".as_ref(),
+        &path("main"),
+        &path("Main.java"),
+    ]);
+    javac(&[
+        "-d".as_ref(),
+        &path("decompiled-classes"),
+        &path("decompiled/demo/Account.java"),
+    ]);
+    let run = |classes: &str| {
+        let classpath = std::env::join_paths([root.join(classes), root.join("main")]).unwrap();
+        run_tool(
+            std::process::Command::new("java")
+                .arg("-cp")
+                .arg(classpath)
+                .arg("Main"),
+        )
+        .unwrap()
+    };
+    let original = run("classes");
+    assert_eq!(run("decompiled-classes"), original);
+    assert!(original.contains("caught boom"), "{original}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn every_rendered_java_file_of_a_library_parses() {
+    let Some((slf4j, _)) = cached_jar_with_sources("org.slf4j", "slf4j-api") else {
+        eprintln!("skipped: no slf4j-api in the Gradle cache");
+        return;
+    };
+    let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
+    let source = base_db::LibrarySource {
+        archive: slf4j,
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = crate::library::index_library(&source).unwrap();
+    let names: Vec<(Path, intern::Name)> = indexed
+        .packages
+        .iter()
+        .flat_map(|package| {
+            package
+                .names
+                .iter()
+                .map(|name| (package.package.clone(), *name))
+        })
+        .collect();
+    parsed
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let (mut rendered, mut with_bodies) = (0, 0);
+    for (package, name) in names {
+        let Some(declaration) = crate::def_map::visible_top_level(db, file, &package, name)
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let Some(found) = crate::library::library_declaration_source(db, declaration) else {
+            continue;
+        };
+        rendered += 1;
+        with_bodies += usize::from(found.text.contains("        return "));
+        let parse = syntax::parse(found.text.clone(), syntax::Language::Java);
+        assert!(
+            parse.errors().is_empty(),
+            "{}: {:?}\n{}",
+            found.entry,
+            parse.errors(),
+            found.text
+        );
+    }
+    assert!(
+        rendered > 20 && with_bodies > 10,
+        "{rendered} files, {with_bodies} with bodies"
     );
 }
