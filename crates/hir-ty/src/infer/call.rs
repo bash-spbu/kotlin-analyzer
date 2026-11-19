@@ -75,6 +75,44 @@ struct Candidate {
     dispatch: Option<Ty>,
 }
 
+/// A call being resolved: the name it calls (written at `name_node`), its
+/// explicit type arguments and the type its value is expected to have.
+struct CallSite<'tree, 'call> {
+    name_node: Option<SyntaxNode<'tree>>,
+    name: Name,
+    type_arguments: &'call [Ty],
+    expected: Option<&'call Ty>,
+}
+
+/// How far resolving a call has got through its levels.
+#[derive(Default)]
+struct ResolutionProgress {
+    /// The declaration of every candidate with the name, of any level.
+    seen: Vec<ItemLocation>,
+    /// The arguments are typed: by the first level whose shape fits.
+    arguments_typed: bool,
+    /// The one candidate of a level the arguments' shape fitted, when
+    /// their types didn't.
+    rejected: Option<(Candidate, Vec<usize>)>,
+}
+
+impl Candidate {
+    /// A candidate called on nothing: no receiver, no dispatch value.
+    fn plain(
+        callable: Callable,
+        signature: Arc<CallableSignature>,
+        substitution: Substitution,
+    ) -> Self {
+        Candidate {
+            callable,
+            signature,
+            substitution,
+            receiver: None,
+            dispatch: None,
+        }
+    }
+}
+
 /// A candidate whose parameters the arguments can be matched to: for each
 /// argument, the index of its parameter.
 struct Shaped {
@@ -262,6 +300,83 @@ impl<'db> Inferrer<'db> {
         ty
     }
 
+    /// Where a member called on `receiver` is looked for: its members and
+    /// the extensions it can use (`x?.f()`: on `x` not null), a class's
+    /// statics, a package's declarations. `None` when the receiver's type
+    /// isn't known.
+    fn qualified_levels(&mut self, receiver: &Typed, safe: bool, name: Name) -> Option<Vec<Level>> {
+        match receiver {
+            Typed::Value(Ty::Unknown) => None,
+            Typed::Value(receiver_type) => {
+                let mut levels = Vec::new();
+                if !safe && receiver_type.nullability() == Nullability::Nullable {
+                    levels.push(Level::NullableReceiverExtensions(receiver_type.clone()));
+                }
+                let called_on = if safe {
+                    receiver_type.clone().without_question_mark()
+                } else {
+                    receiver_type.clone()
+                };
+                levels.extend(self.receiver_levels(&called_on));
+                Some(levels)
+            }
+            Typed::Class(class) => Some(self.static_levels(*class)),
+            Typed::Package(package) => {
+                let found = hir_def::def_map::visible_top_level(self.db, self.file, package, name);
+                Some(vec![Level::Declarations(found)])
+            }
+        }
+    }
+
+    /// A member property of `receiver` named `name` whose value is a
+    /// function: what calling it would invoke.
+    fn invocable_property(
+        &mut self,
+        receiver: &Typed,
+        name: Name,
+    ) -> Option<(ItemLocation, Box<FunctionType>)> {
+        let Typed::Value(receiver_type) = receiver else {
+            return None;
+        };
+        match self.property_of(receiver_type, name) {
+            Some((location, Ty::Function(function))) => Some((location, function)),
+            _ => None,
+        }
+    }
+
+    /// A member call no function resolved: a property of function type
+    /// invoked, a local or a receiver's extension property of function type
+    /// — else the name is recorded unresolved (on a known receiver).
+    fn member_call_fallback(
+        &mut self,
+        name_node: SyntaxNode<'_>,
+        receiver: &Typed,
+        name: Name,
+        arguments: &mut [Argument<'_>],
+    ) -> Ty {
+        if let Some((location, function)) = self.invocable_property(receiver, name) {
+            let result = self.invoke(Some(*function), arguments);
+            self.record(name_node, Reference::Declaration(location), result.clone());
+            return result;
+        }
+        if let Some((local, function)) = self.local_extension(receiver, name) {
+            let result = self.invoke(Some(function), arguments);
+            self.record(name_node, Reference::Local(local), result.clone());
+            return result;
+        }
+        if let Some((location, function)) = self.receiver_property_extension(receiver, name) {
+            let result = self.invoke(Some(function), arguments);
+            self.record(name_node, Reference::Declaration(location), result.clone());
+            return result;
+        }
+        self.type_remaining(arguments);
+        // A function value's members (`invoke`) aren't modelled.
+        if !matches!(receiver, Typed::Value(Ty::Function(_))) {
+            self.record_unresolved(name_node, name_site(receiver));
+        }
+        Ty::Unknown
+    }
+
     /// `receiver.name(arguments)` once `receiver` is inferred.
     #[allow(clippy::too_many_arguments)]
     fn qualified_call_on(
@@ -291,42 +406,15 @@ impl<'db> Inferrer<'db> {
             let result = self.invoke(Some((**function).clone()), arguments);
             return if safe { result.nullable() } else { result };
         }
-        let levels = match &receiver {
-            Typed::Value(Ty::Unknown) => {
-                self.type_remaining(arguments);
-                return Ty::Unknown;
-            }
-            Typed::Value(receiver_type) => {
-                let mut levels = Vec::new();
-                if !safe && receiver_type.nullability() == Nullability::Nullable {
-                    levels.push(Level::NullableReceiverExtensions(receiver_type.clone()));
-                }
-                // `x?.f()` calls `f` on `x` when it isn't null.
-                let called_on = if safe {
-                    receiver_type.clone().without_question_mark()
-                } else {
-                    receiver_type.clone()
-                };
-                levels.extend(self.receiver_levels(&called_on));
-                levels
-            }
-            Typed::Class(class) => self.static_levels(*class),
-            Typed::Package(package) => {
-                let found = hir_def::def_map::visible_top_level(self.db, self.file, package, name);
-                vec![Level::Declarations(found)]
-            }
+        let Some(levels) = self.qualified_levels(&receiver, safe, name) else {
+            self.type_remaining(arguments);
+            return Ty::Unknown;
         };
         // A member property of function type is called before an extension
         // function of the name (`builder.test(scope, client)` for `var
         // test: suspend Scope.(Client) -> Unit`, its receiver the first
         // argument) — when no function takes the arguments.
-        let invocable_property = match &receiver {
-            Typed::Value(receiver_type) => match self.property_of(receiver_type, name) {
-                Some((location, Ty::Function(function))) => Some((location, function)),
-                _ => None,
-            },
-            _ => None,
-        };
+        let invocable_property = self.invocable_property(&receiver, name);
         if let Some((location, function)) = &invocable_property
             && function.parameters.len() + usize::from(function.receiver.is_some())
                 == arguments.len()
@@ -342,11 +430,7 @@ impl<'db> Inferrer<'db> {
         // invoke the property (`config.transform(node)` for `var transform:
         // (Node) -> String` beside `fun transform(block)`).
         let property_may_be_invoked = invocable_property.is_some();
-        let site = match &receiver {
-            Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
-            Typed::Class(_) => NameSite::Static,
-            Typed::Package(_) => NameSite::Package,
-        };
+        let site = name_site(&receiver);
         let result = self.resolve(
             Some(name_node),
             name,
@@ -368,46 +452,7 @@ impl<'db> Inferrer<'db> {
         }
         let result = match result {
             Some(result) => result,
-            None => {
-                let property = match &receiver {
-                    Typed::Value(receiver_type) => self.property_of(receiver_type, name),
-                    _ => None,
-                };
-                match property {
-                    Some((location, Ty::Function(function))) => {
-                        let result = self.invoke(Some(*function), arguments);
-                        self.record(name_node, Reference::Declaration(location), result.clone());
-                        result
-                    }
-                    _ if let Some((local, function)) = self.local_extension(&receiver, name) => {
-                        let result = self.invoke(Some(function), arguments);
-                        self.record(name_node, Reference::Local(local), result.clone());
-                        result
-                    }
-                    _ if let Some((location, function)) =
-                        self.receiver_property_extension(&receiver, name) =>
-                    {
-                        let result = self.invoke(Some(function), arguments);
-                        self.record(name_node, Reference::Declaration(location), result.clone());
-                        result
-                    }
-                    _ => {
-                        self.type_remaining(arguments);
-                        let site = match &receiver {
-                            Typed::Value(Ty::Function(_)) => None,
-                            Typed::Value(receiver_type) => {
-                                Some(NameSite::Member(receiver_type.clone()))
-                            }
-                            Typed::Class(_) => Some(NameSite::Static),
-                            Typed::Package(_) => Some(NameSite::Package),
-                        };
-                        if let Some(site) = site {
-                            self.record_unresolved(name_node, site);
-                        }
-                        Ty::Unknown
-                    }
-                }
-            }
+            None => self.member_call_fallback(name_node, &receiver, name, arguments),
         };
         if safe { result.nullable() } else { result }
     }
@@ -590,63 +635,8 @@ impl<'db> Inferrer<'db> {
 
     fn level_candidates(&mut self, level: &Level, name: Name) -> Vec<Candidate> {
         match level {
-            Level::Members(receiver) => {
-                let members = self.types.members_named(receiver, name);
-                let mut candidates: Vec<Candidate> = members
-                    .into_iter()
-                    .filter(|member| self.item_kind(member.location) == ItemKind::Function)
-                    .filter_map(|member| self.member_candidate(member, receiver))
-                    .collect();
-                if candidates.is_empty()
-                    && let Some(class_type) = receiver.class()
-                {
-                    // `copy` of a data class.
-                    let substitution = crate::members::class_substitution(class_type);
-                    for callable in self.types.generated_functions(class_type.class, name) {
-                        if let Some(signature) = self.types.signature(callable) {
-                            candidates.push(Candidate {
-                                callable,
-                                signature,
-                                substitution: substitution.clone(),
-                                receiver: None,
-                                dispatch: None,
-                            });
-                        }
-                    }
-                }
-                candidates
-            }
-            Level::MemberExtensions(receiver) => {
-                let mut candidates = Vec::new();
-                for index in (0..self.receivers.len()).rev() {
-                    let dispatch = self.receiver_type(index);
-                    for member in self.types.members_named(&dispatch, name) {
-                        if self.item_kind(member.location) != ItemKind::Function {
-                            continue;
-                        }
-                        let Some(signature) =
-                            self.types.signature(Callable::Function(member.location))
-                        else {
-                            continue;
-                        };
-                        let Some(declared) = &signature.receiver else {
-                            continue;
-                        };
-                        let declared = declared.substitute(&member.substitution);
-                        if self.types.fits(&receiver.clone().non_null(), &declared) == Fit::No {
-                            continue;
-                        }
-                        candidates.push(Candidate {
-                            callable: Callable::Function(member.location),
-                            signature: signature.clone(),
-                            substitution: member.substitution,
-                            receiver: Some(receiver.clone()),
-                            dispatch: None,
-                        });
-                    }
-                }
-                candidates
-            }
+            Level::Members(receiver) => self.member_candidates(receiver, name),
+            Level::MemberExtensions(receiver) => self.member_extension_candidates(receiver, name),
             Level::Extensions { receiver, level } => {
                 let levels = self.top_level(name);
                 let Some(declarations) = levels.get(*level) else {
@@ -658,23 +648,7 @@ impl<'db> Inferrer<'db> {
                     .collect()
             }
             Level::NullableReceiverExtensions(receiver) => {
-                let mut found =
-                    self.level_candidates(&Level::MemberExtensions(receiver.clone()), name);
-                for level in 0..TOP_LEVEL_LEVELS {
-                    let extensions = Level::Extensions {
-                        receiver: receiver.clone(),
-                        level,
-                    };
-                    found.extend(self.level_candidates(&extensions, name));
-                }
-                found.retain(|candidate| {
-                    candidate
-                        .signature
-                        .receiver
-                        .as_ref()
-                        .is_some_and(|declared| declared.nullability() == Nullability::Nullable)
-                });
-                found
+                self.nullable_receiver_extension_candidates(receiver, name)
             }
             Level::InnerConstructors(receiver) => self
                 .types
@@ -682,22 +656,7 @@ impl<'db> Inferrer<'db> {
                 .into_iter()
                 .flat_map(|class| self.constructor_candidates(class))
                 .collect(),
-            Level::Constructors(class) => {
-                let mut candidates = self.constructor_candidates(*class);
-                if let Some(sam_constructor) = self.types.sam_constructor(*class)
-                    && let Some(signature) = self.types.signature(sam_constructor)
-                {
-                    candidates.push(Candidate {
-                        callable: sam_constructor,
-                        signature,
-                        substitution: Substitution::default(),
-                        receiver: None,
-                        dispatch: None,
-                    });
-                }
-                candidates.extend(self.invoke_candidates(*class));
-                candidates
-            }
+            Level::Constructors(class) => self.constructor_level_candidates(*class),
             Level::TopLevelFunctions(level) => {
                 let levels = self.top_level(name);
                 let Some(declarations) = levels.get(*level) else {
@@ -710,17 +669,11 @@ impl<'db> Inferrer<'db> {
                 let statics = self.types.static_members_named(*class, name);
                 let mut candidates = self.plain_candidates(&statics);
                 // `valueOf` and `values` of an enum.
-                for callable in self.types.generated_functions(*class, name) {
-                    if let Some(signature) = self.types.signature(callable) {
-                        candidates.push(Candidate {
-                            callable,
-                            signature,
-                            substitution: Substitution::default(),
-                            receiver: None,
-                            dispatch: None,
-                        });
-                    }
-                }
+                candidates.extend(self.generated_candidates(
+                    *class,
+                    name,
+                    &Substitution::default(),
+                ));
                 candidates
             }
             Level::Declarations(declarations) => {
@@ -728,6 +681,117 @@ impl<'db> Inferrer<'db> {
                 self.plain_candidates(&declarations)
             }
         }
+    }
+
+    /// The member functions of `receiver`'s type named `name` — else the
+    /// ones the compiler generates for its class (a data class's `copy`).
+    fn member_candidates(&mut self, receiver: &Ty, name: Name) -> Vec<Candidate> {
+        let members = self.types.members_named(receiver, name);
+        let candidates: Vec<Candidate> = members
+            .into_iter()
+            .filter(|member| self.item_kind(member.location) == ItemKind::Function)
+            .filter_map(|member| self.member_candidate(member, receiver))
+            .collect();
+        if !candidates.is_empty() {
+            return candidates;
+        }
+        let Some(class_type) = receiver.class() else {
+            return candidates;
+        };
+        let substitution = crate::members::class_substitution(class_type);
+        self.generated_candidates(class_type.class, name, &substitution)
+    }
+
+    /// The functions the compiler generates for `class` named `name`
+    /// (`copy`, `valueOf`, `values`), with the class's type parameters
+    /// bound by `substitution`.
+    fn generated_candidates(
+        &self,
+        class: ItemLocation,
+        name: Name,
+        substitution: &Substitution,
+    ) -> Vec<Candidate> {
+        self.types
+            .generated_functions(class, name)
+            .into_iter()
+            .filter_map(|callable| {
+                let signature = self.types.signature(callable)?;
+                Some(Candidate::plain(callable, signature, substitution.clone()))
+            })
+            .collect()
+    }
+
+    /// Extensions declared as members of an implicit receiver's class
+    /// (`with(scope) { value.extension() }`), innermost receiver first,
+    /// whose declared receiver `receiver` may fit.
+    fn member_extension_candidates(&mut self, receiver: &Ty, name: Name) -> Vec<Candidate> {
+        let mut candidates = Vec::new();
+        for index in (0..self.receivers.len()).rev() {
+            let dispatch = self.receiver_type(index);
+            for member in self.types.members_named(&dispatch, name) {
+                if self.item_kind(member.location) != ItemKind::Function {
+                    continue;
+                }
+                let callable = Callable::Function(member.location);
+                let Some(signature) = self.types.signature(callable) else {
+                    continue;
+                };
+                let Some(declared) = &signature.receiver else {
+                    continue;
+                };
+                let declared = declared.substitute(&member.substitution);
+                if self.types.fits(&receiver.clone().non_null(), &declared) == Fit::No {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    receiver: Some(receiver.clone()),
+                    ..Candidate::plain(callable, signature.clone(), member.substitution)
+                });
+            }
+        }
+        candidates
+    }
+
+    /// The extensions of every level whose declared receiver is nullable:
+    /// what a nullable receiver may call without `?.`.
+    fn nullable_receiver_extension_candidates(
+        &mut self,
+        receiver: &Ty,
+        name: Name,
+    ) -> Vec<Candidate> {
+        let mut found = self.member_extension_candidates(receiver, name);
+        for level in 0..TOP_LEVEL_LEVELS {
+            let extensions = Level::Extensions {
+                receiver: receiver.clone(),
+                level,
+            };
+            found.extend(self.level_candidates(&extensions, name));
+        }
+        found.retain(|candidate| {
+            candidate
+                .signature
+                .receiver
+                .as_ref()
+                .is_some_and(|declared| declared.nullability() == Nullability::Nullable)
+        });
+        found
+    }
+
+    /// What naming a class calls: its constructors, its SAM constructor (a
+    /// fun interface's), and its companion's `invoke` operators.
+    fn constructor_level_candidates(&mut self, class: ItemLocation) -> Vec<Candidate> {
+        let mut candidates = self.constructor_candidates(class);
+        if let Some(sam_constructor) = self.types.sam_constructor(class)
+            && let Some(signature) = self.types.signature(sam_constructor)
+        {
+            candidates.push(Candidate::plain(
+                sam_constructor,
+                signature,
+                Substitution::default(),
+            ));
+        }
+        candidates.extend(self.invoke_candidates(class));
+        candidates
     }
 
     /// Functions without a receiver, and constructors of the classes among
@@ -887,113 +951,181 @@ impl<'db> Inferrer<'db> {
         type_arguments: &[Ty],
         expected: Option<&Ty>,
     ) -> Option<Ty> {
-        let mut seen: Vec<ItemLocation> = Vec::new();
-        let mut arguments_typed = false;
-        // The one candidate of a level its arguments' shape fitted, when
-        // their types didn't.
-        let mut rejected: Option<(Candidate, Vec<usize>)> = None;
+        let call = CallSite {
+            name_node,
+            name,
+            type_arguments,
+            expected,
+        };
+        let mut progress = ResolutionProgress::default();
         for level in &levels {
-            let candidates = self.level_candidates(level, name);
-            for candidate in &candidates {
-                let location = candidate.callable.location();
-                if !seen.contains(&location) {
-                    seen.push(location);
-                }
-            }
-            let shaped: Vec<Shaped> = candidates
-                .into_iter()
-                .filter(|candidate| takes_type_arguments(candidate, type_arguments))
-                .filter_map(|candidate| {
-                    let parameter_of = match_arguments(&candidate.signature, arguments)?;
-                    Some(Shaped {
-                        candidate,
-                        parameter_of,
-                    })
-                })
-                .collect();
+            let shaped = self.shaped_candidates(level, &call, arguments, &mut progress.seen);
             if shaped.is_empty() {
                 continue;
             }
-            if !arguments_typed && shaped.len() == 1 {
-                let only = shaped.into_iter().next().expect("one candidate");
-                let completion =
-                    self.complete(&only, arguments, type_arguments, expected, Some(name));
-                arguments_typed = true;
-                if let Some(result) = completion {
-                    self.mark_call_certainty(name_node, true);
-                    self.record_callee(
-                        name_node,
-                        Reference::Declaration(only.candidate.callable.location()),
-                        &result,
-                    );
-                    self.record_labels(&only, arguments);
-                    return Some(result);
-                }
-                rejected = Some((only.candidate, only.parameter_of));
-                continue;
-            }
-            if !arguments_typed {
-                self.type_pending(arguments);
-                arguments_typed = true;
-            }
-            let applicable: Vec<Shaped> = shaped
-                .into_iter()
-                .filter(|shaped| self.arguments_fit(shaped, arguments) != Fit::No)
-                .collect();
-            if applicable.is_empty() {
-                continue;
-            }
-            let several_applicable = applicable.len() > 1;
-            let best = self.most_specific(applicable, arguments);
-            if let [only] = &best[..] {
-                // Chosen among several by specificity, which isn't
-                // modelled as fully as the compiler's.
-                self.mark_call_certainty(name_node, !several_applicable);
-                let result = self
-                    .complete(only, arguments, type_arguments, expected, Some(name))
-                    .unwrap_or(Ty::Unknown);
-                self.record_labels(only, arguments);
-                self.record_callee(
-                    name_node,
-                    Reference::Declaration(only.candidate.callable.location()),
-                    &result,
-                );
+            if let Some(result) = self.resolve_level(shaped, &call, arguments, &mut progress) {
                 return Some(result);
             }
-            let result = self.ambiguous(&best, arguments, type_arguments, expected, name);
-            let locations: Box<[ItemLocation]> = best
-                .iter()
-                .map(|shaped| shaped.candidate.callable.location())
-                .collect();
-            self.record_callee(name_node, Reference::Candidates(locations), &result);
-            return Some(result);
         }
-        if seen.is_empty() {
+        if progress.seen.is_empty() {
             return None;
         }
-        let no_shape_fits = !arguments_typed;
+        Some(self.resolve_failed(&call, &site, arguments, progress))
+    }
+
+    /// A level's candidates the arguments' shape fits (their count, names,
+    /// the explicit type arguments); every candidate's declaration is
+    /// noted in `seen`.
+    fn shaped_candidates(
+        &mut self,
+        level: &Level,
+        call: &CallSite<'_, '_>,
+        arguments: &[Argument<'_>],
+        seen: &mut Vec<ItemLocation>,
+    ) -> Vec<Shaped> {
+        let candidates = self.level_candidates(level, call.name);
+        for candidate in &candidates {
+            let location = candidate.callable.location();
+            if !seen.contains(&location) {
+                seen.push(location);
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|candidate| takes_type_arguments(candidate, call.type_arguments))
+            .filter_map(|candidate| {
+                let parameter_of = match_arguments(&candidate.signature, arguments)?;
+                Some(Shaped {
+                    candidate,
+                    parameter_of,
+                })
+            })
+            .collect()
+    }
+
+    /// The call resolved among one level's shaped candidates: the only one
+    /// (its arguments typed against it), else the most specific of those
+    /// the arguments fit, else all the equally specific ones. `None` when
+    /// none takes the arguments: the next level is tried.
+    fn resolve_level(
+        &mut self,
+        shaped: Vec<Shaped>,
+        call: &CallSite<'_, '_>,
+        arguments: &mut [Argument<'_>],
+        progress: &mut ResolutionProgress,
+    ) -> Option<Ty> {
+        if !progress.arguments_typed && shaped.len() == 1 {
+            let only = shaped.into_iter().next().expect("one candidate");
+            progress.arguments_typed = true;
+            let Some(result) = self.complete(
+                &only,
+                arguments,
+                call.type_arguments,
+                call.expected,
+                Some(call.name),
+            ) else {
+                progress.rejected = Some((only.candidate, only.parameter_of));
+                return None;
+            };
+            self.mark_call_certainty(call.name_node, true);
+            self.record_chosen(call, &only, arguments, &result);
+            return Some(result);
+        }
+        if !progress.arguments_typed {
+            self.type_pending(arguments);
+            progress.arguments_typed = true;
+        }
+        let applicable: Vec<Shaped> = shaped
+            .into_iter()
+            .filter(|shaped| self.arguments_fit(shaped, arguments) != Fit::No)
+            .collect();
+        if applicable.is_empty() {
+            return None;
+        }
+        let several_applicable = applicable.len() > 1;
+        let best = self.most_specific(applicable, arguments);
+        if let [only] = &best[..] {
+            // Chosen among several by specificity, which isn't
+            // modelled as fully as the compiler's.
+            self.mark_call_certainty(call.name_node, !several_applicable);
+            let result = self
+                .complete(
+                    only,
+                    arguments,
+                    call.type_arguments,
+                    call.expected,
+                    Some(call.name),
+                )
+                .unwrap_or(Ty::Unknown);
+            self.record_chosen(call, only, arguments, &result);
+            return Some(result);
+        }
+        let result = self.ambiguous(
+            &best,
+            arguments,
+            call.type_arguments,
+            call.expected,
+            call.name,
+        );
+        let locations: Box<[ItemLocation]> = best
+            .iter()
+            .map(|shaped| shaped.candidate.callable.location())
+            .collect();
+        self.record_callee(call.name_node, Reference::Candidates(locations), &result);
+        Some(result)
+    }
+
+    /// What the call resolved to: its name and its arguments' labels.
+    fn record_chosen(
+        &mut self,
+        call: &CallSite<'_, '_>,
+        chosen: &Shaped,
+        arguments: &[Argument<'_>],
+        result: &Ty,
+    ) {
+        self.record_labels(chosen, arguments);
+        self.record_callee(
+            call.name_node,
+            Reference::Declaration(chosen.candidate.callable.location()),
+            result,
+        );
+    }
+
+    /// No candidate with the name takes the arguments: when the name surely
+    /// means nothing else, the arguments are judged against its only
+    /// candidate, or a call no candidate's shape fits is reported. The
+    /// name refers to all the candidates; the call's type isn't known.
+    fn resolve_failed(
+        &mut self,
+        call: &CallSite<'_, '_>,
+        site: &NameSite,
+        arguments: &mut [Argument<'_>],
+        progress: ResolutionProgress,
+    ) -> Ty {
+        let no_shape_fits = !progress.arguments_typed;
         self.type_remaining(arguments);
-        let only_candidate = seen.len() == 1;
-        if let (true, Some((candidate, parameter_of))) = (only_candidate, &rejected)
-            && self.lookup_certainty(name, &site) == Certainty::Certain
+        let lookup_certain = self.lookup_certainty(call.name, site) == Certainty::Certain;
+        let only_candidate = progress.seen.len() == 1;
+        if let (true, Some((candidate, parameter_of))) = (only_candidate, &progress.rejected)
+            && lookup_certain
         {
             self.check_arguments(candidate, parameter_of, arguments);
         }
-        if let Some(name_node) = name_node
+        if let Some(name_node) = call.name_node
             && no_shape_fits
-            && self.lookup_certainty(name, &site) == Certainty::Certain
+            && lookup_certain
         {
             self.record_argument_mismatch(ArgumentMismatch {
                 range: syntax::TextRange::of(name_node),
-                candidates: seen.clone().into_boxed_slice(),
+                candidates: progress.seen.clone().into_boxed_slice(),
             });
         }
         self.record_callee(
-            name_node,
-            Reference::Candidates(seen.into_boxed_slice()),
+            call.name_node,
+            Reference::Candidates(progress.seen.into_boxed_slice()),
             &Ty::Unknown,
         );
-        Some(Ty::Unknown)
+        Ty::Unknown
     }
 
     /// Remembers a call whose resolution may not be the compiler's: its
@@ -1949,4 +2081,14 @@ pub(super) fn erase(ty: &Ty, parameters: &[TypeParameterId]) -> Ty {
         unknown.insert(*parameter, Ty::Unknown);
     }
     ty.substitute(&unknown)
+}
+
+/// Where a name looked up on `receiver` is: a member of its type, a
+/// class's static, a package's declaration.
+fn name_site(receiver: &Typed) -> NameSite {
+    match receiver {
+        Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
+        Typed::Class(_) => NameSite::Static,
+        Typed::Package(_) => NameSite::Package,
+    }
 }

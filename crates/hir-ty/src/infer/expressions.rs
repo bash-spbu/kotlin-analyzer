@@ -1765,60 +1765,12 @@ impl Inferrer<'_> {
         if let Some(receiver) = &receiver {
             self.push_receiver(receiver.clone(), label);
         }
-        let expected_parameters: Vec<Ty> = expected_function
-            .as_ref()
-            .map(|function| function.parameters.clone())
-            .unwrap_or_default();
-        let declared = named_children(node).find(|child| child.kind() == "lambda_parameters");
-        let mut parameters = Vec::new();
-        match declared {
-            Some(declared) => {
-                for (index, parameter) in named_children(declared).enumerate() {
-                    let expected_parameter = expected_parameters
-                        .get(index)
-                        .cloned()
-                        .unwrap_or(Ty::Unknown);
-                    let written = self
-                        .type_child(parameter)
-                        .map(|written| self.written_type(written));
-                    let ty = written.unwrap_or(expected_parameter);
-                    match parameter.kind() {
-                        "multi_variable_declaration" => {
-                            self.destructure(parameter, &ty, LocalKind::LambdaParameter);
-                        }
-                        _ => {
-                            if let Some(name) = named_children(parameter)
-                                .find(|part| part.kind() == "simple_identifier")
-                                && self.text(name) != "_"
-                            {
-                                self.declare_node(name, ty.clone(), LocalKind::LambdaParameter);
-                            }
-                        }
-                    }
-                    parameters.push(ty);
-                }
-            }
-            None => {
-                let takes_one = expected_function.is_none() || expected_parameters.len() == 1;
-                if takes_one {
-                    let ty = expected_parameters.first().cloned().unwrap_or(Ty::Unknown);
-                    let brace = TextRange::new(node.start_byte(), node.start_byte() + 1);
-                    self.declare(Name::new("it"), brace, ty.clone(), LocalKind::ImplicitIt);
-                    parameters.push(ty);
-                }
-            }
-        }
+        let parameters = self.lambda_parameters(node, expected_function.as_ref());
         let expected_result = expected_function
             .as_ref()
             .map(|function| function.result.clone());
         let body = named_children(node).find(|child| child.kind() == "statements");
-        self.return_targets
-            .push(super::declarations::ReturnTarget::Lambda);
-        let body_type = match body {
-            Some(body) => self.lambda_body(body, expected_result.as_ref()),
-            None => self.types.builtin("Unit"),
-        };
-        self.return_targets.pop();
+        let body_type = self.lambda_value(body, expected_result.as_ref());
         let body_jumps = matches!(body_type, Ty::Nothing { nullable: false });
         let returns_unit = expected_result
             .as_ref()
@@ -1835,28 +1787,9 @@ impl Inferrer<'_> {
             self.leave_uncertain_scope();
         }
         self.pop_scope();
-        let mut end = std::mem::replace(&mut self.flow, outer_flow);
+        let end = std::mem::replace(&mut self.flow, outer_flow);
         self.loops = outer_loops;
-        // `apply { …; return x }`: a `return` or `throw` it always ends
-        // with leaves the function around.
-        if body_jumps {
-            end.kill();
-        }
-        // A `var` the lambda assigns may change whenever it runs: nothing
-        // known of it holds past here.
-        for variable in self.reassigned_in(node) {
-            self.forget_aliased(variable);
-            self.make_unsure(Narrowed::Local(variable));
-        }
-        // A `return@label` leaves the lambda before its end.
-        let leaves_early = body.is_some_and(|body| {
-            syntax::descendants(body).any(|part| {
-                part.kind() == "jump_expression" && self.text(part).starts_with("return@")
-            })
-        });
-        if !leaves_early {
-            self.lambda_ends.insert(node.start_byte() as u32, end);
-        }
+        self.leave_lambda_flow(node, body, end, body_jumps);
         Ty::Function(Box::new(FunctionType {
             receiver,
             parameters,
@@ -1866,6 +1799,97 @@ impl Inferrer<'_> {
                 .is_some_and(|function| function.suspend),
             nullability: Nullability::NotNull,
         }))
+    }
+
+    /// A lambda's parameters, declared in its scope: as written, typed as
+    /// written or as `expected` gives them (`it` when it declares none and
+    /// takes one).
+    fn lambda_parameters(
+        &mut self,
+        node: SyntaxNode<'_>,
+        expected: Option<&FunctionType>,
+    ) -> Vec<Ty> {
+        let expected_parameters: &[Ty] = expected
+            .map(|function| function.parameters.as_slice())
+            .unwrap_or_default();
+        let declared = named_children(node).find(|child| child.kind() == "lambda_parameters");
+        let Some(declared) = declared else {
+            let takes_one = expected.is_none() || expected_parameters.len() == 1;
+            if !takes_one {
+                return Vec::new();
+            }
+            let ty = expected_parameters.first().cloned().unwrap_or(Ty::Unknown);
+            let brace = TextRange::new(node.start_byte(), node.start_byte() + 1);
+            self.declare(Name::new("it"), brace, ty.clone(), LocalKind::ImplicitIt);
+            return vec![ty];
+        };
+        let mut parameters = Vec::new();
+        for (index, parameter) in named_children(declared).enumerate() {
+            let expected_parameter = expected_parameters
+                .get(index)
+                .cloned()
+                .unwrap_or(Ty::Unknown);
+            let written = self
+                .type_child(parameter)
+                .map(|written| self.written_type(written));
+            let ty = written.unwrap_or(expected_parameter);
+            self.declare_lambda_parameter(parameter, &ty);
+            parameters.push(ty);
+        }
+        parameters
+    }
+
+    /// One written lambda parameter: a name (`_` declares nothing) or a
+    /// destructuring `(key, value)`.
+    fn declare_lambda_parameter(&mut self, parameter: SyntaxNode<'_>, ty: &Ty) {
+        if parameter.kind() == "multi_variable_declaration" {
+            self.destructure(parameter, ty, LocalKind::LambdaParameter);
+            return;
+        }
+        if let Some(name) =
+            named_children(parameter).find(|part| part.kind() == "simple_identifier")
+            && self.text(name) != "_"
+        {
+            self.declare_node(name, ty.clone(), LocalKind::LambdaParameter);
+        }
+    }
+
+    /// The value of a lambda's body (`Unit` when it has none), a `return`
+    /// in it returning from the lambda.
+    fn lambda_value(&mut self, body: Option<SyntaxNode<'_>>, expected_result: Option<&Ty>) -> Ty {
+        let Some(body) = body else {
+            return self.types.builtin("Unit");
+        };
+        self.return_targets
+            .push(super::declarations::ReturnTarget::Lambda);
+        let body_type = self.lambda_body(body, expected_result);
+        self.return_targets.pop();
+        body_type
+    }
+
+    /// The flow a lambda's body ended with, kept for the call that runs it
+    /// (`narrow_after_contract`): dead when the body always jumps out of
+    /// the function around (`apply { …; return x }`), not kept when a
+    /// `return@label` leaves it before its end. A `var` the lambda assigns
+    /// may change whenever it runs: nothing known of it holds past here.
+    fn leave_lambda_flow(
+        &mut self,
+        node: SyntaxNode<'_>,
+        body: Option<SyntaxNode<'_>>,
+        mut end: Flow,
+        body_jumps: bool,
+    ) {
+        if body_jumps {
+            end.kill();
+        }
+        for variable in self.reassigned_in(node) {
+            self.forget_aliased(variable);
+            self.make_unsure(Narrowed::Local(variable));
+        }
+        let leaves_early = body.is_some_and(|body| self.has_labelled_return(body));
+        if !leaves_early {
+            self.lambda_ends.insert(node.start_byte() as u32, end);
+        }
     }
 
     /// A lambda's statements; the last one's value is the lambda's — unless

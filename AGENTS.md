@@ -63,7 +63,7 @@ rules of whoever owns this checkout.
 | declarations a file contributes (item trees) | `crates/hir-def/src/item_tree/` (`lower_kotlin.rs`, `lower_java.rs`) |
 | what a type or import name means | `crates/hir-def/src/resolver.rs` (imports, default imports, nested and inherited names), `def_map.rs` (visibility, classpath per source set), `expect_actual.rs` (Multiplatform) |
 | reading JARs, the JDK's `ct.sym`, Kotlin metadata | `crates/classfile/`, `crates/hir-def/src/library.rs` |
-| types, members, overrides, supertypes | `crates/hir-ty/src/members.rs`, `lower.rs`, `signature.rs` |
+| types, members, overrides, supertypes | `crates/hir-ty/src/members.rs` (overriding: `members/overrides.rs`), `lower.rs`, `signature.rs` |
 | what a call or name in a body means | `crates/hir-ty/src/infer/`: `call.rs` (levels in Kotlin's scope order, overloads), `expressions.rs`, `declarations.rs` (locals, receivers, scopes), `narrowing.rs` (smart casts), `fit.rs` |
 | a diagnostic | `crates/ide/src/diagnostics/`; `facts.rs` turns inference facts into diagnostics, `imports.rs`, `package.rs`. Spec: `docs/spec/diagnostics.md` |
 | an editor feature (hover, completion, rename, …) | `crates/ide/src/<feature>.rs`, exposed by `crates/ide/src/lib.rs`, wired in `crates/kotlin-analyzer/src/server/handlers.rs` / `editing.rs`; capabilities in `server/mod.rs`; settings in `server/settings.rs` |
