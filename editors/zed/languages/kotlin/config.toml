@@ -2,7 +2,10 @@ name = "Kotlin"
 grammar = "kotlin"
 path_suffixes = ["kt", "kts"]
 line_comments = ["// "]
-block_comment = ["/* ", " */"]
+block_comment = { start = "/*", prefix = "* ", end = "*/", tab_size = 1 }
+# Enter inside /** … */ (KDoc) or /* … */ starts the new line with `* `.
+documentation_comment = { start = "/*", prefix = "* ", end = "*/", tab_size = 1 }
+collapsed_placeholder = " /* ... */ "
 autoclose_before = ";:.,=}])>"
 tab_size = 4
 brackets = [
@@ -10,6 +13,7 @@ brackets = [
     { start = "[", end = "]", close = true, newline = true },
     { start = "(", end = ")", close = true, newline = true },
     { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "`", end = "`", close = true, newline = false, not_in = ["string", "comment"] },
     { start = "'", end = "'", close = true, newline = false, not_in = ["string", "comment"] },
     { start = "/*", end = " */", close = true, newline = false, not_in = ["string", "comment"] },
 ]

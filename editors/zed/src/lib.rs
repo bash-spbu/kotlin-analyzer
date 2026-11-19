@@ -11,6 +11,7 @@
 //! commands, and tests run from the gutter instead (`runnables.scm`).
 
 mod formatter;
+mod labels;
 mod release;
 
 use zed_extension_api::settings::LspSettings;
@@ -20,8 +21,10 @@ use zed_extension_api::{
 };
 
 use formatter::{Formatter, FormatterAsset, Packaging};
+use labels::{Declared, Label};
 use release::{Asset, Machine, System};
 use zed::serde_json::Value;
+use zed_extension_api::lsp::{Completion, CompletionKind, Symbol, SymbolKind};
 
 const SERVER: &str = "kotlin-analyzer";
 
@@ -74,6 +77,57 @@ impl zed::Extension for KotlinAnalyzer {
             .and_then(|settings| settings.initialization_options.clone());
         let options = with_code_lenses_off_by_default(options);
         Ok(self.with_formatter(options, settings.as_ref(), language_server_id, worktree))
+    }
+
+    fn label_for_completion(
+        &self,
+        _language_server_id: &LanguageServerId,
+        completion: Completion,
+    ) -> Option<zed::CodeLabel> {
+        let declared = match completion.kind? {
+            CompletionKind::Function | CompletionKind::Method | CompletionKind::Constructor => {
+                Declared::Function
+            }
+            CompletionKind::Property
+            | CompletionKind::Field
+            | CompletionKind::Variable
+            | CompletionKind::Constant => Declared::Value,
+            CompletionKind::Class | CompletionKind::Interface | CompletionKind::Enum => {
+                Declared::Type
+            }
+            CompletionKind::EnumMember => Declared::EnumEntry,
+            _ => return None,
+        };
+        let details = completion.label_details.as_ref();
+        let label = labels::completion_label(
+            declared,
+            &completion.label,
+            details.and_then(|details| details.detail.as_deref()),
+            details.and_then(|details| details.description.as_deref()),
+        )?;
+        Some(code_label(label))
+    }
+
+    fn label_for_symbol(
+        &self,
+        _language_server_id: &LanguageServerId,
+        symbol: Symbol,
+    ) -> Option<zed::CodeLabel> {
+        let declared = match symbol.kind {
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => {
+                Declared::Function
+            }
+            SymbolKind::Property
+            | SymbolKind::Field
+            | SymbolKind::Variable
+            | SymbolKind::Constant => Declared::Value,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum | SymbolKind::Struct => {
+                Declared::Type
+            }
+            SymbolKind::EnumMember => Declared::EnumEntry,
+            _ => return None,
+        };
+        Some(code_label(labels::symbol_label(declared, &symbol.name)?))
     }
 
     fn language_server_workspace_configuration(
@@ -175,6 +229,23 @@ fn with_code_lenses_off_by_default(options: Option<Value>) -> Option<Value> {
             .or_insert_with(|| zed::serde_json::json!({ "references": false, "tests": false }));
     }
     Some(options)
+}
+
+/// Zed's label: the shown part of the code, then where it's declared
+/// coloured as a comment.
+fn code_label(label: Label) -> zed::CodeLabel {
+    let mut spans = vec![zed::CodeLabelSpan::code_range(label.shown.clone())];
+    if let Some(description) = label.description {
+        spans.push(zed::CodeLabelSpan::literal(
+            format!("  {description}"),
+            Some("comment".to_owned()),
+        ));
+    }
+    zed::CodeLabel {
+        code: label.code,
+        spans,
+        filter_range: label.filter.into(),
+    }
 }
 
 /// A `formatting` setting as text: from `settings`, else from

@@ -13,6 +13,18 @@ Kotlin support for Zed in one extension:
 - **the kotlin-analyzer language server**, for Kotlin and (read-only) Java.
   Java's own language (grammar) comes from Zed's Java extension.
 
+Also:
+
+- completion items and workspace symbols are highlighted as Kotlin
+  (`total(values: List<Money>): Long`, then where it's declared, dimmed);
+- SQL is highlighted in Spring Data's `@Query("…")` (with Zed's SQL
+  extension), regular expressions in `Regex("…")`, `"…".toRegex()` and
+  `Pattern.compile("…")`, `TODO`/`FIXME` in comments
+  (`languages/kotlin/injections.scm`);
+- Enter inside a KDoc or block comment starts the line with `* `;
+- quotes, backticks and `/*` don't close themselves inside strings and
+  comments (`languages/kotlin/overrides.scm`).
+
 No other Kotlin extension is needed; remove any that defines the Kotlin
 language too, or Zed will pick one of the two.
 

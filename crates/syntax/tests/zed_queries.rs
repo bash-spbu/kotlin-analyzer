@@ -205,3 +205,130 @@ fn the_runnables_find_test_functions_and_the_classes_holding_them() {
         ]
     );
 }
+
+const INJECTION_SAMPLE: &str = r#"
+interface MarkupRepository {
+    @Query("select m from Markup m where m.id = :id")
+    fun one(id: Long): Markup
+
+    @Query(value = """select * from markup""", nativeQuery = true)
+    fun all(): List<Markup>
+
+    @Named("not sql")
+    fun other(): Markup
+}
+
+val digits = Regex("[0-9]+")
+val words = "\\w+".toRegex()
+val compiled = Pattern.compile("a|b")
+val plain = listOf("not a regex")
+// TODO: tidy
+"#;
+
+/// What each pattern of `file.scm` captures in `sample`, as
+/// `<property>: <capture>=<text>`, `property` being the pattern's `key`.
+fn captures_with_property(language: &Language, file: &str, sample: &str, key: &str) -> Vec<String> {
+    let path = queries_directory().join(format!("{file}.scm"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    let query = Query::new(language, &text).unwrap_or_else(|error| panic!("{file}.scm: {error}"));
+    let mut parser = Parser::new();
+    parser.set_language(language).unwrap();
+    let tree = parser.parse(sample, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), sample.as_bytes());
+    let mut found = Vec::new();
+    while let Some(matched) = matches.next() {
+        let property = query
+            .property_settings(matched.pattern_index)
+            .iter()
+            .find(|setting| &*setting.key == key)
+            .and_then(|setting| setting.value.as_deref())
+            .unwrap_or("-")
+            .to_owned();
+        for capture in matched.captures {
+            let name = query.capture_names()[capture.index as usize];
+            if !name.starts_with('_') {
+                let captured = &sample[capture.node.byte_range()];
+                found.push(format!(
+                    "{property}: {name}={}",
+                    captured.lines().next().unwrap_or("")
+                ));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn injections_put_sql_in_query_annotations_regex_in_regex_calls_and_comments_in_comments() {
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    assert_eq!(
+        captures_with_property(
+            &language,
+            "injections",
+            INJECTION_SAMPLE,
+            "injection.language"
+        ),
+        [
+            "comment: injection.content=// TODO: tidy",
+            "regex: injection.content=[0-9]+",
+            "regex: injection.content=\\\\w+",
+            "regex: injection.content=a|b",
+            "sql: injection.content=select * from markup",
+            "sql: injection.content=select m from Markup m where m.id = :id",
+        ]
+    );
+}
+
+#[test]
+fn overrides_scope_strings_and_comments() {
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    let found = captures_with_property(&language, "overrides", INJECTION_SAMPLE, "-");
+    assert!(
+        found.contains(&"-: string=\"[0-9]+\"".to_owned()),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&"-: comment.inclusive=// TODO: tidy".to_owned()),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn the_zed_extensions_label_code_parses_and_highlights_its_names() {
+    // What editors/zed/src/labels.rs writes for a function, a value, a type
+    // and an enum entry.
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    let path = queries_directory().join("highlights.scm");
+    let query = Query::new(&language, &std::fs::read_to_string(path).unwrap()).unwrap();
+    for (code, name, expected) in [
+        (
+            "fun total(values: List<Money>): Long {}",
+            "total",
+            "function",
+        ),
+        ("val count: Int", "count", "property"),
+        ("class Money", "Money", "type"),
+        ("enum class Entries { ACTIVE }", "ACTIVE", "constant"),
+    ] {
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{code}: {}",
+            tree.root_node().to_sexp()
+        );
+        let mut cursor = QueryCursor::new();
+        let mut captures = cursor.captures(&query, tree.root_node(), code.as_bytes());
+        let mut found = Vec::new();
+        while let Some((matched, index)) = captures.next() {
+            let capture = matched.captures[*index];
+            if &code[capture.node.byte_range()] == name {
+                found.push(query.capture_names()[capture.index as usize]);
+            }
+        }
+        assert!(found.contains(&expected), "{code}: {name} is {found:?}");
+    }
+}
