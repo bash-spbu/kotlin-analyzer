@@ -8,6 +8,7 @@
 
 mod convert;
 mod editing;
+mod formatting;
 mod gradle_export;
 mod handlers;
 mod hierarchy;
@@ -90,6 +91,7 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         .and_then(|path| path.as_str())
         .map(PathBuf::from);
     let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
+    let formatting = settings::formatting_config(params.initialization_options.as_ref());
     let gradle_export = params
         .initialization_options
         .as_ref()
@@ -98,7 +100,13 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         .unwrap_or(true);
     let log_level = settings::log_level(params.initialization_options.as_ref());
     crate::log::start_session(&root, log_level);
-    log_session_start(&params, &root, &diagnostics_config, gradle_export);
+    log_session_start(
+        &params,
+        &root,
+        &diagnostics_config,
+        &formatting,
+        gradle_export,
+    );
     let encoding = position_encoding(&params.capabilities);
     let result = InitializeResult {
         capabilities: lsp_types::ServerCapabilities {
@@ -133,6 +141,7 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         state.register_file_watchers();
     }
     state.diagnostics_config = Arc::new(diagnostics_config);
+    state.formatting = Arc::new(formatting);
     state.gradle_export = gradle_export;
     state.start_loading();
     state.start_export();
@@ -158,6 +167,7 @@ fn log_session_start(
     params: &InitializeParams,
     root: &std::path::Path,
     diagnostics: &ide::DiagnosticsConfig,
+    formatting: &formatting::FormattingConfig,
     gradle_export: bool,
 ) {
     let client = params.client_info.as_ref();
@@ -188,6 +198,7 @@ fn log_session_start(
         .flag("gradle-export", gradle_export)
         .flag("experimental-checks", diagnostics.experimental)
         .texts("disabled-checks", disabled)
+        .text("formatter", formatting.formatter_name())
         .emit();
     if let Some(location) = crate::log::file_location() {
         use std::io::Write as _;
@@ -252,6 +263,7 @@ fn capabilities() -> ServerCapabilities {
             }),
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         workspace: Some(lsp_types::WorkspaceServerCapabilities {
             workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
@@ -420,6 +432,8 @@ struct GlobalState {
     shutdown_requested: bool,
     /// Which checks run, from the client's settings.
     diagnostics_config: Arc<ide::DiagnosticsConfig>,
+    /// How documents are formatted, from the client's settings.
+    formatting: Arc<formatting::FormattingConfig>,
     /// Whether the server may run Gradle to export the model.
     gradle_export: bool,
     exporting: bool,
@@ -476,6 +490,7 @@ impl GlobalState {
             next_request: 0,
             shutdown_requested: false,
             diagnostics_config: Arc::default(),
+            formatting: Arc::default(),
             gradle_export: true,
             exporting: false,
             load_generation: 0,
@@ -1048,6 +1063,10 @@ impl GlobalState {
             });
             return;
         }
+        if request.method == request::Formatting::METHOD {
+            self.answer_on_pool(request, formatting::handle);
+            return;
+        }
         self.answer_on_pool(request, handlers::handle);
     }
 
@@ -1070,6 +1089,7 @@ impl GlobalState {
             loaded: self.loaded,
             request_file,
             diagnostics_config: self.diagnostics_config.clone(),
+            formatting: self.formatting.clone(),
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
@@ -1328,6 +1348,12 @@ impl GlobalState {
                     if let Some(level) = settings::changed_log_level(&params.settings) {
                         crate::log::set_level(level);
                     }
+                    if let Some(config) = settings::changed_formatting_config(&params.settings) {
+                        Event::info("formatting-changed")
+                            .text("formatter", config.formatter_name())
+                            .emit();
+                        self.formatting = Arc::new(config);
+                    }
                     if let Some(config) = settings::changed_diagnostics_config(&params.settings) {
                         let disabled: Vec<&'static str> =
                             config.disabled.iter().map(|check| check.name()).collect();
@@ -1541,6 +1567,7 @@ const KNOWN_METHODS: &[&str] = &[
     "textDocument/prepareCallHierarchy",
     "callHierarchy/incomingCalls",
     "callHierarchy/outgoingCalls",
+    "textDocument/formatting",
     "shutdown",
 ];
 

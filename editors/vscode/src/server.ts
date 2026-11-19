@@ -1,9 +1,11 @@
 // Which server binary to run: the configured one, else the one on the PATH,
 // else this extension's release, downloaded once into the global storage.
+// The formatter the server runs is found the same way.
 
 import * as vscode from "vscode";
 import { existsSync } from "node:fs";
 
+import { downloadFormatter, formatterAsset, formatterOf, installedProgram } from "./formatter";
 import {
   RELEASES,
   assetUrl,
@@ -56,4 +58,47 @@ async function releaseBinary(context: vscode.ExtensionContext): Promise<string> 
     () => download(url, binary),
   );
   return binary;
+}
+
+/**
+ * The formatter the settings choose: `formatting.path` when set (the server
+ * takes it as it is), else the formatter on the PATH, else its pinned
+ * release, downloaded once into the global storage. `undefined` when
+ * formatting is off or the download failed: the server then looks on its
+ * PATH, and says so when it formats.
+ */
+export async function findFormatter(
+  context: vscode.ExtensionContext,
+  output: vscode.LogOutputChannel | undefined,
+): Promise<string | undefined> {
+  const configuration = vscode.workspace.getConfiguration("kotlin-analyzer");
+  const formatter = formatterOf(configuration.get<string>("formatting.formatter"));
+  const configured = configuration.get<string | null>("formatting.path");
+  if (formatter === undefined || configured) {
+    return undefined;
+  }
+  const found = await onPath(formatter, process.env.PATH);
+  if (found !== undefined) {
+    return found;
+  }
+  const asset = formatterAsset(formatter, process.platform, process.arch);
+  if (asset === undefined) {
+    return undefined;
+  }
+  const program = installedProgram(context.globalStorageUri.fsPath, asset);
+  if (existsSync(program)) {
+    return program;
+  }
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Downloading ${asset.fileName}` },
+      () => downloadFormatter(asset, program),
+    );
+    return program;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output?.error(`Downloading ${formatter}: ${message}`);
+    void vscode.window.showWarningMessage(`kotlin-analyzer: couldn't download ${formatter}: ${message}`);
+    return undefined;
+  }
 }

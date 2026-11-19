@@ -51,6 +51,7 @@ first): what one file declares changes what another's code means.
 | `workspace/willRenameFiles` | for Kotlin files and folders (a folder: every Kotlin file under it), the edits that keep the code right, made to the files before they move: a file renamed in its directory renames the one top-level class named as it was (`Order.kt` → `Invoice.kt` renames `class Order` and its uses); a file moved where its new directory implies another package — its package having been its old directory's — gets that `package` line, other files' imports and fully qualified names of its non-private top-level declarations follow, a file that used them without an import (same package, a star import) gets one, and the moved file gets imports of what it used from its old package; files moved together need no imports of each other |
 | `textDocument/inlayHint` | inferred types of what writes none: local `val`/`var` (and destructured components), except where a constructor call makes it obvious (`val box = Box(…)`); a lambda's untyped parameters; `it: T` after the `{` of a lambda with an implicit `it`; an expression-bodied function's result after its parameters (`fun total() = …`). Each class name in a hint is a label part linked to its declaration — a workspace class's at once, a library's on `inlayHint/resolve` (read from its sources archive when it has one) |
 | `textDocument/codeAction` | the fixes of the diagnostics in the range: "Import `a.b.C`", "Remove the unused import", "Add `package …`", "Add the missing branches" (of a `when`, each `case -> TODO()`) |
+| `textDocument/formatting` | a Kotlin file (`.kt`, `.kts`) formatted by an external formatter — ktrs (the default; ktfmt's output from a native binary) or ktfmt — in the style set (`kotlinlang` by default, `meta`, `google`): the document's text goes to its stdin (`ktrs fmt --style <style> -`, `ktfmt --<style>-style -`, or `java -jar <ktfmt.jar> --<style>-style -` for a jar), its stdout is the formatted text, and the answer is one edit between their common start and end (none when nothing changed). The formatter is stopped after 20 s. A formatter that isn't found, fails or refuses the file (a syntax error) answers `RequestFailed` with why — the formatter's own message, which may quote the code, goes only to the user, never to the log. Java files, and every file with `formatting.formatter: "off"`, get no edits. The editor extensions download the formatter (pinned versions, SHA-256 checked) and pass its path |
 | `textDocument/publishDiagnostics` | see diagnostics.md; published with the document version they were computed for |
 
 `workspace/didRenameFiles` (Kotlin files and folders): the old paths' files
@@ -61,8 +62,14 @@ editor's to report).
 model again if the build files changed, and reload it and every file.
 
 Settings in `initializationOptions`: `diagnostics.disabled`,
-`diagnostics.experimental`, `gradleExport`, `projectJson`, and `log`
-(`"info"`, `"debug"`; see logging.md). `diagnostics` and `log` may also
-change in `workspace/didChangeConfiguration` (under `kotlin-analyzer`).
+`diagnostics.experimental`, `formatting.formatter` (`"ktrs"`, `"ktfmt"`,
+`"off"`), `formatting.style` (`"kotlinlang"`, `"meta"`, `"google"`),
+`formatting.path` (the formatter's executable or ktfmt's `.jar`, run with
+`$JAVA_HOME/bin/java` or `java`; else the formatter's name on the `PATH`),
+`gradleExport`, `projectJson`, and `log` (`"info"`, `"debug"`; see
+logging.md). A value not understood is the default. `diagnostics`,
+`formatting` and `log` may also change in `workspace/didChangeConfiguration`
+(under `kotlin-analyzer`, or at the top); a `formatting` there replaces the
+one before as a whole.
 
-Not provided: formatting, selection range, on-type formatting.
+Not provided: range formatting, on-type formatting, selection range.

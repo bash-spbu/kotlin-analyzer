@@ -1,6 +1,8 @@
 // Runs the extension in a real VS Code against a fresh Kotlin workspace,
 // with no kotlin-analyzer on the PATH: the extension has to download its
-// release — served here from the locally built binary — and verify it.
+// release — served here from the locally built binary — and verify it. The
+// formatter is a script set in the workspace's settings (the pinned
+// downloads are checked in the unit tests).
 //
 //   KOTLIN_ANALYZER_BINARY  the server to serve as the release (default:
 //                           ../../target/release/kotlin-analyzer)
@@ -82,8 +84,18 @@ async function writeWorkspace(root: string): Promise<void> {
   await fs.mkdir(path.join(root, ".vscode"));
   await fs.writeFile(
     path.join(root, ".vscode/settings.json"),
-    JSON.stringify({ "kotlin-analyzer.gradleExport": false }),
+    JSON.stringify({
+      "kotlin-analyzer.gradleExport": false,
+      "kotlin-analyzer.formatting.path": path.join(root, "fake-ktrs"),
+    }),
   );
+  // Formats like ktrs would, for `Format.kt`; says how it was called.
+  await fs.writeFile(
+    path.join(root, "fake-ktrs"),
+    '#!/bin/sh\necho "$@" > "$0.call"\nsed "s/val one=1/val one = 1/"\n',
+    { mode: 0o755 },
+  );
+  await fs.writeFile(path.join(sources, "Format.kt"), "package app\n\nval one=1\n");
   await fs.writeFile(path.join(sources, "Box.kt"), "package app\n\nclass Box(val size: Int)\n");
   await fs.writeFile(path.join(sources, "Use.kt"), "package app\n\nfun use(): Int = Box(3).size\n");
   await fs.writeFile(path.join(sources, "Broken.kt"), "package app\n\nfun broken( {\n");

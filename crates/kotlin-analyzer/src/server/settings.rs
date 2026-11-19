@@ -2,11 +2,18 @@
 //! `workspace/didChangeConfiguration`.
 //!
 //! ```json
-//! { "diagnostics": { "disabled": ["unused-import"], "experimental": false } }
+//! {
+//!   "diagnostics": { "disabled": ["unused-import"], "experimental": false },
+//!   "formatting": { "formatter": "ktrs", "style": "kotlinlang", "path": "/path/to/ktrs" }
+//! }
 //! ```
+
+use std::path::PathBuf;
 
 use ide::{Check, DiagnosticsConfig};
 use serde_json::Value;
+
+use super::formatting::{Formatter, FormatterSetup, FormattingConfig, Program, Style};
 
 /// How much the log writes as it happens: `log` in `initializationOptions`
 /// (`info`, `debug`), else `KOTLIN_ANALYZER_LOG`, else `info`.
@@ -44,6 +51,44 @@ pub(super) fn diagnostics_config(options: Option<&Value>) -> DiagnosticsConfig {
 pub(super) fn changed_diagnostics_config(settings: &Value) -> Option<DiagnosticsConfig> {
     let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
     ours.get("diagnostics").map(read)
+}
+
+/// The formatting settings in `initializationOptions`.
+pub(super) fn formatting_config(options: Option<&Value>) -> FormattingConfig {
+    options
+        .and_then(|options| options.get("formatting"))
+        .map(read_formatting)
+        .unwrap_or_default()
+}
+
+/// The formatting settings in a configuration change, if it has them.
+pub(super) fn changed_formatting_config(settings: &Value) -> Option<FormattingConfig> {
+    let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
+    ours.get("formatting").map(read_formatting)
+}
+
+/// `formatter`: `ktrs` (the default), `ktfmt` or `off`; `style`:
+/// `kotlinlang` (the default), `meta` or `google`; `path`: the formatter's
+/// executable or jar, else its name on `PATH`. A value not understood is
+/// the default.
+fn read_formatting(formatting: &Value) -> FormattingConfig {
+    let setting = |key: &str| formatting.get(key).and_then(Value::as_str);
+    let formatter = match setting("formatter") {
+        Some("off") => return FormattingConfig::Off,
+        Some(name) => Formatter::from_setting(name).unwrap_or(Formatter::Ktrs),
+        None => Formatter::Ktrs,
+    };
+    let style = setting("style")
+        .and_then(Style::from_setting)
+        .unwrap_or_default();
+    let program = setting("path")
+        .filter(|path| !path.is_empty())
+        .map_or(Program::OnPath, |path| Program::at(PathBuf::from(path)));
+    FormattingConfig::On(FormatterSetup {
+        formatter,
+        style,
+        program,
+    })
 }
 
 fn read(diagnostics: &Value) -> DiagnosticsConfig {
@@ -87,5 +132,39 @@ mod tests {
             vec![Check::Syntax]
         );
         assert!(changed_diagnostics_config(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn formatting_defaults_to_ktrs_in_kotlinlang_style_on_path() {
+        assert_eq!(formatting_config(None), FormattingConfig::default());
+        let FormattingConfig::On(default) = FormattingConfig::default() else {
+            panic!("formatting is on by default");
+        };
+        assert_eq!(default.formatter, Formatter::Ktrs);
+        assert_eq!(default.style, Style::Kotlinlang);
+        assert_eq!(default.program, Program::OnPath);
+
+        let options = serde_json::json!({
+            "formatting": { "formatter": "ktfmt", "style": "google", "path": "/tools/ktfmt.jar" }
+        });
+        assert_eq!(
+            formatting_config(Some(&options)),
+            FormattingConfig::On(FormatterSetup {
+                formatter: Formatter::Ktfmt,
+                style: Style::Google,
+                program: Program::Jar(PathBuf::from("/tools/ktfmt.jar")),
+            })
+        );
+        let unknown = serde_json::json!({
+            "formatting": { "formatter": "prettier", "style": "tabs", "path": "" }
+        });
+        assert_eq!(
+            formatting_config(Some(&unknown)),
+            FormattingConfig::default()
+        );
+        let off =
+            serde_json::json!({ "kotlin-analyzer": { "formatting": { "formatter": "off" } } });
+        assert_eq!(changed_formatting_config(&off), Some(FormattingConfig::Off));
+        assert_eq!(changed_formatting_config(&serde_json::json!({})), None);
     }
 }

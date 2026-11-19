@@ -141,6 +141,34 @@
           "default": false,
           "markdownDescription": "Also run the checks that haven't passed the corpus gate yet (`unresolved-reference`)."
         },
+        "kotlin-analyzer.formatting.formatter": {
+          "type": "string",
+          "enum": ["ktrs", "ktfmt", "off"],
+          "enumDescriptions": [
+            "ktrs: ktfmt's output from a native binary, without a JVM.",
+            "ktfmt itself: its native build on macOS arm64 and Linux x86_64, its jar (needing Java) elsewhere.",
+            "No formatting by the server: leave it to another formatter."
+          ],
+          "default": "ktrs",
+          "markdownDescription": "The formatter *Format Document* runs. Unless `#kotlin-analyzer.formatting.path#` is set, it's the one on the `PATH`, else its pinned release, downloaded on first use with its SHA-256 checked."
+        },
+        "kotlin-analyzer.formatting.style": {
+          "type": "string",
+          "enum": ["kotlinlang", "meta", "google"],
+          "enumDescriptions": [
+            "Kotlin's coding conventions: four-space indents.",
+            "ktfmt's own default: two-space indents.",
+            "Google's Kotlin style."
+          ],
+          "default": "kotlinlang",
+          "markdownDescription": "The style the formatter formats in."
+        },
+        "kotlin-analyzer.formatting.path": {
+          "type": ["string", "null"],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "The formatter's executable, or ktfmt's `.jar` (run with `java` from `JAVA_HOME` or the `PATH`), instead of the one on the `PATH` or the download."
+        },
         "kotlin-analyzer.gradleExport": {
           "type": "boolean",
           "default": true,

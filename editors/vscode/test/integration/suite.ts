@@ -19,6 +19,7 @@ export async function run(): Promise<void> {
     ["a Kotlin file gets the grammar and the server's diagnostics", () => reportsSyntaxErrors(sources)],
     ["hover and definition reach the server", () => hoversAndNavigates(sources)],
     ["the server's reload command is in the palette", () => reloads()],
+    ["Format Document runs the configured formatter", () => formats(workspace, sources)],
     ["Gradle tasks build, clean and test the file's project or a parent", () => runsGradleTasks(workspace)],
   ];
   const failures: string[] = [];
@@ -82,6 +83,26 @@ async function hoversAndNavigates(sources: string): Promise<void> {
     targets.map((target) => path.basename(target.fsPath)),
     ["Box.kt"],
   );
+}
+
+async function formats(workspace: string, sources: string): Promise<void> {
+  const file = vscode.Uri.file(path.join(sources, "Format.kt"));
+  const document = await vscode.workspace.openTextDocument(file);
+  await vscode.window.showTextDocument(document);
+  const edits = await waitFor(async () => {
+    const answer = await vscode.commands.executeCommand<vscode.TextEdit[] | undefined>(
+      "vscode.executeFormatDocumentProvider",
+      file,
+      { tabSize: 4, insertSpaces: true },
+    );
+    return answer !== undefined && answer.length > 0 ? answer : undefined;
+  }, "formatting edits for Format.kt");
+  const edit = new vscode.WorkspaceEdit();
+  edit.set(file, edits);
+  await vscode.workspace.applyEdit(edit);
+  assert.equal(document.getText(), "package app\n\nval one = 1\n");
+  const call = await fs.readFile(path.join(workspace, "fake-ktrs.call"), "utf8");
+  assert.equal(call, "fmt --style kotlinlang -\n");
 }
 
 async function reloads(): Promise<void> {

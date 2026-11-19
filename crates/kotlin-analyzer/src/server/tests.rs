@@ -936,3 +936,108 @@ fn several_workspace_folders_are_one_workspace_that_follows_their_changes() {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+/// An executable script at `path` that runs `body` (`/bin/sh`).
+fn script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn formatting_runs_the_configured_formatter_and_shows_its_complaints_only_to_the_user() {
+    crate::log::capture();
+    let root = workspace("plumbing");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("Main.kt");
+    let text = "package app\nfun main() {\nval answer=42\n}\n";
+    std::fs::write(&file, text).unwrap();
+    let java = sources.join("Legacy.java");
+    std::fs::write(&java, "class Legacy {}\n").unwrap();
+    // Remembers its arguments; indents the line with `=` and spaces it out.
+    let formatter = root.join("fake-ktfmt");
+    let arguments = root.join("arguments");
+    script(
+        &formatter,
+        &format!(
+            "echo \"$@\" > {}\nsed 's/^val answer=42$/    val answer = 42/'",
+            arguments.display()
+        ),
+    );
+    let mut client = Client::start_with(
+        &root,
+        json!({
+            "gradleExport": false,
+            "formatting": { "formatter": "ktfmt", "style": "google", "path": formatter },
+        }),
+    );
+    client.wait_for_load(1);
+    client.open(&file, text);
+    let format = |client: &mut Client, path: &Path| {
+        client.request_result(
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": uri(path) },
+                "options": { "tabSize": 4, "insertSpaces": true },
+            }),
+        )
+    };
+    let edits = format(&mut client, &file).unwrap();
+    assert_eq!(
+        edits,
+        json!([{
+            "range": {
+                "start": { "line": 2, "character": 0 },
+                "end": { "line": 2, "character": 11 },
+            },
+            "newText": "    val answer = ",
+        }])
+    );
+    assert_eq!(
+        std::fs::read_to_string(&arguments).unwrap(),
+        "--google-style -\n"
+    );
+    // Java files aren't formatted.
+    client.open(&java, "class Legacy {}\n");
+    assert_eq!(format(&mut client, &java).unwrap(), Value::Null);
+
+    // A file the formatter refuses: its complaint, which may quote the
+    // code, is the answer's message and not in the log.
+    let rejecting = root.join("rejecting-ktrs");
+    script(
+        &rejecting,
+        "echo 'Main.kt:3:1: expecting manateeSecret' >&2\nexit 2",
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "kotlin-analyzer": { "formatting": { "path": rejecting } } } }),
+    );
+    let error = format(&mut client, &file).unwrap_err();
+    assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
+    assert!(
+        error
+            .message
+            .contains("ktrs couldn't format this file:\nMain.kt:3:1: expecting manateeSecret"),
+        "{}",
+        error.message
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "formatting": { "formatter": "off" } } }),
+    );
+    assert_eq!(format(&mut client, &file).unwrap(), Value::Null);
+    client.shut_down();
+
+    let log = crate::log::captured().join("\n");
+    assert!(!log.contains("manatee"), "the complaint in the log:\n{log}");
+    assert!(!log.contains("plumbing"), "a path in the log:\n{log}");
+    for expected in [
+        "\"event\":\"formatted\"",
+        "\"outcome\":\"rejected\"",
+        "\"exit-code\":2",
+        "\"event\":\"formatting-changed\"",
+    ] {
+        assert!(log.contains(expected), "no {expected} in the log:\n{log}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}

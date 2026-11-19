@@ -28,6 +28,7 @@ pub(super) struct Snapshot {
     /// The file the request is about, when it names one the server knows.
     pub(super) request_file: Option<FileId>,
     pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
+    pub(super) formatting: Arc<super::formatting::FormattingConfig>,
     /// What a position's column counts, as agreed with the client.
     pub(super) encoding: vfs::ColumnUnit,
     /// How many times the workspace has changed: a pull diagnostics
@@ -46,6 +47,7 @@ impl Snapshot {
             loaded: self.loaded,
             request_file: self.request_file,
             diagnostics_config: self.diagnostics_config.clone(),
+            formatting: self.formatting.clone(),
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,

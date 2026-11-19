@@ -42,6 +42,18 @@ Releases exist for macOS and Linux on arm64 and x86_64. Elsewhere, build
 the server with `cargo install --path crates/kotlin-analyzer` and set
 `kotlin-analyzer.server.path`.
 
+*Format Document* (and `editor.formatOnSave`) runs a formatter through the
+server: [ktrs](https://github.com/Hexay/ktrs) by default — ktfmt's output
+from a native binary, without a JVM — or
+[ktfmt](https://github.com/facebook/ktfmt) itself
+(`kotlin-analyzer.formatting.formatter`), in Kotlin's coding conventions
+(`kotlinlang`) unless `kotlin-analyzer.formatting.style` says otherwise. The
+formatter is `kotlin-analyzer.formatting.path`, else the one on the `PATH`,
+else its pinned release (ktrs 0.5.3, ktfmt 0.65), downloaded on first use
+with its SHA-256 checked and kept in the extension's storage. ktfmt has
+native builds for macOS arm64 and Linux x86_64; elsewhere its jar is
+downloaded, which needs Java (`JAVA_HOME`, else `java` on the `PATH`).
+
 Open the Gradle build's root folder. The server exports the build's model
 in the background, then reloads; until then it works from the directory
 layout.
@@ -78,12 +90,15 @@ In `tasks.json`:
 | `kotlin-analyzer.java.enable` | also serve Java files (turn off next to another Java server) |
 | `kotlin-analyzer.diagnostics.disabled` | checks that don't run, e.g. `["unused-import"]` |
 | `kotlin-analyzer.diagnostics.experimental` | also run experimental checks |
+| `kotlin-analyzer.formatting.formatter` | `ktrs` (default), `ktfmt` or `off` |
+| `kotlin-analyzer.formatting.style` | `kotlinlang` (default), `meta` or `google` |
+| `kotlin-analyzer.formatting.path` | the formatter's executable, or ktfmt's `.jar` |
 | `kotlin-analyzer.gradleExport` | export the Gradle model on start |
 | `kotlin-analyzer.projectJson` | a model exported beforehand |
 | `kotlin-analyzer.trace.server` | log LSP traffic to the output |
 
 Changing the server, Java, Gradle or model settings restarts the server.
-Diagnostics settings apply immediately.
+Diagnostics and formatting settings apply immediately.
 
 Commands:
 
@@ -99,7 +114,7 @@ Inlay hints follow VS Code's `editor.inlayHints.enabled`.
 ```bash
 npm ci
 npm run check             # types, downloader unit tests, grammar tests
-npm run test:integration  # a real VS Code: download, diagnostics, hover, definition
+npm run test:integration  # a real VS Code: download, diagnostics, hover, definition, formatting
 npm run package           # kotlin-analyzer-<version>.vsix
 ```
 

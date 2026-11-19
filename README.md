@@ -43,6 +43,8 @@ Features:
 - references and rename;
 - semantic highlighting, inlay type hints, symbols, folding;
 - diagnostics with quick fixes, which report only what they are sure of;
+- formatting by ktrs (ktfmt's output, natively) or ktfmt, which the editor
+  extensions download;
 - Gradle tasks in every editor (build, clean, test a module).
 
 ### Compared with other Kotlin language servers
@@ -57,12 +59,12 @@ Features:
 | Build systems | Gradle; others by directory layout | Gradle, Maven | Gradle, Maven |
 | Editors with its own extension | VS Code, Neovim, Helix, Zed, Claude Code | VS Code; scripts for others | VS Code |
 | Diagnostics | only what it is sure of: imports, calls, nullability, `when`, packages | the full compiler's, with IntelliJ's quick fixes | the compiler's |
-| Refactorings | rename | rename, formatting, organize imports | rename |
+| Refactorings | rename, formatting (ktrs or ktfmt) | rename, formatting, organize imports | rename |
 
 Choose kotlin-analyzer for large or multiplatform projects, low memory, or
 an editor other than VS Code, and when you want to change the server
 yourself or with an agent. Choose JetBrains' server for a JVM project where
-you want every compiler error, formatting and more quick fixes.
+you want every compiler error, organize imports and more quick fixes.
 
 ### Tested on
 

@@ -67,7 +67,36 @@ Under `lsp.kotlin-analyzer`:
 
 - `binary.path` (and `arguments`, `env`): a binary instead of the one on
   the PATH or the download;
-- `initialization_options`: `{ "diagnostics": { "disabled": ["unused-import"], "experimental": false }, "gradleExport": true, "projectJson": "/path/to/project.json" }`.
+- `initialization_options`: `{ "diagnostics": { "disabled": ["unused-import"], "experimental": false }, "gradleExport": true, "projectJson": "/path/to/project.json" }`;
+- `settings` (applied without a restart): `{ "diagnostics": { … }, "formatting": { "formatter": "ktfmt", "style": "google" } }`.
+
+## Formatting
+
+*editor: format* and `"format_on_save": "on"` run a formatter through the
+server: [ktrs](https://github.com/Hexay/ktrs) by default — ktfmt's output
+from a native binary, without a JVM — or
+[ktfmt](https://github.com/facebook/ktfmt) itself, in Kotlin's coding
+conventions:
+
+```json
+"lsp": {
+  "kotlin-analyzer": {
+    "settings": {
+      "formatting": { "formatter": "ktfmt", "style": "kotlinlang" }
+    }
+  }
+}
+```
+
+`formatter`: `ktrs` (the default), `ktfmt` or `off`; `style`: `kotlinlang`
+(the default), `meta` or `google`; `path`: the formatter's executable or
+ktfmt's `.jar`. Without `path`, the extension gives the server the
+formatter on the worktree's `PATH`, else its pinned release (ktrs 0.5.3,
+ktfmt 0.65), downloaded on first use into the extension's work directory
+with its SHA-256 checked (`src/formatter.rs`); other versions' downloads
+are removed. ktfmt has native builds for macOS arm64 and Linux x86_64;
+elsewhere its jar is downloaded, which needs Java (`JAVA_HOME`, else `java`
+on the `PATH`). These settings may also go in `initialization_options`.
 
 On opening a Gradle build, the server exports the build's model (modules,
 source sets, exact libraries, JDK) in the background with its bundled init

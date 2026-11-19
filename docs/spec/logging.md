@@ -7,7 +7,8 @@ we can't see can be traced from the log alone — and what it never writes.
 
 Source code, names (of declarations, locals, packages, modules, libraries),
 string contents, comments, paths, the client's queries (a `workspace/symbol`
-query, a rename's new name, a completion prefix), Gradle's output. This is
+query, a rename's new name, a completion prefix), Gradle's output, a
+formatter's output and messages. This is
 held by the types events are built of, not by care at each call: a field can
 only be a count, a number, a duration, a flag, a word of the server's own
 source (a method, a kind, an outcome), a file reference, a keyed hash, a
@@ -25,11 +26,12 @@ tells the user, on their machine, which file a hash stands for.
 ## Levels
 
 - **info** (default): the session's start (version, OS, architecture, CPUs,
-  the client's name and version, the settings), each workspace load (where
+  the client's name and version, the settings, the formatter), each workspace load (where
   the model came from; modules, source sets, Kotlin and Java files,
   libraries and those that failed; the time of each phase; memory), each
   Gradle export (the tool, how it ended, how long it took; on failure its
-  kind and Gradle's exit code), settings changes, a reload, the shutdown and
+  kind and Gradle's exit code), settings changes (`formatting-changed`: the
+  formatter), a reload, the shutdown and
   the session's end (how it ended, requests received, panics).
 - **warn**: a request slower than 1 s, diagnostics slower than 2 s — counting
   the time they waited for a free worker (`waited`) and the time they took
@@ -43,7 +45,10 @@ tells the user, on their machine, which file a hash stands for.
   long it waited and took), each document opened, changed or closed (its size in bytes
   and lines, its version), each diagnostics run (the file, its version, how
   many found, how long), files changed on disk (how many), stale results
-  dropped.
+  dropped, each formatting (`formatted`: the formatter, the style, whether
+  it ran from the `PATH`, an executable or a jar, how it ended —
+  `formatted`, `not-found`, `not-started`, `timed-out`, `rejected` and the
+  exit code, `not-utf8` —, how long, how many bytes the edit replaced).
 
 The flight recorder keeps the last 1000 events below the level written; a
 warning or an error writes them first (marked `recent`), so the steps that

@@ -3,6 +3,7 @@
 
 import * as vscode from "vscode";
 import {
+  DidChangeConfigurationNotification,
   LanguageClient,
   type DocumentSelector,
   type LanguageClientOptions,
@@ -10,8 +11,8 @@ import {
 } from "vscode-languageclient/node";
 
 import { registerGradleTasks } from "./gradle";
-import { findServer, type ServerBinary } from "./server";
-import { RESTART_SETTINGS, initializationOptions } from "./settings";
+import { findFormatter, findServer, type ServerBinary } from "./server";
+import { RESTART_SETTINGS, initializationOptions, serverSettings } from "./settings";
 
 const SECTION = "kotlin-analyzer";
 
@@ -38,6 +39,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Api> {
       const needsRestart = RESTART_SETTINGS.some((setting) => change.affectsConfiguration(setting));
       if (needsRestart) {
         void restart(context);
+      } else if (change.affectsConfiguration(SECTION)) {
+        void sendSettings(context);
       }
     }),
   );
@@ -70,14 +73,28 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
   if (configuration.get<boolean>("java.enable") ?? true) {
     selector.push({ scheme: "file", language: "java" });
   }
+  const formatterPath = await findFormatter(context, output);
   const clientOptions: LanguageClientOptions = {
     documentSelector: selector,
-    initializationOptions: initializationOptions(configuration),
-    synchronize: { configurationSection: SECTION },
+    initializationOptions: initializationOptions(configuration, formatterPath),
     outputChannel: output,
   };
   client = new LanguageClient(SECTION, "kotlin-analyzer", serverOptions, clientOptions);
   await client.start();
+}
+
+/**
+ * The changed settings to the running server, with the formatter they now
+ * choose (downloaded first if need be).
+ */
+async function sendSettings(context: vscode.ExtensionContext): Promise<void> {
+  const formatterPath = await findFormatter(context, output);
+  const settings = serverSettings(vscode.workspace.getConfiguration(SECTION), formatterPath);
+  if (client?.isRunning()) {
+    await client.sendNotification(DidChangeConfigurationNotification.type, {
+      settings: { [SECTION]: settings },
+    });
+  }
 }
 
 async function stop(): Promise<void> {

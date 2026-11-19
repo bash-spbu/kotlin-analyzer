@@ -4,6 +4,8 @@
 //!   layer allows (see [`ALLOWED_DEPENDENCIES`]);
 //! - the editor integrations download the server's own version (see
 //!   [`check_versions`]); `cargo xtask versions` runs only this;
+//! - the Zed and VS Code extensions pin the same formatter releases (see
+//!   [`check_formatter_pins`]);
 //! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`;
 //! - the editors' Gradle tasks: `editors/gradle/test_gradle_task.py`.
 
@@ -84,6 +86,9 @@ fn run_check() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let ExitCode::FAILURE = report(check_versions(&root)) {
+        return ExitCode::FAILURE;
+    }
+    if let ExitCode::FAILURE = report(check_formatter_pins(&root)) {
         return ExitCode::FAILURE;
     }
     let steps: [&[&str]; 3] = [
@@ -195,6 +200,83 @@ fn check_versions(root: &Path) -> Vec<String> {
         }
     }
     violations
+}
+
+/// Where each editor extension pins the formatters it downloads: the file,
+/// and the text each version follows.
+const FORMATTER_PINS: [(&str, [&str; 2]); 2] = [
+    (
+        "editors/zed/src/formatter.rs",
+        ["KTRS_VERSION: &str =", "KTFMT_VERSION: &str ="],
+    ),
+    (
+        "editors/vscode/src/formatter.ts",
+        ["KTRS_VERSION =", "KTFMT_VERSION ="],
+    ),
+];
+
+/// What one extension pins: the formatters' versions and checksums.
+#[derive(PartialEq, Eq, Debug)]
+struct FormatterPins {
+    versions: Vec<Option<String>>,
+    digests: Vec<String>,
+}
+
+impl FormatterPins {
+    fn read(root: &Path, file: &str, markers: &[&str]) -> FormatterPins {
+        let text = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+        FormatterPins {
+            versions: markers
+                .iter()
+                .map(|marker| quoted_after(&text, marker).map(str::to_owned))
+                .collect(),
+            digests: sha256_digests(&text),
+        }
+    }
+}
+
+/// Where the Zed and VS Code extensions pin different formatter versions
+/// or checksums: both download what they pin, so a user gets the same
+/// formatter in either.
+fn check_formatter_pins(root: &Path) -> Vec<String> {
+    let [(zed, zed_markers), (vscode, vscode_markers)] = FORMATTER_PINS;
+    let zed_pins = FormatterPins::read(root, zed, &zed_markers);
+    let vscode_pins = FormatterPins::read(root, vscode, &vscode_markers);
+    let mut violations = Vec::new();
+    let any_unstated = zed_pins.versions.contains(&None) || vscode_pins.versions.contains(&None);
+    if any_unstated {
+        violations.push(format!("{zed} or {vscode} states no formatter version"));
+    }
+    if zed_pins.versions != vscode_pins.versions {
+        violations.push(format!(
+            "{zed} pins the formatters at {:?}, {vscode} at {:?}",
+            zed_pins.versions, vscode_pins.versions
+        ));
+    }
+    if zed_pins.digests.is_empty() || zed_pins.digests != vscode_pins.digests {
+        violations.push(format!(
+            "{zed} and {vscode} pin different formatter checksums"
+        ));
+    }
+    violations
+}
+
+/// The SHA-256 digests (64 lowercase hex digits in quotes) in `text`,
+/// sorted.
+fn sha256_digests(text: &str) -> Vec<String> {
+    let mut digests: Vec<String> = text
+        .split('"')
+        .filter(|quoted| {
+            quoted.len() == 64
+                && quoted
+                    .chars()
+                    .all(|char| char.is_ascii_digit() || ('a'..='f').contains(&char))
+        })
+        .map(str::to_owned)
+        .collect();
+    digests.sort();
+    digests.dedup();
+    digests
 }
 
 /// The `version` of a manifest's `[workspace.package]`.
@@ -309,6 +391,25 @@ version = \"0.3.1\"
     #[test]
     fn the_editors_download_the_servers_version() {
         assert_eq!(check_versions(&workspace_root()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_editors_pin_the_same_formatters() {
+        assert_eq!(
+            check_formatter_pins(&workspace_root()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn sha256_digests_are_quoted_lowercase_hex_of_64_digits() {
+        let digest = "ab".repeat(32);
+        let text = format!(
+            "\"{digest}\" \"{}\" \"{}\" '{digest}' \"{digest}\"",
+            "AB".repeat(32),
+            "ab".repeat(31)
+        );
+        assert_eq!(sha256_digests(&text), vec![digest]);
     }
 
     #[test]

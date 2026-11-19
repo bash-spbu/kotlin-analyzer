@@ -70,7 +70,7 @@ export async function download(url: string, destination: string): Promise<void> 
   await fs.rename(partial, destination);
 }
 
-async function fetchBytes(url: string): Promise<ArrayBuffer> {
+export async function fetchBytes(url: string): Promise<ArrayBuffer> {
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok) {
     throw new Error(`GET ${url}: ${response.status} ${response.statusText}`);

@@ -15,3 +15,4 @@ crate-type = ["cdylib"]
 zed_extension_api = "0.5.0"
 sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
