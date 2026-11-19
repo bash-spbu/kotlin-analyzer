@@ -37,7 +37,11 @@
       {
         "language": "kotlin",
         "scopeName": "source.kotlin",
-        "path": "./syntaxes/kotlin.tmLanguage.json"
+        "path": "./syntaxes/kotlin.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql",
+          "meta.embedded.line.sql": "sql"
+        }
       }
     ],
     "taskDefinitions": [

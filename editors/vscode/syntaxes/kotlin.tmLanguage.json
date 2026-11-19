@@ -14,6 +14,9 @@
     "code": {
       "patterns": [
         {
+          "include": "#sql-marked"
+        },
+        {
           "include": "#comments"
         },
         {
@@ -158,6 +161,9 @@
           "patterns": [
             {
               "include": "#string-templates"
+            },
+            {
+              "include": "#sql-in-triple-string"
             }
           ]
         },
@@ -182,6 +188,9 @@
             },
             {
               "include": "#string-templates"
+            },
+            {
+              "include": "#sql-in-string"
             }
           ]
         },
@@ -620,6 +629,108 @@
     "backticked": {
       "match": "`[^`]+`",
       "name": "variable.other.backtick.kotlin"
+    },
+    "sql-in-triple-string": {
+      "comment": "SQL in a \"\"\" string: from a line (or the string's start) that starts as a SQL statement does, to the string's end.",
+      "begin": "(?i)(?:^|(?<=\"\"\"))(?=\\s*(?:select\\b|with\\s+(?:recursive\\s+)?\\w+\\s+as\\b|insert\\s+into\\b|update\\s+\\S+\\s+set\\b|delete\\s+from\\b|merge\\s+into\\b))",
+      "end": "(?=\"\"\")",
+      "contentName": "meta.embedded.block.sql",
+      "patterns": [
+        {
+          "include": "#string-templates"
+        },
+        {
+          "include": "source.sql"
+        }
+      ]
+    },
+    "sql-in-string": {
+      "comment": "SQL in a \" string that starts as a SQL statement does.",
+      "begin": "(?i)(?<=\")(?=\\s*(?:select\\s.*?\\sfrom\\b|with\\s+(?:recursive\\s+)?\\w+\\s+as\\s*\\(|insert\\s+into\\b|update\\s+\\S+\\s+set\\b|delete\\s+from\\b|merge\\s+into\\b))",
+      "end": "(?=\")|$",
+      "contentName": "meta.embedded.line.sql",
+      "patterns": [
+        {
+          "match": "\\\\(?:[tbnr'\\\"\\\\$]|u[0-9A-Fa-f]{4})",
+          "name": "constant.character.escape.kotlin"
+        },
+        {
+          "include": "#string-templates"
+        },
+        {
+          "include": "source.sql"
+        }
+      ]
+    },
+    "sql-marked": {
+      "comment": "A `// language=SQL` (or `/* language=SQL */`) comment, as IntelliJ reads it: the next string is SQL, whatever it starts with — up to a blank line.",
+      "begin": "(?i)(//\\s*language\\s*=\\s*sql\\b.*$|/\\*\\s*language\\s*=\\s*sql\\b.*?\\*/)",
+      "beginCaptures": {
+        "1": {
+          "name": "comment.line.double-slash.kotlin"
+        }
+      },
+      "end": "(?<=\")|^(?=\\s*$)",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "begin": "\"\"\"",
+          "end": "\"\"\"(?!\")",
+          "name": "string.quoted.triple.kotlin",
+          "contentName": "meta.embedded.block.sql",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.kotlin"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.kotlin"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#string-templates"
+            },
+            {
+              "include": "source.sql"
+            }
+          ]
+        },
+        {
+          "begin": "\"",
+          "end": "\"|$",
+          "name": "string.quoted.double.kotlin",
+          "contentName": "meta.embedded.line.sql",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.kotlin"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.kotlin"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\\\(?:[tbnr'\\\"\\\\$]|u[0-9A-Fa-f]{4})",
+              "name": "constant.character.escape.kotlin"
+            },
+            {
+              "include": "#string-templates"
+            },
+            {
+              "include": "source.sql"
+            }
+          ]
+        },
+        {
+          "include": "#code"
+        }
+      ]
     }
   }
 }

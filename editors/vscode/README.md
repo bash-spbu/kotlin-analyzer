@@ -4,7 +4,13 @@ Kotlin support in one extension:
 
 - **the Kotlin language**: `.kt` and `.kts` files get highlighting from this
   project's own TextMate grammar. They also get bracket matching,
-  auto-closing, comment toggling, indentation and KDoc continuation.
+  auto-closing, comment toggling, indentation and KDoc continuation. SQL
+  in strings is highlighted with VS Code's SQL grammar: in a `"""` string
+  from a line that starts as a SQL statement does (`SELECT`, `WITH name
+  AS`, `INSERT INTO`, `UPDATE name SET`, `DELETE FROM`, `MERGE INTO`, in
+  any case), in a `"` string that starts so (`SELECT … FROM` on its line),
+  and in the string after a `// language=SQL` comment, as IntelliJ marks
+  it; templates (`$table`) stay Kotlin.
 - **the kotlin-analyzer language server**, for Kotlin and (read-only) Java:
   - definition into sources and libraries, hover, completion with
     auto-import, signature help;

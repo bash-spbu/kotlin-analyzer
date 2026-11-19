@@ -17,8 +17,13 @@ Also:
 
 - completion items and workspace symbols are highlighted as Kotlin
   (`total(values: List<Money>): Long`, then where it's declared, dimmed);
-- SQL is highlighted in Spring Data's `@Query("…")` (with Zed's SQL
-  extension), regular expressions in `Regex("…")`, `"…".toRegex()` and
+- SQL is highlighted (with Zed's SQL extension) in a string that starts
+  as a SQL statement does (`SELECT … FROM`, `WITH name AS (`, `INSERT
+  INTO`, `UPDATE name SET`, `DELETE FROM`, `MERGE INTO`, in any case) —
+  `jdbc.sql("""…""")`, `jdbcTemplate.query("…")` — in one after a
+  `// language=SQL` comment, as IntelliJ marks it, and in Spring Data's
+  `@Query("…")`; a string's pieces between templates (`$table`) are one SQL
+  text. Regular expressions in `Regex("…")`, `"…".toRegex()` and
   `Pattern.compile("…")`, `TODO`/`FIXME` in comments
   (`languages/kotlin/injections.scm`);
 - Enter inside a KDoc or block comment starts the line with `* `;

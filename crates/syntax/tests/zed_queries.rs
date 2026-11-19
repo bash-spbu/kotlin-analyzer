@@ -283,6 +283,91 @@ fn injections_put_sql_in_query_annotations_regex_in_regex_calls_and_comments_in_
     );
 }
 
+/// Each match of `injections.scm` in `sample` that sets a language: the
+/// language and its content's pieces, as Zed parses them together.
+fn injected_texts(sample: &str) -> Vec<String> {
+    let language: Language = tree_sitter_kotlin::LANGUAGE.into();
+    let path = queries_directory().join("injections.scm");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let query =
+        Query::new(&language, &text).unwrap_or_else(|error| panic!("injections.scm: {error}"));
+    let content = query
+        .capture_index_for_name("injection.content")
+        .expect("an injection.content capture");
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+    let tree = parser.parse(sample, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), sample.as_bytes());
+    let mut found = Vec::new();
+    while let Some(matched) = matches.next() {
+        let Some(injected) = query
+            .property_settings(matched.pattern_index)
+            .iter()
+            .find(|setting| &*setting.key == "injection.language")
+            .and_then(|setting| setting.value.as_deref())
+        else {
+            continue;
+        };
+        let pieces: Vec<&str> = matched
+            .nodes_for_capture_index(content)
+            .map(|node| &sample[node.byte_range()])
+            .collect();
+        found.push(format!("{injected}: {}", pieces.join("|")));
+    }
+    found.retain(|injection| !injection.starts_with("comment: "));
+    found
+}
+
+#[test]
+fn sql_is_injected_where_a_string_reads_as_sql_or_is_marked_as_sql() {
+    let sample = r#"
+class Repository(private val jdbc: JdbcClient) {
+    fun sums(id: Long) = jdbc.sql(
+        """
+        WITH filtered AS (SELECT code FROM $table WHERE id = ${id})
+        SELECT * FROM filtered
+        """.trimIndent()
+    )
+
+    fun rename() = jdbcTemplate.update("update markup set name = ?", name)
+
+    // language=SQL
+    val ddl = "CREATE TABLE t (id int)"
+
+    /* language=sql */
+    val marked = "select 1 from t"
+
+    fun alter() = jdbc.sql(
+        // language=SQL
+        "ALTER TABLE t ADD c int"
+    )
+
+    @Query("from Markup m")
+    fun all(): List<Markup>
+
+    val failure = "Update failed for $id"
+    val prompt = "select one of: a, b"
+    // language=JSON
+    val json = "{}"
+}
+"#;
+    assert_eq!(
+        injected_texts(sample),
+        [
+            // The pieces between the templates, together.
+            "sql: \n        WITH filtered AS (SELECT code FROM | WHERE id = |)\n        SELECT * FROM filtered\n        ",
+            "sql: update markup set name = ?",
+            // Marked: what doesn't read as SQL by itself.
+            "sql: CREATE TABLE t (id int)",
+            // Marked and reading as SQL: injected once.
+            "sql: select 1 from t",
+            "sql: ALTER TABLE t ADD c int",
+            "sql: from Markup m",
+        ]
+    );
+}
+
 #[test]
 fn overrides_scope_strings_and_comments() {
     let language: Language = tree_sitter_kotlin::LANGUAGE.into();
