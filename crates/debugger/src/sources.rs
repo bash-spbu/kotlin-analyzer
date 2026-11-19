@@ -39,6 +39,9 @@ pub struct SourceKey {
     pub file_name: String,
     /// `com.example`.
     pub package: String,
+    /// It declares inline functions: other files' classes may hold its
+    /// code.
+    pub declares_inline_functions: bool,
 }
 
 impl SourceKey {
@@ -50,6 +53,7 @@ impl SourceKey {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             package: declared_package(&text),
+            declares_inline_functions: text.contains("inline fun "),
         })
     }
 
@@ -160,6 +164,7 @@ mod tests {
         let key = SourceKey {
             file_name: "Order.kt".to_owned(),
             package: "com.example".to_owned(),
+            declares_inline_functions: false,
         };
         assert!(key.holds_class("Lcom/example/OrderKt;"));
         assert!(key.holds_class("Lcom/example/Order$total$1;"));

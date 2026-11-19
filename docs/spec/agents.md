@@ -53,13 +53,13 @@ time; not an editor's), over JDWP (crates `jdwp` and `debugger`):
 | tool | does |
 |---|---|
 | `debug_start` | `test`: runs Gradle's test task for a `--tests` filter in the module holding `file`, with an init script that gives each `Test` (and `JavaExec`) JVM the debug agent through `jvmArgumentProviders` (a build's `jvmArgs = [...]` doesn't replace it), connecting to the debugger's free port and waiting for it (`server=n,suspend=y`; one fork); or `attach`: a JVM listening at `host:port`. Sets `breakpoints`, stops on `exceptions` (`uncaught` by default, `all`, `none`), runs, and waits for the first stop |
-| `debug_breakpoint` | sets (or `remove`s) a breakpoint at a file's line: in the loaded classes of the file — its package, and the source file name each class records — and, through a class-prepare request, in those that load later |
+| `debug_breakpoint` | sets (or `remove`s) a breakpoint at a file's line: in the loaded classes of the file — its package, and the source file name each class records — and, through a class-prepare request, in those that load later. A file declaring inline functions also has its lines wherever they were inlined: any class whose source map names it (see Inline functions). With a `condition`, a `hitCondition` or a `logMessage` (see Breakpoint checks); `debug_start`'s breakpoints take them too |
 | `debug_continue` | resumes and waits for the next stop, or keeps waiting while it runs |
-| `debug_step` | `over`, `into` or `out` of a line; the JDK's and Kotlin's classes are stepped over |
-| `debug_pause`, `debug_stack` | suspends the program; the stopped thread's frames |
-| `debug_variables` | a frame's `this` and live locals (`$i$` markers of inlined code left out), or with `expand` the fields or elements a path names |
+| `debug_step` | `over`, `into` or `out` of a line; the JDK's and Kotlin's classes are stepped over, so is inlined code without a source in the project, and `over` steps over an inline function's body it didn't begin in; over a line where a suspend function suspends, the step ends where its coroutine resumes (see Coroutines) |
+| `debug_pause`, `debug_stack` | suspends the program; the stopped thread's frames, numbered — an inline function's body `[inlined]` above its caller, a resumed coroutine's waiting functions `[suspended]` |
+| `debug_variables` | a frame's (by `debug_stack`'s number) `this` and live locals — Kotlin's `$i$` markers left out, an inlined body's own locals (`$iv`) in its frame by their source names — or a suspended frame's saved state; with `expand` the fields or elements a path names |
 | `debug_evaluate` | a path: a variable, `this` or its field, then `.field`, `[index]` (arrays, `ArrayList`), `.length`/`.size` of an array |
-| `debug_output`, `debug_stop` | the program's and Gradle's latest output; ends the program |
+| `debug_output`, `debug_stop` | the program's and Gradle's latest output, logpoints' messages among it; ends the program |
 
 A stop is told as text: why (a breakpoint, a step, a caught or uncaught
 exception with its message), where (`path:line` and the line's source), the
@@ -92,5 +92,58 @@ breakpoints and exception filters (`uncaught`, on by default; `all`), and
 `step`, `exception` with its message, `pause`); the end is `exited` with the
 exit code, then `terminated`. Threads, frames and variable references are
 small numbers, the last two good until the program runs again; a library's
-frame has the source's name but no path, dimmed. `evaluate` takes the paths
-`debug_evaluate` does.
+frame has the source's name but no path, dimmed; an inlined body's frame is
+named `function (inlined)`, a waiting coroutine's `function (Class,
+suspended)`. `evaluate` takes the paths `debug_evaluate` does. Breakpoints
+take a `condition`, a `hitCondition` and a `logMessage` (whose lines come as
+`output`).
+
+### Inline functions
+
+Kotlin compiles an inline function's body into each caller, numbering its
+lines past the end of the caller's file; the class's source map
+(JSR-45 `SourceDebugExtension`, crate `debugger`'s `smap`) says where they
+come from — its `Kotlin` stratum maps each line to a file and line, its
+`KotlinDebug` stratum an inlined body's lines to the line of the call. A
+frame in such a body is two: the body (`[inlined]`, its file and line,
+named by Kotlin's `$i$f$<function>` marker) above the caller's (the call's
+line). A lambda passed to an inline function keeps its own lines. A step
+doesn't stop in code the project has no source of (`forEach`'s body), nor,
+stepping over, in an inline function's body it didn't begin in. Not yet: a
+step out of an inlined lambda leaves the whole method.
+
+### Breakpoint checks
+
+- `condition`: paths (as `debug_evaluate` takes them) and literals —
+  numbers (`10L`, `1.5`), strings, chars, `true`, `false`, `null` —
+  compared with `== != < <= > >=`, joined by `&& || !` and parentheses.
+  Text, numbers and booleans compare by value (boxed ones too), other
+  objects by identity. Evaluated in the innermost frame (an inlined body's
+  when it is one); one that fails to evaluate stops, its error in the
+  output.
+- `hitCondition`: of the hits the condition lets through, `5` (the fifth),
+  `== 5`, `> 5`, `>= 5`, `< 5`, `<= 5`, `% 5` (every fifth).
+- `logMessage`: instead of stopping, a line in the output with each
+  `{path}` filled in (text unquoted), `{{`/`}}` for braces.
+
+Hits of breakpoints that don't stop let the program run on; a step ending
+on one still stops as a step.
+
+### Coroutines
+
+A suspend function's state is a continuation (`BaseContinuationImpl`).
+Resumed, it runs from wherever it was resumed, so the functions waiting
+for it aren't on the thread: under its `invokeSuspend` frame the stack
+shows them, `[suspended]`, following its `completion` chain and asking
+each where it waits (`getStackTraceElement()`, from the compiler's
+`@DebugMetadata`; called in the stopped thread). Their variables are the
+continuation's fields (`L$0`, `I$0`, `label`…).
+
+A step over a line where the function suspends: a method-exit request
+watches the function return the suspension marker (`COROUTINE_SUSPENDED`);
+the step then waits at its continuation's `invokeSuspend`, for that object
+only, and from there goes on into the function, past its declaration's line
+and the suspension's, to the next. A function returning from suspending
+does so on its declaration's line, which a step doesn't stop on. Other
+threads run meanwhile; a breakpoint elsewhere ends the step.
+

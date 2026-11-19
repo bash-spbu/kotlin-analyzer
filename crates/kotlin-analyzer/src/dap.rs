@@ -25,7 +25,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use debugger::{Launch, Session, Stop};
+use debugger::{BreakpointOptions, FrameKind, Launch, Session, Stop};
 use jdwp::{ObjectId, StepDepth, ThreadId};
 use serde_json::{Value, json};
 
@@ -72,8 +72,8 @@ fn read_messages(input: impl Read, messages: &Sender<Value>) {
 /// What a `variablesReference` names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Reference {
-    /// A frame's variables.
-    Frame { thread: ThreadId, index: usize },
+    /// The variables of the frame at this place in `Adapter::frames`.
+    Frame(usize),
     /// An object's fields or elements.
     Object(ObjectId),
 }
@@ -96,7 +96,7 @@ pub(crate) struct Adapter {
     ended: bool,
     /// DAP's ids are small numbers: index + 1 in these.
     threads: Vec<ThreadId>,
-    frames: Vec<(ThreadId, usize)>,
+    frames: Vec<(ThreadId, debugger::Frame)>,
     references: Vec<Reference>,
     /// The debugger's breakpoints of each file, to replace them all as
     /// `setBreakpoints` does.
@@ -224,6 +224,9 @@ impl Adapter {
         let body = match command {
             "initialize" => Ok(json!({
                 "supportsConfigurationDoneRequest": true,
+                "supportsConditionalBreakpoints": true,
+                "supportsHitConditionalBreakpoints": true,
+                "supportsLogPoints": true,
                 "supportsEvaluateForHovers": true,
                 "supportsTerminateRequest": true,
                 "exceptionBreakpointFilters": [
@@ -270,9 +273,12 @@ impl Adapter {
             "stackTrace" => self.stack_trace(arguments),
             "scopes" => {
                 let frame = arguments["frameId"].as_u64().unwrap_or(0) as usize;
-                match self.frames.get(frame.wrapping_sub(1)).copied() {
-                    Some((thread, index)) => {
-                        let reference = self.reference(Reference::Frame { thread, index });
+                match frame
+                    .checked_sub(1)
+                    .filter(|place| *place < self.frames.len())
+                {
+                    Some(place) => {
+                        let reference = self.reference(Reference::Frame(place));
                         Ok(
                             json!({ "scopes": [{ "name": "Locals", "variablesReference": reference, "expensive": false }] }),
                         )
@@ -402,12 +408,20 @@ impl Adapter {
                 .as_str()
                 .ok_or("no source path")?,
         );
-        let lines: Vec<u32> = arguments["breakpoints"]
+        let wanted: Vec<(u32, BreakpointOptions)> = arguments["breakpoints"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|breakpoint| breakpoint["line"].as_u64())
-            .filter_map(|line| u32::try_from(line).ok())
+            .filter_map(|breakpoint| {
+                let line = u32::try_from(breakpoint["line"].as_u64()?).ok()?;
+                let text = |key: &str| breakpoint[key].as_str().map(str::to_owned);
+                let options = BreakpointOptions {
+                    condition: text("condition"),
+                    hit_condition: text("hitCondition"),
+                    log_message: text("logMessage"),
+                };
+                Some((line, options))
+            })
             .collect();
         let session = self.session.as_mut().ok_or("no session")?;
         for id in self.breakpoints.remove(&path).unwrap_or_default() {
@@ -415,8 +429,8 @@ impl Adapter {
         }
         let mut answered = Vec::new();
         let mut ids = Vec::new();
-        for line in lines {
-            match session.set_breakpoint(&path, line) {
+        for (line, options) in wanted {
+            match session.set_breakpoint_with(&path, line, options) {
                 Ok(breakpoint) => {
                     ids.push(breakpoint.id);
                     answered.push(json!({
@@ -465,10 +479,16 @@ impl Adapter {
             .collect();
         let mut stack_frames = Vec::with_capacity(shown.len());
         for frame in shown {
-            self.frames.push((thread, frame.index));
+            self.frames.push((thread, frame.clone()));
+            let class = frame.class_name.rsplit('.').next().unwrap_or("");
+            let name = match frame.kind {
+                FrameKind::Code => format!("{} ({class})", frame.method),
+                FrameKind::Inlined { .. } => format!("{} (inlined)", frame.method),
+                FrameKind::Async { .. } => format!("{} ({class}, suspended)", frame.method),
+            };
             let mut entry = json!({
                 "id": self.frames.len(),
-                "name": format!("{} ({})", frame.method, frame.class_name.rsplit('.').next().unwrap_or("")),
+                "name": name,
                 "line": frame.line.unwrap_or(0).max(0),
                 "column": 1,
             });
@@ -496,7 +516,10 @@ impl Adapter {
             .ok_or("no such reference")?;
         let session = self.session.as_mut().ok_or("no session")?;
         let shown = match reference {
-            Reference::Frame { thread, index } => session.variables(thread, index)?,
+            Reference::Frame(place) => {
+                let (thread, frame) = self.frames.get(place).ok_or("no such frame")?;
+                session.variables(*thread, frame)?
+            }
             Reference::Object(object) => session.children(object)?,
         };
         let variables: Vec<Value> = shown
@@ -522,13 +545,16 @@ impl Adapter {
         let expression = arguments["expression"].as_str().ok_or("no expression")?;
         let frame = arguments["frameId"]
             .as_u64()
-            .and_then(|id| self.frames.get((id as usize).wrapping_sub(1)).copied());
+            .and_then(|id| self.frames.get((id as usize).wrapping_sub(1)).cloned());
         let session = self.session.as_mut().ok_or("no session")?;
-        let (thread, index) = match frame {
+        let (thread, frame) = match frame {
             Some(frame) => frame,
-            None => (session.current_thread().ok_or("not stopped")?, 0),
+            None => {
+                let thread = session.current_thread().ok_or("not stopped")?;
+                (thread, session.top_frame(thread)?)
+            }
         };
-        let shown = session.evaluate(thread, index, expression)?;
+        let shown = session.evaluate(thread, &frame, expression)?;
         let reference = shown
             .children
             .map_or(0, |object| self.reference(Reference::Object(object)));

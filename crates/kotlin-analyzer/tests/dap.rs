@@ -207,6 +207,8 @@ fn an_editor_launches_stops_inspects_steps_and_finishes() {
     let mut adapter = Adapter::start();
     let capabilities = adapter.request("initialize", json!({ "adapterID": "Kotlin" }));
     assert_eq!(capabilities["supportsConfigurationDoneRequest"], true);
+    assert_eq!(capabilities["supportsConditionalBreakpoints"], true);
+    assert_eq!(capabilities["supportsLogPoints"], true);
     adapter.request(
         "launch",
         json!({
@@ -219,9 +221,15 @@ fn an_editor_launches_stops_inspects_steps_and_finishes() {
     adapter.event("initialized");
     let breakpoints = adapter.request(
         "setBreakpoints",
-        json!({ "source": { "path": file }, "breakpoints": [{ "line": line_of("int doubled") }] }),
+        json!({ "source": { "path": file }, "breakpoints": [
+            // A logpoint: logs, doesn't stop.
+            { "line": line_of("\"hello \""), "logMessage": "name is {name}, count {count}" },
+            { "line": line_of("int doubled"), "condition": "count == 3 && name == \"kotlin\"" },
+            // Never holds: the step that ends on its line stops as a step.
+            { "line": line_of("\"doubled \""), "condition": "count > 100" },
+        ] }),
     );
-    assert_eq!(breakpoints["breakpoints"].as_array().unwrap().len(), 1);
+    assert_eq!(breakpoints["breakpoints"].as_array().unwrap().len(), 3);
     adapter.request(
         "setExceptionBreakpoints",
         json!({ "filters": ["uncaught"] }),
@@ -275,6 +283,7 @@ fn an_editor_launches_stops_inspects_steps_and_finishes() {
     assert!(output.contains("hello kotlin\n"), "{output:?}");
     assert!(output.contains("doubled 6\n"), "{output:?}");
     assert!(output.contains("given an environment\n"), "{output:?}");
+    assert!(output.contains("name is kotlin, count 3\n"), "{output:?}");
     adapter.request("disconnect", json!({}));
     let _ = std::fs::remove_dir_all(&root);
 }

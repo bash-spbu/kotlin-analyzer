@@ -43,6 +43,14 @@ pub enum Event {
         class: ReferenceTypeId,
         signature: String,
     },
+    /// A method of the request's class returned `value` (the one it
+    /// returned from is `location.method`).
+    MethodExit {
+        request: i32,
+        thread: ThreadId,
+        location: Location,
+        value: Value,
+    },
     ThreadStart {
         thread: ThreadId,
     },
@@ -63,6 +71,7 @@ impl Event {
             | Event::Step { thread, .. }
             | Event::Exception { thread, .. }
             | Event::ClassPrepare { thread, .. }
+            | Event::MethodExit { thread, .. }
             | Event::ThreadStart { thread }
             | Event::ThreadDeath { thread } => Some(*thread),
             Event::VmDeath | Event::Disconnected => None,
@@ -80,6 +89,8 @@ pub enum EventKind {
     ThreadStart = 6,
     ThreadDeath = 7,
     ClassPrepare = 8,
+    /// `MethodExitWithReturnValue`.
+    MethodExit = 42,
 }
 
 /// Which threads an event suspends.
@@ -132,6 +143,8 @@ pub enum Modifier {
     },
     /// Classes whose source file's name matches (`Order.kt`).
     SourceNameMatch(String),
+    /// Only where `this` is this object.
+    InstanceOnly(crate::ObjectId),
 }
 
 impl Modifier {
@@ -169,6 +182,9 @@ impl Modifier {
             }
             Modifier::SourceNameMatch(pattern) => {
                 writer.byte(12).string(pattern);
+            }
+            Modifier::InstanceOnly(object) => {
+                writer.byte(11).object(*object);
             }
         }
     }
@@ -230,6 +246,18 @@ pub(crate) fn parse_composite(data: &[u8], sizes: IdSizes) -> Result<EventSet, E
                     Event::ThreadDeath { thread }
                 }
             }
+            42 => {
+                let request = reader.int()?;
+                let thread = reader.object()?;
+                let location = reader.location()?;
+                let value = reader.value()?;
+                Event::MethodExit {
+                    request,
+                    thread,
+                    location,
+                    value,
+                }
+            }
             8 => {
                 let request = reader.int()?;
                 let thread = reader.object()?;
@@ -258,4 +286,59 @@ pub(crate) fn parse_composite(data: &[u8], sizes: IdSizes) -> Result<EventSet, E
         suspend_policy,
         events,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MethodId, ObjectId, Tag, Writer};
+
+    const SIZES: IdSizes = IdSizes {
+        field: 8,
+        method: 8,
+        object: 8,
+        reference_type: 8,
+        frame: 8,
+    };
+
+    #[test]
+    fn a_method_exit_carries_the_returned_value() {
+        let location = Location {
+            type_tag: TypeTag::Class,
+            class: ReferenceTypeId(3),
+            method: MethodId(4),
+            index: 17,
+        };
+        let mut writer = Writer::new(&SIZES);
+        writer
+            .byte(SuspendPolicy::All as u8)
+            .int(1)
+            .byte(EventKind::MethodExit as u8)
+            .int(9)
+            .object(ObjectId(5))
+            .location(&location)
+            .byte(b'L')
+            .object(ObjectId(6));
+        let set = parse_composite(&writer.bytes, SIZES).unwrap();
+        assert_eq!(set.suspend_policy, SuspendPolicy::All);
+        assert_eq!(
+            set.events,
+            [Event::MethodExit {
+                request: 9,
+                thread: ObjectId(5),
+                location,
+                value: Value::Object {
+                    tag: Tag::Object,
+                    id: ObjectId(6)
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn instance_only_is_modifier_eleven_with_the_object() {
+        let mut writer = Writer::new(&SIZES);
+        Modifier::InstanceOnly(ObjectId(0x10)).write(&mut writer);
+        assert_eq!(writer.bytes, [11, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+    }
 }

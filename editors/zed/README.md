@@ -110,8 +110,17 @@ a program `java` or `./gradlew`:
 A Gradle program's `Test` and `JavaExec` JVMs get the debugger (`bootRun`
 is a `JavaExec`); attaching needs a JVM started with
 `-agentlib:jdwp=transport=dt_socket,server=y,address=5005`. Attaching to a
-process by its id isn't supported. Not yet: Kotlin's inline functions'
-lines (SMAP), coroutines' stacks, conditional breakpoints and logpoints.
+process by its id isn't supported.
+
+Breakpoints take a condition (`count > 3 && order.id == "A-1"` — paths and
+literals, no calls), a hit count (`5`, `>= 5`, `% 10`) and a log message
+(`total {order.total}`: a logpoint, which doesn't stop). An inline
+function's body shows as a frame of its own above its caller, and its
+lines take breakpoints wherever it was inlined; stepping goes through
+inlined library code (`forEach`, `let`) without stopping in it. Under a
+resumed coroutine the call stack shows the suspend functions waiting for
+it, and stepping over a line where a function suspends stops at its next
+line once the coroutine resumes. See `docs/spec/agents.md` (Debugging).
 
 ## Gradle tasks
 

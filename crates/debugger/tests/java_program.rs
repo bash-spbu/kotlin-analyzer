@@ -136,7 +136,8 @@ fn breakpoints_variables_steps_and_an_uncaught_exception() {
         "mapped back to the file"
     );
     let thread = stop.thread().unwrap();
-    let variables = session.variables(thread, 0).unwrap();
+    let top = session.top_frame(thread).unwrap();
+    let variables = session.variables(thread, &top).unwrap();
     assert!(value_of(&variables, "order").starts_with("Main.Order@"));
     assert_eq!(value_of(&variables, "numbers"), "int[3] {1, 2, 3}");
     // A JDK value type shows its `toString()`; `this` only once.
@@ -154,16 +155,22 @@ fn breakpoints_variables_steps_and_an_uncaught_exception() {
     assert_eq!(value_of(&fields, "items"), "ArrayList(size = 2)");
     assert_eq!(value_of(&fields, "status"), "Main.Status.ACTIVE");
     assert_eq!(
-        session.evaluate(thread, 0, "order.items[1]").unwrap().value,
+        session
+            .evaluate(thread, &top, "order.items[1]")
+            .unwrap()
+            .value,
         "4"
     );
     assert_eq!(
-        session.evaluate(thread, 0, "numbers.length").unwrap().value,
+        session
+            .evaluate(thread, &top, "numbers.length")
+            .unwrap()
+            .value,
         "3"
     );
     assert!(
         session
-            .evaluate(thread, 0, "order.price")
+            .evaluate(thread, &top, "order.price")
             .unwrap_err()
             .contains("no field `price`")
     );
@@ -182,7 +189,8 @@ fn breakpoints_variables_steps_and_an_uncaught_exception() {
         (method.as_str(), line),
         ("total", Some(line_of("sum += item") as i32))
     );
-    let variables = session.variables(stop.thread().unwrap(), 0).unwrap();
+    let top = session.top_frame(stop.thread().unwrap()).unwrap();
+    let variables = session.variables(stop.thread().unwrap(), &top).unwrap();
     assert_eq!(value_of(&variables, "sum"), "0");
     assert_eq!(value_of(&variables, "item"), "3");
     assert!(value_of(&variables, "this").starts_with("Main.Order@"));
@@ -205,7 +213,8 @@ fn breakpoints_variables_steps_and_an_uncaught_exception() {
         top_line(&mut session, &stop).1,
         Some(line_of("System.out.println") as i32)
     );
-    let variables = session.variables(thread, 0).unwrap();
+    let top = session.top_frame(thread).unwrap();
+    let variables = session.variables(thread, &top).unwrap();
     assert_eq!(value_of(&variables, "total"), "7");
 
     // The uncaught exception, then the end.

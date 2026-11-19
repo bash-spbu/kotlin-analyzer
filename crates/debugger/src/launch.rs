@@ -54,9 +54,20 @@ pub enum Launch {
 pub struct Debuggee {
     process: Option<Child>,
     output: Arc<Mutex<Vec<String>>>,
+    /// Where each line goes as it comes, too.
+    lines: Option<Sender<String>>,
 }
 
 impl Debuggee {
+    /// Adds a line of the debugger's own (a logpoint's message) to the
+    /// output.
+    pub fn note(&self, line: String) {
+        if let Some(lines) = &self.lines {
+            let _ = lines.send(line.clone());
+        }
+        keep_line(&self.output, line);
+    }
+
     /// The output's last `count` lines.
     pub fn output_tail(&self, count: usize) -> Vec<String> {
         let output = self
@@ -110,6 +121,7 @@ pub fn start(
             Debuggee {
                 process: None,
                 output: Arc::default(),
+                lines,
             },
         ));
     }
@@ -169,11 +181,12 @@ pub fn start(
         keep_lines(stdout, output.clone(), lines.clone());
     }
     if let Some(stderr) = process.stderr.take() {
-        keep_lines(stderr, output.clone(), lines);
+        keep_lines(stderr, output.clone(), lines.clone());
     }
     let mut debuggee = Debuggee {
         process: Some(process),
         output,
+        lines,
     };
     listener
         .set_nonblocking(true)
@@ -285,15 +298,20 @@ fn keep_lines(
             if let Some(lines) = &lines {
                 let _ = lines.send(line.clone());
             }
-            if let Ok(mut output) = output.lock() {
-                output.push(line);
-                if output.len() > OUTPUT_LIMIT {
-                    let excess = output.len() - OUTPUT_LIMIT;
-                    output.drain(..excess);
-                }
-            }
+            keep_line(&output, line);
         }
     });
+}
+
+/// Adds `line` to the output kept, the oldest dropped past the limit.
+fn keep_line(output: &Mutex<Vec<String>>, line: String) {
+    if let Ok(mut output) = output.lock() {
+        output.push(line);
+        if output.len() > OUTPUT_LIMIT {
+            let excess = output.len() - OUTPUT_LIMIT;
+            output.drain(..excess);
+        }
+    }
 }
 
 #[cfg(test)]

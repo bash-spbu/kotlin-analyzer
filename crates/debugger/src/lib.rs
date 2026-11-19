@@ -2,13 +2,21 @@
 //! and the agents' MCP tools drive.
 //!
 //! A [`Session`] starts or reaches the JVM (`launch`), sets breakpoints by
-//! file and line — a file's classes are found by its package and the
-//! source file name each class records (`sources`), those loaded later
-//! when they are — and, once the JVM stops, tells where (frames mapped
-//! back to the project's files), shows variables (`values`) and evaluates
-//! paths (`order.items[0].price`). Every stop suspends the whole VM.
+//! file and line (`breakpoints`) — with a condition, a hit count or a
+//! message to log instead — and, once the JVM stops, tells where: frames
+//! mapped back to the project's files, an inline function's body as a
+//! frame of its own (`smap`), the functions a resumed coroutine's callers
+//! wait in (`coroutines`). It shows variables (`values`), evaluates paths
+//! (`order.items[0].price`) and steps — through inlined code it has no
+//! source of, and over a suspension to where the coroutine resumes. Every
+//! stop suspends the whole VM.
 
+mod breakpoints;
+pub mod conditions;
+pub mod coroutines;
 pub mod launch;
+mod notices;
+pub mod smap;
 pub mod sources;
 pub mod values;
 
@@ -16,14 +24,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jdwp::{
-    Connection, Event, EventKind, EventSet, Location, MethodId, Modifier, ObjectId,
-    ReferenceTypeId, StepDepth, SuspendPolicy, Tag, ThreadId, Value,
+    Connection, EventKind, Location, MethodId, Modifier, ObjectId, ReferenceTypeId, StepDepth,
+    SuspendPolicy, Tag, ThreadId, Value,
 };
 
+pub use breakpoints::{Breakpoint, BreakpointOptions};
+use breakpoints::{BreakpointEntry, BreakpointTable, Checks};
+use conditions::{Condition, LogMessage, Operand};
+use coroutines::{Coroutines, Waiting};
 pub use launch::Launch;
+use notices::Notice;
+use smap::{Origin, SourceMap};
 use sources::{SourceIndex, SourceKey};
 use values::Inspector;
 pub use values::Shown;
@@ -37,6 +51,10 @@ const STEP_EXCLUDED: &[&str] = &[
     "kotlin.*",
     "kotlinx.coroutines.*",
 ];
+
+/// How many more steps a step takes through code it doesn't stop in
+/// before it stops anyway.
+const STEP_LIMIT: usize = 1000;
 
 /// Why the JVM stopped, or that it ended.
 #[derive(Clone, PartialEq, Debug)]
@@ -74,27 +92,32 @@ impl Stop {
     }
 }
 
-/// A breakpoint as set: where it is asked for, and where the JVM has it.
+/// What a frame of a stopped thread's stack is.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Breakpoint {
-    pub id: u32,
-    pub path: PathBuf,
-    pub line: u32,
-    /// Set in a loaded class: the JVM will stop there. Otherwise it waits
-    /// for a class of the file to load.
-    pub verified: bool,
+pub enum FrameKind {
+    /// A method's code.
+    Code,
+    /// An inline function's body, compiled into the next frame's method:
+    /// `function` as Kotlin's markers name it, when they do.
+    Inlined { function: Option<String> },
+    /// A suspend function waiting for the coroutine above to finish:
+    /// suspended in `continuation`, not on the thread.
+    Async { continuation: ObjectId },
 }
 
 /// A frame of a stopped thread's stack.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Frame {
+    /// The thread's frame whose variables it has (for an async frame, the
+    /// one it was found under).
     pub index: usize,
+    pub kind: FrameKind,
     /// `shop.Order`.
     pub class_name: String,
     pub method: String,
     /// The project's file it is in, when found.
     pub path: Option<PathBuf>,
-    /// `Order.kt`, from the class.
+    /// `Order.kt`.
     pub source_name: Option<String>,
     pub line: Option<i32>,
 }
@@ -105,34 +128,87 @@ struct Shared {
     breakpoints: Mutex<BreakpointTable>,
 }
 
-#[derive(Default)]
-struct BreakpointTable {
-    next_id: u32,
-    entries: Vec<BreakpointEntry>,
+/// Where a step began.
+#[derive(Clone, Debug)]
+struct StepOrigin {
+    class: ReferenceTypeId,
+    method: MethodId,
+    line: Option<i32>,
+    /// The method's first line: where a resumed suspend function enters
+    /// before it jumps back to where it was.
+    prologue_line: Option<i32>,
+    /// The coroutine's state, when the method is a suspend function's.
+    continuation: Option<ObjectId>,
+    /// The coroutine has resumed: the step ends at the method's next line.
+    resumed: bool,
+    /// The line an inline function's body the step began in was inlined
+    /// at: stepping over stays in that body.
+    inlined_at: Option<u32>,
 }
 
-struct BreakpointEntry {
-    breakpoint: Breakpoint,
-    key: SourceKey,
-    /// The class-prepare request watching for the file's classes.
-    prepare_request: Option<i32>,
-    /// The JVM's breakpoint requests, by location.
-    requests: HashMap<Location, i32>,
+enum Stepping {
+    Idle,
+    /// A step of a line; `exit_request` watches the method suspend.
+    Line {
+        thread: ThreadId,
+        depth: StepDepth,
+        request: i32,
+        exit_request: Option<i32>,
+        origin: StepOrigin,
+        steps: usize,
+    },
+    /// The coroutine suspended mid-step: waiting for it to resume
+    /// (`request` stops in its `invokeSuspend`).
+    AwaitingResume {
+        depth: StepDepth,
+        request: i32,
+        origin: StepOrigin,
+    },
+}
+
+/// Whether a notice stops the program.
+enum Verdict {
+    Stop(Stop),
+    RunOn,
+}
+
+/// What a line of code a step reached is to the step.
+enum Reached {
+    /// Where it may stop.
+    Code,
+    /// Code it steps through: another step, at this depth.
+    StepAgain(StepDepth),
+}
+
+/// What a line a step reached is.
+enum LineKind {
+    Own,
+    /// An inline function's body, inlined at `call_line`.
+    Inlined {
+        call_line: u32,
+        has_source: bool,
+    },
+    Elsewhere {
+        has_source: bool,
+    },
 }
 
 pub struct Session {
     shared: Arc<Shared>,
     debuggee: launch::Debuggee,
-    stops: Receiver<Stop>,
+    notices: Receiver<Notice>,
     sources: SourceIndex,
     inspector: Inspector,
+    coroutines: Coroutines,
     exception_request: Option<i32>,
-    /// A step begun and not ended yet: cleared at the next stop.
-    step_request: Option<i32>,
+    stepping: Stepping,
     /// The thread of the latest stop.
     current_thread: Option<ThreadId>,
     ended: bool,
     methods: HashMap<ReferenceTypeId, Vec<jdwp::Method>>,
+    source_maps: HashMap<ReferenceTypeId, Option<Arc<SourceMap>>>,
+    /// `None`: compiled without variables.
+    variable_tables: HashMap<(ReferenceTypeId, MethodId), Option<Arc<Vec<jdwp::Variable>>>>,
 }
 
 impl Session {
@@ -143,8 +219,8 @@ impl Session {
         Session::start_streaming(launch, source_roots, None)
     }
 
-    /// [`Session::start`], each line the program prints sent to `lines`
-    /// as it comes (a debug console's output).
+    /// [`Session::start`], each line the program prints (and each
+    /// logpoint's message) sent to `lines` as it comes.
     pub fn start_streaming(
         launch: &Launch,
         source_roots: &[PathBuf],
@@ -158,12 +234,12 @@ impl Session {
             connection,
             breakpoints: Mutex::default(),
         });
-        let (stop_sender, stops) = std::sync::mpsc::channel();
+        let (notice_sender, notices) = std::sync::mpsc::channel();
         {
             let shared = shared.clone();
             std::thread::Builder::new()
                 .name("debugger-events".to_owned())
-                .spawn(move || handle_events(&shared, &events, &stop_sender))
+                .spawn(move || notices::handle_events(&shared, &events, &notice_sender))
                 .map_err(|error| error.to_string())?;
         }
         // An attached VM runs: suspend it, as a launched one is.
@@ -176,14 +252,17 @@ impl Session {
         Ok(Session {
             shared,
             debuggee,
-            stops,
+            notices,
             sources: SourceIndex::of(source_roots),
             inspector: Inspector::default(),
+            coroutines: Coroutines::default(),
             exception_request: None,
-            step_request: None,
+            stepping: Stepping::Idle,
             current_thread: None,
             ended: false,
             methods: HashMap::new(),
+            source_maps: HashMap::new(),
+            variable_tables: HashMap::new(),
         })
     }
 
@@ -194,22 +273,24 @@ impl Session {
     /// Stops at `line` of `path`: in its classes loaded now, and in those
     /// that load later.
     pub fn set_breakpoint(&mut self, path: &Path, line: u32) -> Result<Breakpoint, String> {
+        self.set_breakpoint_with(path, line, BreakpointOptions::default())
+    }
+
+    /// A breakpoint that asks `options` before it stops — or logs instead.
+    pub fn set_breakpoint_with(
+        &mut self,
+        path: &Path,
+        line: u32,
+        options: BreakpointOptions,
+    ) -> Result<Breakpoint, String> {
+        let checks = Checks::of(&options)?;
         let key = SourceKey::of(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let connection = self.shared.connection.clone();
-        let prepare_request = connection
-            .set_event_request(
-                EventKind::ClassPrepare,
-                SuspendPolicy::EventThread,
-                &[
-                    Modifier::ClassMatch(key.class_pattern()),
-                    Modifier::SourceNameMatch(key.file_name.clone()),
-                ],
-            )
-            .ok();
+        let prepare_requests = breakpoints::watch_classes(&connection, &key);
         let mut requests = HashMap::new();
-        for class in loaded_classes_of(&connection, &key) {
-            for location in locations_at(&connection, class, line) {
-                if let Ok(request) = set_breakpoint_request(&connection, &location) {
+        for (class, signature) in breakpoints::loaded_classes_of(&connection, &key) {
+            for location in breakpoints::locations_at(&connection, class, &signature, &key, line) {
+                if let Ok(request) = breakpoints::set_breakpoint_request(&connection, &location) {
                     requests.insert(location, request);
                 }
             }
@@ -221,11 +302,13 @@ impl Session {
             path: path.to_path_buf(),
             line,
             verified: !requests.is_empty(),
+            options,
         };
         table.entries.push(BreakpointEntry {
             breakpoint: breakpoint.clone(),
             key,
-            prepare_request,
+            checks,
+            prepare_requests,
             requests,
         });
         Ok(breakpoint)
@@ -247,7 +330,7 @@ impl Session {
         for request in entry.requests.values() {
             let _ = connection.clear_event_request(EventKind::Breakpoint, *request);
         }
-        if let Some(request) = entry.prepare_request {
+        for request in entry.prepare_requests {
             let _ = connection.clear_event_request(EventKind::ClassPrepare, request);
         }
         true
@@ -306,13 +389,27 @@ impl Session {
     }
 
     /// Waits for the JVM to stop or end; `None` if it still runs after
-    /// `patience`.
+    /// `patience`. Breakpoints whose checks fail, logpoints and steps
+    /// through code they don't stop in run on meanwhile.
     pub fn wait_for_stop(&mut self, patience: Duration) -> Option<Stop> {
-        let stop = match self.stops.recv_timeout(patience) {
-            Ok(stop) => stop,
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => Stop::Ended { exit_code: None },
-        };
+        let deadline = Instant::now() + patience;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let notice = match self.notices.recv_timeout(left) {
+                Ok(notice) => notice,
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    Notice::Stop(Stop::Ended { exit_code: None })
+                }
+            };
+            if let Verdict::Stop(stop) = self.consider(notice) {
+                return Some(self.stopped(stop));
+            }
+        }
+    }
+
+    fn stopped(&mut self, stop: Stop) -> Stop {
+        self.clear_stepping();
         let stop = match stop {
             Stop::Ended { .. } => {
                 self.ended = true;
@@ -322,15 +419,194 @@ impl Session {
             }
             stopped => stopped,
         };
-        if let Some(request) = self.step_request.take() {
-            let _ = self
-                .connection()
-                .clear_event_request(EventKind::SingleStep, request);
-        }
         self.current_thread = stop.thread();
         // A thread an event stopped can run `toString()`.
         self.inspector = Inspector::calling_in(stop.thread());
-        Some(stop)
+        stop
+    }
+
+    fn consider(&mut self, notice: Notice) -> Verdict {
+        match notice {
+            Notice::Stop(stop) => Verdict::Stop(stop),
+            Notice::Breakpoint {
+                thread,
+                requests,
+                stepped,
+            } => self.at_breakpoint(thread, &requests, stepped),
+            Notice::Step { thread } => self.after_step(thread),
+            Notice::Exited {
+                thread,
+                request,
+                class,
+                method,
+                suspended,
+            } => self.after_exit(thread, request, (class, method), suspended),
+        }
+    }
+
+    /// Lets the JVM run on after a notice that doesn't stop it.
+    fn run_on(&mut self) -> Verdict {
+        self.inspector = Inspector::default();
+        let _ = self.connection().resume_all();
+        Verdict::RunOn
+    }
+
+    fn at_breakpoint(&mut self, thread: ThreadId, requests: &[i32], stepped: bool) -> Verdict {
+        let resumes_the_step = matches!(
+            &self.stepping,
+            Stepping::AwaitingResume { request, .. } if requests.contains(request)
+        );
+        let hit = self
+            .shared
+            .breakpoints
+            .lock()
+            .map(|table| table.of_requests(requests))
+            .unwrap_or_default();
+        self.inspector = Inspector::calling_in(Some(thread));
+        let stopping: Vec<u32> = hit
+            .into_iter()
+            .filter(|id| self.breakpoint_stops(*id, thread))
+            .collect();
+        if !stopping.is_empty() {
+            return Verdict::Stop(Stop::Breakpoint {
+                thread,
+                breakpoints: stopping,
+            });
+        }
+        if resumes_the_step {
+            return self.continue_resumed_step(thread);
+        }
+        if stepped {
+            return self.after_step(thread);
+        }
+        self.run_on()
+    }
+
+    /// Whether breakpoint `id`, hit in `thread`, stops: its condition
+    /// holds, its hit count is met, and it doesn't log instead. A condition
+    /// that can't be evaluated stops, saying why.
+    fn breakpoint_stops(&mut self, id: u32, thread: ThreadId) -> bool {
+        let (condition, log_message) = {
+            let Ok(mut table) = self.shared.breakpoints.lock() else {
+                return true;
+            };
+            let Some(entry) = table.entry_mut(id) else {
+                return false;
+            };
+            (
+                entry.checks.condition.clone(),
+                entry.checks.log_message.clone(),
+            )
+        };
+        if let Some(condition) = condition {
+            match self.condition_holds(thread, &condition) {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(why) => {
+                    self.debuggee
+                        .note(format!("breakpoint {id}: the condition failed: {why}"));
+                    return true;
+                }
+            }
+        }
+        let hit_count_met = {
+            let Ok(mut table) = self.shared.breakpoints.lock() else {
+                return true;
+            };
+            let Some(entry) = table.entry_mut(id) else {
+                return false;
+            };
+            entry.checks.hits += 1;
+            let hits = entry.checks.hits;
+            entry
+                .checks
+                .hit_condition
+                .is_none_or(|hit_condition| hit_condition.is_met(hits))
+        };
+        if !hit_count_met {
+            return false;
+        }
+        match log_message {
+            Some(message) => {
+                let text = self.render_log(thread, &message);
+                self.debuggee.note(text);
+                false
+            }
+            None => true,
+        }
+    }
+
+    fn condition_holds(&mut self, thread: ThreadId, condition: &Condition) -> Result<bool, String> {
+        let frame = self.top_frame(thread)?;
+        condition.holds(&mut |path| {
+            let value = self.path_value(thread, &frame, path)?;
+            Ok(self.operand_of(value))
+        })
+    }
+
+    fn render_log(&mut self, thread: ThreadId, message: &LogMessage) -> String {
+        let frame = match self.top_frame(thread) {
+            Ok(frame) => frame,
+            Err(why) => return format!("<{why}>"),
+        };
+        message.render(&mut |path| {
+            let value = self.path_value(thread, &frame, path)?;
+            let connection = self.shared.connection.clone();
+            Ok(match value {
+                // Text as itself, not quoted.
+                Value::Object {
+                    tag: Tag::String,
+                    id,
+                } => connection
+                    .string_value(id)
+                    .map_err(|error| error.to_string())?,
+                value => self.inspector.show(&connection, path, value).value,
+            })
+        })
+    }
+
+    /// A value as a condition compares it: text, numbers and booleans by
+    /// value (boxed ones too), other objects by identity.
+    fn operand_of(&mut self, value: Value) -> Operand {
+        let connection = self.shared.connection.clone();
+        match value {
+            Value::Byte(number) => Operand::Integer(i64::from(number)),
+            Value::Short(number) => Operand::Integer(i64::from(number)),
+            Value::Int(number) => Operand::Integer(i64::from(number)),
+            Value::Long(number) => Operand::Integer(number),
+            Value::Float(number) => Operand::Decimal(f64::from(number)),
+            Value::Double(number) => Operand::Decimal(number),
+            Value::Boolean(value) => Operand::Boolean(value),
+            Value::Char(unit) => Operand::Char(
+                char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER),
+            ),
+            Value::Null | Value::Void => Operand::Null,
+            Value::Object {
+                tag: Tag::String,
+                id,
+            } => connection
+                .string_value(id)
+                .map_or(Operand::Reference(id.0), Operand::Text),
+            Value::Object { id, .. } => match self.unboxed(id) {
+                Some(value) => self.operand_of(value),
+                None => Operand::Reference(id.0),
+            },
+        }
+    }
+
+    /// The primitive a boxed `Integer`, `Long`… holds.
+    fn unboxed(&mut self, object: ObjectId) -> Option<Value> {
+        let connection = self.shared.connection.clone();
+        let class = connection.reference_type(object).ok()?;
+        let signature = self.inspector.signature(&connection, class).ok()?;
+        let is_boxed = values::BOXED.contains(&signature.as_str());
+        if !is_boxed {
+            return None;
+        }
+        self.inspector
+            .field_value(&connection, object, "value")
+            .ok()
+            .flatten()
     }
 
     /// Resumes and waits for the next stop.
@@ -352,24 +628,379 @@ impl Session {
     }
 
     /// Starts a step of `thread` and lets the JVM run: the next stop (from
-    /// [`Session::wait_for_stop`]) ends it.
+    /// [`Session::wait_for_stop`]) ends it. A step over a line where a
+    /// suspend function suspends ends where its coroutine resumes, at the
+    /// function's next line.
     pub fn begin_step(&mut self, thread: ThreadId, depth: StepDepth) -> Result<(), String> {
+        self.clear_stepping();
+        let origin = self.step_origin(thread)?;
+        let request = self.line_step_request(thread, depth)?;
+        let exit_request = match (depth, origin.continuation) {
+            (StepDepth::Over, Some(_)) => self.exit_request(thread, origin.class).ok(),
+            _ => None,
+        };
+        self.stepping = Stepping::Line {
+            thread,
+            depth,
+            request,
+            exit_request,
+            origin,
+            steps: 0,
+        };
+        self.resume()
+    }
+
+    fn line_step_request(&self, thread: ThreadId, depth: StepDepth) -> Result<i32, String> {
         let mut modifiers = vec![Modifier::Step { thread, depth }, Modifier::Count(1)];
         modifiers.extend(
             STEP_EXCLUDED
                 .iter()
                 .map(|pattern| Modifier::ClassExclude((*pattern).to_owned())),
         );
-        let request = self
-            .connection()
+        self.connection()
             .set_event_request(EventKind::SingleStep, SuspendPolicy::All, &modifiers)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Watches the methods of `class` return in `thread`: whether the
+    /// stepped one suspends.
+    fn exit_request(&mut self, thread: ThreadId, class: ReferenceTypeId) -> Result<i32, String> {
+        let connection = self.shared.connection.clone();
+        let signature = self
+            .inspector
+            .signature(&connection, class)
             .map_err(|error| error.to_string())?;
-        self.step_request = Some(request);
-        self.resume()
+        let class_name = sources::class_name(&signature).ok_or("not a class")?;
+        connection
+            .set_event_request(
+                EventKind::MethodExit,
+                SuspendPolicy::All,
+                &[
+                    Modifier::ThreadOnly(thread),
+                    Modifier::ClassMatch(class_name),
+                ],
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Where `thread` is, as a step starting there sees it.
+    fn step_origin(&mut self, thread: ThreadId) -> Result<StepOrigin, String> {
+        let connection = self.shared.connection.clone();
+        let frames = connection
+            .frames(thread)
+            .map_err(|error| error.to_string())?;
+        let frame = frames.first().ok_or("no frames")?;
+        let location = frame.location;
+        let table = connection.line_table(location.class, location.method).ok();
+        let line = table
+            .as_ref()
+            .and_then(|table| line_at(table, location.index));
+        let prologue_line = table.as_ref().and_then(|table| {
+            table
+                .lines
+                .iter()
+                .min_by_key(|(index, _)| *index)
+                .map(|(_, line)| *line)
+        });
+        let continuation = self.continuation_of(thread, frame);
+        let inlined_at = match self.line_kind(&location) {
+            LineKind::Inlined { call_line, .. } => Some(call_line),
+            _ => None,
+        };
+        Ok(StepOrigin {
+            class: location.class,
+            method: location.method,
+            line,
+            prologue_line,
+            continuation,
+            resumed: false,
+            inlined_at,
+        })
+    }
+
+    /// The coroutine state of a frame: a suspend function's
+    /// `$continuation`, or a suspend lambda's `this`.
+    fn continuation_of(&mut self, thread: ThreadId, frame: &jdwp::StackFrame) -> Option<ObjectId> {
+        let connection = self.shared.connection.clone();
+        let location = frame.location;
+        let variables = self.variable_table(location.class, location.method);
+        let local = variables.as_ref().and_then(|variables| {
+            variables
+                .iter()
+                .find(|variable| {
+                    variable.name == "$continuation" && variable.is_live_at(location.index)
+                })
+                .cloned()
+        });
+        if let Some(local) = local {
+            let values = connection
+                .frame_values(thread, frame.id, &[(local.slot, Tag::Object)])
+                .ok()?;
+            return match values.first() {
+                Some(Value::Object { id, .. }) => Some(*id),
+                _ => None,
+            };
+        }
+        self.resumed_continuation(thread, frame)
+    }
+
+    /// A continuation's `invokeSuspend` frame: its `this`.
+    fn resumed_continuation(
+        &mut self,
+        thread: ThreadId,
+        frame: &jdwp::StackFrame,
+    ) -> Option<ObjectId> {
+        let method = self.method(frame.location.class, frame.location.method)?;
+        if method.name != "invokeSuspend" {
+            return None;
+        }
+        let connection = self.shared.connection.clone();
+        let this = connection.this_object(thread, frame.id).ok()??;
+        let class = connection.reference_type(this).ok()?;
+        self.coroutines
+            .is_continuation(&connection, &mut self.inspector, class)
+            .then_some(this)
+    }
+
+    /// A step reached a line: stops there, or steps on through code it
+    /// doesn't stop in.
+    fn after_step(&mut self, thread: ThreadId) -> Verdict {
+        let Stepping::Line {
+            depth,
+            origin,
+            steps,
+            ..
+        } = &self.stepping
+        else {
+            return Verdict::Stop(Stop::Step { thread });
+        };
+        let (depth, origin, steps) = (*depth, origin.clone(), *steps);
+        if steps >= STEP_LIMIT {
+            return Verdict::Stop(Stop::Step { thread });
+        }
+        let Some(location) = self.top_location(thread) else {
+            return Verdict::Stop(Stop::Step { thread });
+        };
+        match self.reached(&location, depth, &origin) {
+            Reached::Code => Verdict::Stop(Stop::Step { thread }),
+            Reached::StepAgain(depth) => match self.step_again(thread, depth) {
+                Ok(()) => Verdict::RunOn,
+                Err(_) => Verdict::Stop(Stop::Step { thread }),
+            },
+        }
+    }
+
+    fn reached(&mut self, location: &Location, depth: StepDepth, origin: &StepOrigin) -> Reached {
+        let in_origin_method = location.class == origin.class && location.method == origin.method;
+        if origin.resumed {
+            if !in_origin_method {
+                return Reached::StepAgain(StepDepth::Into);
+            }
+            // It enters before its first line, passes its declaration's,
+            // then the line it suspended at.
+            let line = self.raw_line(location);
+            let before_where_it_was =
+                line.is_none() || line == origin.line || line == origin.prologue_line;
+            return if before_where_it_was {
+                Reached::StepAgain(StepDepth::Over)
+            } else {
+                Reached::Code
+            };
+        }
+        // A suspend function returns from suspending on its declaration's
+        // line: on to the exit, which tells.
+        let leaves_suspended = origin.continuation.is_some()
+            && in_origin_method
+            && self.raw_line(location) == origin.prologue_line;
+        if leaves_suspended {
+            return Reached::StepAgain(StepDepth::Over);
+        }
+        let onward = match depth {
+            StepDepth::Out => StepDepth::Over,
+            depth => depth,
+        };
+        match self.line_kind(location) {
+            LineKind::Inlined {
+                call_line,
+                has_source,
+            } => {
+                let entered = origin.inlined_at != Some(call_line);
+                let steps_over_it = depth == StepDepth::Over && entered;
+                if steps_over_it || !has_source {
+                    Reached::StepAgain(onward)
+                } else {
+                    Reached::Code
+                }
+            }
+            LineKind::Elsewhere { has_source: false } => Reached::StepAgain(onward),
+            LineKind::Own | LineKind::Elsewhere { has_source: true } => Reached::Code,
+        }
+    }
+
+    /// Replaces the step's request with a new one at `depth` and runs.
+    fn step_again(&mut self, thread: ThreadId, depth: StepDepth) -> Result<(), String> {
+        let request = self.line_step_request(thread, depth)?;
+        if let Stepping::Line {
+            request: current,
+            steps,
+            ..
+        } = &mut self.stepping
+        {
+            let previous = std::mem::replace(current, request);
+            *steps += 1;
+            let _ = self
+                .shared
+                .connection
+                .clear_event_request(EventKind::SingleStep, previous);
+        }
+        self.inspector = Inspector::default();
+        self.connection()
+            .resume_all()
+            .map_err(|error| error.to_string())
+    }
+
+    /// A method of the stepped class returned: if it is the stepped
+    /// suspend function suspending, the step waits for its coroutine to
+    /// resume instead.
+    fn after_exit(
+        &mut self,
+        thread: ThreadId,
+        request: i32,
+        method: (ReferenceTypeId, MethodId),
+        suspended: bool,
+    ) -> Verdict {
+        let Stepping::Line {
+            thread: stepping_thread,
+            depth,
+            request: step_request,
+            exit_request: Some(exit_request),
+            origin,
+            ..
+        } = &self.stepping
+        else {
+            return self.run_on();
+        };
+        let is_the_stepped_method = *exit_request == request
+            && thread == *stepping_thread
+            && method == (origin.class, origin.method);
+        if !is_the_stepped_method {
+            return self.run_on();
+        }
+        let (depth, step_request, exit_request, origin) =
+            (*depth, *step_request, *exit_request, origin.clone());
+        let connection = self.shared.connection.clone();
+        let _ = connection.clear_event_request(EventKind::MethodExit, exit_request);
+        let Some(continuation) = origin.continuation.filter(|_| suspended) else {
+            if let Stepping::Line { exit_request, .. } = &mut self.stepping {
+                *exit_request = None;
+            }
+            return self.run_on();
+        };
+        let _ = connection.clear_event_request(EventKind::SingleStep, step_request);
+        match self.resume_request(continuation) {
+            Ok(request) => {
+                self.stepping = Stepping::AwaitingResume {
+                    depth,
+                    request,
+                    origin,
+                };
+                self.run_on()
+            }
+            Err(_) => Verdict::Stop(Stop::Step { thread }),
+        }
+    }
+
+    /// Stops where `continuation` resumes: its `invokeSuspend`, called on
+    /// it.
+    fn resume_request(&mut self, continuation: ObjectId) -> Result<i32, String> {
+        let connection = self.shared.connection.clone();
+        let class = connection
+            .reference_type(continuation)
+            .map_err(|error| error.to_string())?;
+        let methods = connection
+            .methods(class)
+            .map_err(|error| error.to_string())?;
+        let method = methods
+            .iter()
+            .find(|method| method.name == "invokeSuspend")
+            .ok_or("no invokeSuspend")?;
+        let table = connection
+            .line_table(class, method.id)
+            .map_err(|error| error.to_string())?;
+        let location = Location {
+            type_tag: jdwp::TypeTag::Class,
+            class,
+            method: method.id,
+            index: table.start,
+        };
+        connection
+            .set_event_request(
+                EventKind::Breakpoint,
+                SuspendPolicy::All,
+                &[
+                    Modifier::LocationOnly(location),
+                    Modifier::InstanceOnly(continuation),
+                ],
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// The suspended coroutine resumed: on, in `thread`, to the stepped
+    /// function's next line.
+    fn continue_resumed_step(&mut self, thread: ThreadId) -> Verdict {
+        let Stepping::AwaitingResume {
+            depth,
+            request,
+            mut origin,
+        } = std::mem::replace(&mut self.stepping, Stepping::Idle)
+        else {
+            return self.run_on();
+        };
+        let _ = self
+            .shared
+            .connection
+            .clear_event_request(EventKind::Breakpoint, request);
+        origin.resumed = true;
+        match self.line_step_request(thread, StepDepth::Into) {
+            Ok(request) => {
+                self.stepping = Stepping::Line {
+                    thread,
+                    depth,
+                    request,
+                    exit_request: None,
+                    origin,
+                    steps: 0,
+                };
+                self.run_on()
+            }
+            Err(_) => Verdict::Stop(Stop::Step { thread }),
+        }
+    }
+
+    /// Ends the step under way, if any, and its requests.
+    fn clear_stepping(&mut self) {
+        let connection = self.shared.connection.clone();
+        match std::mem::replace(&mut self.stepping, Stepping::Idle) {
+            Stepping::Idle => {}
+            Stepping::Line {
+                request,
+                exit_request,
+                ..
+            } => {
+                let _ = connection.clear_event_request(EventKind::SingleStep, request);
+                if let Some(exit_request) = exit_request {
+                    let _ = connection.clear_event_request(EventKind::MethodExit, exit_request);
+                }
+            }
+            Stepping::AwaitingResume { request, .. } => {
+                let _ = connection.clear_event_request(EventKind::Breakpoint, request);
+            }
+        }
     }
 
     /// Suspends the running JVM.
     pub fn pause(&mut self) -> Result<Stop, String> {
+        self.clear_stepping();
         self.connection()
             .suspend_all()
             .map_err(|error| error.to_string())?;
@@ -406,19 +1037,97 @@ impl Session {
             .collect())
     }
 
-    /// The stopped thread's frames, the innermost first.
+    /// The stopped thread's frames, the innermost first: an inline
+    /// function's body as its own frame above its caller's, and under a
+    /// resumed coroutine the functions waiting for it.
     pub fn stack(&mut self, thread: ThreadId) -> Result<Vec<Frame>, String> {
-        let frames = self
-            .connection()
+        let connection = self.shared.connection.clone();
+        let frames = connection
             .frames(thread)
             .map_err(|error| error.to_string())?;
         let mut shown = Vec::with_capacity(frames.len());
         for (index, frame) in frames.iter().enumerate() {
-            shown.push(self.frame_at(index, &frame.location));
+            shown.extend(self.frames_at(index, &frame.location));
+            if let Some(continuation) = self.resumed_continuation(thread, frame) {
+                let waiting = self.coroutines.waiting_for(
+                    &connection,
+                    &mut self.inspector,
+                    thread,
+                    continuation,
+                );
+                for waiting in waiting {
+                    shown.push(self.async_frame(index, waiting));
+                }
+            }
         }
         Ok(shown)
     }
 
+    /// The innermost frame: an inline function's body, or the method's.
+    pub fn top_frame(&mut self, thread: ThreadId) -> Result<Frame, String> {
+        let location = self.top_location(thread).ok_or("no frames")?;
+        self.frames_at(0, &location)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no frames".to_owned())
+    }
+
+    fn top_location(&self, thread: ThreadId) -> Option<Location> {
+        let frames = self.connection().frames(thread).ok()?;
+        frames.first().map(|frame| frame.location)
+    }
+
+    /// The frames of the thread's frame `index`: its method's, and above
+    /// it the inline function's body it is in, if it is.
+    fn frames_at(&mut self, index: usize, location: &Location) -> Vec<Frame> {
+        let frame = self.frame_at(index, location);
+        let Some(raw_line) = frame.line.and_then(|line| u32::try_from(line).ok()) else {
+            return vec![frame];
+        };
+        let Some(source_map) = self.source_map(location.class) else {
+            return vec![frame];
+        };
+        match source_map.origin(raw_line) {
+            None => vec![frame],
+            Some(Origin::Own { line }) => vec![Frame {
+                line: Some(line as i32),
+                ..frame
+            }],
+            Some(Origin::Elsewhere { file, line }) => vec![Frame {
+                path: self.sources.find(&file.name, &file.package()),
+                source_name: Some(file.name.clone()),
+                line: Some(line as i32),
+                ..frame
+            }],
+            Some(Origin::Inlined {
+                file,
+                line,
+                call_line,
+            }) => {
+                let function = self.inlined_function(location);
+                let body = Frame {
+                    index,
+                    kind: FrameKind::Inlined {
+                        function: function.clone(),
+                    },
+                    class_name: frame.class_name.clone(),
+                    method: function.unwrap_or_else(|| "inlined".to_owned()),
+                    path: self.sources.find(&file.name, &file.package()),
+                    source_name: Some(file.name.clone()),
+                    line: Some(line as i32),
+                };
+                vec![
+                    body,
+                    Frame {
+                        line: Some(call_line as i32),
+                        ..frame
+                    },
+                ]
+            }
+        }
+    }
+
+    /// The method's frame, its line as compiled.
     fn frame_at(&mut self, index: usize, location: &Location) -> Frame {
         let connection = self.shared.connection.clone();
         let signature = self
@@ -431,25 +1140,119 @@ impl Session {
             .map(|method| method.name)
             .unwrap_or_default();
         let source_name = connection.source_file(location.class).ok();
-        let line = connection
-            .line_table(location.class, location.method)
-            .ok()
-            .and_then(|table| line_at(&table, location.index));
-        let package = class_name
-            .rsplit_once('.')
-            .map_or("", |(package, _)| package)
-            .to_owned();
+        let line = self.raw_line(location);
+        let package = package_of(&class_name);
         let path = source_name
             .as_deref()
             .and_then(|name| self.sources.find(name, &package));
         Frame {
             index,
+            kind: FrameKind::Code,
             class_name,
             method,
             path,
             source_name,
             line,
         }
+    }
+
+    fn async_frame(&mut self, index: usize, waiting: Waiting) -> Frame {
+        let package = package_of(&waiting.class_name);
+        let path = waiting
+            .file_name
+            .as_deref()
+            .and_then(|name| self.sources.find(name, &package));
+        Frame {
+            index,
+            kind: FrameKind::Async {
+                continuation: waiting.continuation,
+            },
+            class_name: waiting.class_name,
+            method: waiting.method,
+            path,
+            source_name: waiting.file_name,
+            line: waiting.line,
+        }
+    }
+
+    fn raw_line(&self, location: &Location) -> Option<i32> {
+        self.connection()
+            .line_table(location.class, location.method)
+            .ok()
+            .and_then(|table| line_at(&table, location.index))
+    }
+
+    /// What the code at `location` is to a step: the class's own lines,
+    /// an inlined body, or another file's code, and whether the project
+    /// has its source.
+    fn line_kind(&mut self, location: &Location) -> LineKind {
+        let Some(raw_line) = self
+            .raw_line(location)
+            .and_then(|line| u32::try_from(line).ok())
+        else {
+            return LineKind::Own;
+        };
+        let Some(source_map) = self.source_map(location.class) else {
+            return LineKind::Own;
+        };
+        match source_map.origin(raw_line) {
+            None | Some(Origin::Own { .. }) => LineKind::Own,
+            Some(Origin::Inlined {
+                file, call_line, ..
+            }) => LineKind::Inlined {
+                call_line,
+                has_source: self.sources.find(&file.name, &file.package()).is_some(),
+            },
+            Some(Origin::Elsewhere { file, .. }) => LineKind::Elsewhere {
+                has_source: self.sources.find(&file.name, &file.package()).is_some(),
+            },
+        }
+    }
+
+    fn source_map(&mut self, class: ReferenceTypeId) -> Option<Arc<SourceMap>> {
+        if let Some(known) = self.source_maps.get(&class) {
+            return known.clone();
+        }
+        let source_map = self
+            .connection()
+            .source_debug_extension(class)
+            .ok()
+            .and_then(|text| SourceMap::parse(&text))
+            .map(Arc::new);
+        self.source_maps.insert(class, source_map.clone());
+        source_map
+    }
+
+    fn variable_table(
+        &mut self,
+        class: ReferenceTypeId,
+        method: MethodId,
+    ) -> Option<Arc<Vec<jdwp::Variable>>> {
+        if let Some(known) = self.variable_tables.get(&(class, method)) {
+            return known.clone();
+        }
+        let table = self
+            .connection()
+            .variable_table(class, method)
+            .ok()
+            .map(Arc::new);
+        self.variable_tables.insert((class, method), table.clone());
+        table
+    }
+
+    /// The inline function whose body `location` is in: the innermost of
+    /// Kotlin's `$i$f$<function>` markers live there.
+    fn inlined_function(&mut self, location: &Location) -> Option<String> {
+        let variables = self.variable_table(location.class, location.method)?;
+        variables
+            .iter()
+            .filter(|variable| variable.is_live_at(location.index))
+            .filter_map(|variable| {
+                let function = variable.name.strip_prefix("$i$f$")?;
+                Some((variable.start, function.to_owned()))
+            })
+            .max_by_key(|(start, _)| *start)
+            .map(|(_, function)| function)
     }
 
     fn method(&mut self, class: ReferenceTypeId, method: MethodId) -> Option<jdwp::Method> {
@@ -464,52 +1267,76 @@ impl Session {
             .cloned()
     }
 
-    /// A frame's `this` and its live local variables and parameters.
-    pub fn variables(
+    /// A frame's variables: a method's `this` and live locals, an inline
+    /// function body's own locals, an async frame's saved state.
+    pub fn variables(&mut self, thread: ThreadId, frame: &Frame) -> Result<Vec<Shown>, String> {
+        let connection = self.shared.connection.clone();
+        if let FrameKind::Async { continuation } = frame.kind {
+            return self
+                .inspector
+                .children(&connection, continuation)
+                .map_err(|error| error.to_string());
+        }
+        let named = self.named_values(thread, frame)?;
+        Ok(named
+            .into_iter()
+            .map(|(name, value)| self.inspector.show(&connection, &name, value))
+            .collect())
+    }
+
+    /// The variables of a method's or inlined body's frame, by the names
+    /// the source gives them. Kotlin marks an inlined body's locals `$iv`:
+    /// they are the body's, the others its caller's.
+    fn named_values(
         &mut self,
         thread: ThreadId,
-        frame_index: usize,
-    ) -> Result<Vec<Shown>, String> {
+        frame: &Frame,
+    ) -> Result<Vec<(String, Value)>, String> {
         let connection = self.shared.connection.clone();
         let frames = connection
             .frames(thread)
             .map_err(|error| error.to_string())?;
-        let frame = frames.get(frame_index).ok_or("no such frame")?;
-        let mut shown = Vec::new();
-        if let Ok(Some(this)) = connection.this_object(thread, frame.id) {
-            let value = Value::Object {
-                tag: Tag::Object,
-                id: this,
-            };
-            shown.push(self.inspector.show(&connection, "this", value));
+        let jvm_frame = frames.get(frame.index).ok_or("no such frame")?;
+        let is_inlined_body = matches!(frame.kind, FrameKind::Inlined { .. });
+        let mut named = Vec::new();
+        if !is_inlined_body && let Ok(Some(this)) = connection.this_object(thread, jvm_frame.id) {
+            named.push((
+                "this".to_owned(),
+                Value::Object {
+                    tag: Tag::Object,
+                    id: this,
+                },
+            ));
         }
-        let location = frame.location;
-        let variables = match connection.variable_table(location.class, location.method) {
-            Ok(variables) => variables,
-            Err(error) if error.is_absent_information() => return Ok(shown),
-            Err(error) => return Err(error.to_string()),
+        let location = jvm_frame.location;
+        let Some(variables) = self.variable_table(location.class, location.method) else {
+            return Ok(named);
         };
-        let live: Vec<jdwp::Variable> = variables
-            .into_iter()
-            .filter(|variable| variable.is_live_at(location.index))
-            // Kotlin's markers of inlined code, not the program's; `this`
-            // is shown first already.
-            .filter(|variable| {
-                let is_marker = variable.name.starts_with("$i$") || variable.name.is_empty();
-                !is_marker && variable.name != "this"
-            })
-            .collect();
-        let slots: Vec<(i32, Tag)> = live
+        let mut live = Vec::new();
+        for variable in variables
             .iter()
-            .map(|variable| (variable.slot, Tag::of_signature(&variable.signature)))
-            .collect();
-        let values = connection
-            .frame_values(thread, frame.id, &slots)
-            .map_err(|error| error.to_string())?;
-        for (variable, value) in live.iter().zip(values) {
-            shown.push(self.inspector.show(&connection, &variable.name, value));
+            .filter(|variable| variable.is_live_at(location.index))
+        {
+            // Kotlin's markers of inlined code, not the program's; `this`
+            // is first already.
+            let is_marker = variable.name.starts_with("$i$") || variable.name.is_empty();
+            if is_marker || variable.name == "this" {
+                continue;
+            }
+            let body_local = variable.name.strip_suffix("$iv");
+            let name = match (is_inlined_body, body_local) {
+                (true, Some(name)) => name.to_owned(),
+                (false, None) => variable.name.clone(),
+                _ => continue,
+            };
+            live.push((name, variable.slot, Tag::of_signature(&variable.signature)));
         }
-        Ok(shown)
+        let slots: Vec<(i32, Tag)> = live.iter().map(|(_, slot, tag)| (*slot, *tag)).collect();
+        let values = connection
+            .frame_values(thread, jvm_frame.id, &slots)
+            .map_err(|error| error.to_string())?;
+        named.extend(live.into_iter().map(|(name, _, _)| name).zip(values));
+        Ok(named)
     }
 
     /// What an object or array shown earlier opens into.
@@ -521,84 +1348,69 @@ impl Session {
     }
 
     /// The value of a path in a frame: a variable, `this`, or a field of
-    /// `this`, then `.field`, `[index]`, `.size`/`.length` of an array.
+    /// `this` (of the continuation, in an async frame), then `.field`,
+    /// `[index]`, `.size`/`.length` of an array.
     pub fn evaluate(
         &mut self,
         thread: ThreadId,
-        frame_index: usize,
+        frame: &Frame,
         expression: &str,
     ) -> Result<Shown, String> {
+        let value = self.path_value(thread, frame, expression)?;
         let connection = self.shared.connection.clone();
-        let steps = parse_path(expression)?;
-        let mut steps = steps.into_iter();
+        Ok(self.inspector.show(&connection, expression, value))
+    }
+
+    fn path_value(
+        &mut self,
+        thread: ThreadId,
+        frame: &Frame,
+        expression: &str,
+    ) -> Result<Value, String> {
+        let connection = self.shared.connection.clone();
+        let mut steps = parse_path(expression)?.into_iter();
         let Some(PathStep::Name(first)) = steps.next() else {
             return Err("start with a name".to_owned());
         };
-        let variables = self.variables(thread, frame_index)?;
-        let frames = connection
-            .frames(thread)
-            .map_err(|error| error.to_string())?;
-        let frame = frames.get(frame_index).ok_or("no such frame")?;
-        let mut value = match variables.iter().position(|variable| variable.name == first) {
-            Some(_) => self.variable_value(thread, frame_index, &first)?,
-            None => {
-                let this = connection
-                    .this_object(thread, frame.id)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("no variable `{first}`"))?;
-                self.inspector
-                    .field_value(&connection, this, &first)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("no variable or field `{first}`"))?
+        let mut value = match frame.kind {
+            FrameKind::Async { continuation } => self
+                .inspector
+                .field_value(&connection, continuation, &first)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("no `{first}` saved"))?,
+            _ => {
+                let named = self.named_values(thread, frame)?;
+                match named.into_iter().find(|(name, _)| *name == first) {
+                    Some((_, value)) => value,
+                    None => self.field_of_this(thread, frame, &first)?,
+                }
             }
         };
         for step in steps {
             value = self.follow(&connection, value, &step)?;
         }
-        Ok(self.inspector.show(&connection, expression, value))
+        Ok(value)
     }
 
-    /// The raw value of the frame's variable `name` (or `this`).
-    fn variable_value(
+    fn field_of_this(
         &mut self,
         thread: ThreadId,
-        frame_index: usize,
+        frame: &Frame,
         name: &str,
     ) -> Result<Value, String> {
         let connection = self.shared.connection.clone();
         let frames = connection
             .frames(thread)
             .map_err(|error| error.to_string())?;
-        let frame = frames.get(frame_index).ok_or("no such frame")?;
-        if name == "this" {
-            return match connection.this_object(thread, frame.id) {
-                Ok(Some(this)) => Ok(Value::Object {
-                    tag: Tag::Object,
-                    id: this,
-                }),
-                _ => Err("no `this` in a static method".to_owned()),
-            };
-        }
-        let location = frame.location;
-        let variables = connection
-            .variable_table(location.class, location.method)
-            .map_err(|error| error.to_string())?;
-        let variable = variables
-            .iter()
-            .filter(|variable| variable.is_live_at(location.index))
-            .find(|variable| variable.name == name)
+        let jvm_frame = frames.get(frame.index).ok_or("no such frame")?;
+        let this = connection
+            .this_object(thread, jvm_frame.id)
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("no variable `{name}`"))?;
-        let values = connection
-            .frame_values(
-                thread,
-                frame.id,
-                &[(variable.slot, Tag::of_signature(&variable.signature))],
-            )
-            .map_err(|error| error.to_string())?;
-        values
-            .into_iter()
-            .next()
-            .ok_or_else(|| "no value".to_owned())
+        self.inspector
+            .field_value(&connection, this, name)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no variable or field `{name}`"))
     }
 
     fn follow(
@@ -663,7 +1475,8 @@ impl Session {
         }
     }
 
-    /// What the program printed (its last `count` lines).
+    /// What the program printed (its last `count` lines), logpoints'
+    /// messages among them.
     pub fn output_tail(&self, count: usize) -> Vec<String> {
         self.debuggee.output_tail(count)
     }
@@ -679,6 +1492,14 @@ impl Session {
         }
         self.debuggee.kill();
     }
+}
+
+/// `shop` of `shop.Order`.
+fn package_of(class_name: &str) -> String {
+    class_name
+        .rsplit_once('.')
+        .map_or("", |(package, _)| package)
+        .to_owned()
 }
 
 enum PathStep {
@@ -729,218 +1550,6 @@ fn line_at(table: &jdwp::LineTable, index: u64) -> Option<i32> {
         .take_while(|(start, _)| *start <= index)
         .last()
         .map(|(_, line)| *line)
-}
-
-/// The loaded classes of a source file: in its package, compiled from a
-/// file of its name.
-fn loaded_classes_of(connection: &Connection, key: &SourceKey) -> Vec<ReferenceTypeId> {
-    let Ok(classes) = connection.all_classes() else {
-        return Vec::new();
-    };
-    classes
-        .into_iter()
-        .filter(|class| key.holds_class(&class.signature))
-        .filter(|class| {
-            connection
-                .source_file(class.id)
-                .is_ok_and(|name| name == key.file_name)
-        })
-        .map(|class| class.id)
-        .collect()
-}
-
-/// Where in `class` the code of `line` starts: in each method with the
-/// line, its first code index.
-fn locations_at(connection: &Connection, class: ReferenceTypeId, line: u32) -> Vec<Location> {
-    let Ok(methods) = connection.methods(class) else {
-        return Vec::new();
-    };
-    let mut locations = Vec::new();
-    for method in methods {
-        let Ok(table) = connection.line_table(class, method.id) else {
-            continue;
-        };
-        let first = table
-            .lines
-            .iter()
-            .filter(|(_, entry_line)| i64::from(*entry_line) == i64::from(line))
-            .map(|(index, _)| *index)
-            .min();
-        if let Some(index) = first {
-            locations.push(Location {
-                type_tag: jdwp::TypeTag::Class,
-                class,
-                method: method.id,
-                index,
-            });
-        }
-    }
-    locations
-}
-
-fn set_breakpoint_request(
-    connection: &Connection,
-    location: &Location,
-) -> Result<i32, jdwp::Error> {
-    connection.set_event_request(
-        EventKind::Breakpoint,
-        SuspendPolicy::All,
-        &[Modifier::LocationOnly(*location)],
-    )
-}
-
-/// The VM's event sets: a class of a breakpoint's file loading gets the
-/// breakpoint, then runs on — resumed once per set, as the VM suspended
-/// once for it; a set that stops goes to the session as one stop.
-fn handle_events(
-    shared: &Shared,
-    events: &Receiver<EventSet>,
-    stops: &std::sync::mpsc::Sender<Stop>,
-) {
-    let connection = &shared.connection;
-    for set in events {
-        let mut stop: Option<Stop> = None;
-        let mut prepared_thread = None;
-        for event in set.events {
-            match event {
-                Event::ClassPrepare {
-                    thread,
-                    class,
-                    signature,
-                    request,
-                    ..
-                } => {
-                    prepared(shared, request, class, &signature);
-                    prepared_thread = Some(thread);
-                }
-                Event::Breakpoint {
-                    thread, request, ..
-                } => {
-                    let hit = breakpoints_of(shared, request);
-                    stop = Some(match stop {
-                        Some(Stop::Breakpoint {
-                            mut breakpoints, ..
-                        }) => {
-                            breakpoints.extend(hit);
-                            Stop::Breakpoint {
-                                thread,
-                                breakpoints,
-                            }
-                        }
-                        _ => Stop::Breakpoint {
-                            thread,
-                            breakpoints: hit,
-                        },
-                    });
-                }
-                Event::Step { thread, .. } => {
-                    // A breakpoint at the step's end says more.
-                    if stop.is_none() {
-                        stop = Some(Stop::Step { thread });
-                    }
-                }
-                Event::Exception {
-                    thread,
-                    exception,
-                    catch_location,
-                    ..
-                } => {
-                    stop = Some(Stop::Exception {
-                        thread,
-                        exception: describe_exception(connection, exception),
-                        caught: catch_location.is_some(),
-                    });
-                }
-                Event::VmDeath | Event::Disconnected => {
-                    stop = Some(Stop::Ended { exit_code: None })
-                }
-                Event::VmStart { .. } | Event::ThreadStart { .. } | Event::ThreadDeath { .. } => {}
-            }
-        }
-        match stop {
-            Some(stop) => {
-                let ended = matches!(stop, Stop::Ended { .. });
-                if stops.send(stop).is_err() || ended {
-                    return;
-                }
-            }
-            // Only classes loaded: run on, resuming what the set suspended.
-            None => match (set.suspend_policy, prepared_thread) {
-                (SuspendPolicy::EventThread, Some(thread)) => {
-                    let _ = connection.resume_thread(thread);
-                }
-                (SuspendPolicy::All, Some(_)) => {
-                    let _ = connection.resume_all();
-                }
-                _ => {}
-            },
-        }
-    }
-}
-
-/// A class of a breakpoint's file loaded (for the class-prepare request
-/// `request`): the breakpoint goes into it.
-fn prepared(shared: &Shared, request: i32, class: ReferenceTypeId, signature: &str) {
-    let connection = &shared.connection;
-    let Ok(mut table) = shared.breakpoints.lock() else {
-        return;
-    };
-    for entry in table.entries.iter_mut() {
-        let watches = entry.prepare_request == Some(request) && entry.key.holds_class(signature);
-        if !watches {
-            continue;
-        }
-        for location in locations_at(connection, class, entry.breakpoint.line) {
-            if entry.requests.contains_key(&location) {
-                continue;
-            }
-            if let Ok(id) = set_breakpoint_request(connection, &location) {
-                entry.requests.insert(location, id);
-                entry.breakpoint.verified = true;
-            }
-        }
-    }
-}
-
-/// The breakpoints the JVM's breakpoint request `request` is one of.
-fn breakpoints_of(shared: &Shared, request: i32) -> Vec<u32> {
-    shared
-        .breakpoints
-        .lock()
-        .map(|table| {
-            table
-                .entries
-                .iter()
-                .filter(|entry| entry.requests.values().any(|id| *id == request))
-                .map(|entry| entry.breakpoint.id)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// `IllegalStateException: no items` of an exception object.
-fn describe_exception(connection: &Connection, exception: Value) -> String {
-    let Value::Object { id, .. } = exception else {
-        return "an exception".to_owned();
-    };
-    let mut inspector = Inspector::default();
-    let type_name = connection
-        .reference_type(id)
-        .and_then(|class| inspector.signature(connection, class))
-        .map(|signature| values::type_name(&signature))
-        .unwrap_or_default();
-    let message = inspector
-        .field_value(connection, id, "detailMessage")
-        .ok()
-        .flatten()
-        .and_then(|message| match message {
-            Value::Object { id, .. } => connection.string_value(id).ok(),
-            _ => None,
-        });
-    match message {
-        Some(message) => format!("{type_name}: {message}"),
-        None => type_name,
-    }
 }
 
 #[cfg(test)]

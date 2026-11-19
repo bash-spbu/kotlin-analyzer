@@ -38,11 +38,17 @@ impl DebugTools {
     /// The tools, as `tools/list` describes them.
     pub(crate) fn tools() -> Vec<Value> {
         let wait = json!({ "type": "integer", "minimum": 1, "maximum": 600, "description": "Seconds to wait for the program to stop (default 50). When it still runs, call `debug_continue` again to keep waiting." });
+        let condition = json!({ "type": "string", "description": "Stop only when this holds: paths and literals compared with == != < <= > >=, joined by && || ! and parentheses — `item.count > 3 && order.id == \"A-1\"`. No calls." });
+        let hit_condition = json!({ "type": "string", "description": "Stop only on these hits (of those the condition lets through): `5` (the fifth), `>= 5`, `% 10` (every tenth)." });
+        let log_message = json!({ "type": "string", "description": "Don't stop: add this line to the output (`debug_output`) at each hit, paths in braces filled in — `total {order.total} for {order.id}`." });
         let location = json!({
             "type": "object",
             "properties": {
                 "file": { "type": "string" },
                 "line": { "type": "integer", "minimum": 1 },
+                "condition": condition.clone(),
+                "hitCondition": hit_condition.clone(),
+                "logMessage": log_message.clone(),
             },
             "required": ["file", "line"],
         });
@@ -65,12 +71,15 @@ impl DebugTools {
             }),
             json!({
                 "name": "debug_breakpoint",
-                "description": "Set a breakpoint at a line of a Kotlin or Java file (or remove one with `remove`). Lists the breakpoints; a breakpoint not yet verified waits for its class to load.",
+                "description": "Set a breakpoint at a line of a Kotlin or Java file — with a condition, a hit count, or a message to log instead of stopping (a logpoint) — or remove the line's breakpoints with `remove`. A line of an inline function stops wherever it was inlined. Lists the breakpoints; a breakpoint not yet verified waits for its class to load.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "file": { "type": "string" },
                         "line": { "type": "integer", "minimum": 1 },
+                        "condition": condition,
+                        "hitCondition": hit_condition,
+                        "logMessage": log_message,
                         "remove": { "type": "boolean" },
                     },
                     "required": ["file", "line"],
@@ -83,7 +92,7 @@ impl DebugTools {
             }),
             json!({
                 "name": "debug_step",
-                "description": "Step the stopped thread: `over` the current line, `into` the call on it, or `out` of the current function.",
+                "description": "Step the stopped thread: `over` the current line, `into` the call on it, or `out` of the current function. Inlined library code (`forEach`'s body) is stepped through; stepping over a line where a suspend function suspends ends where its coroutine resumes, at the next line.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -100,12 +109,12 @@ impl DebugTools {
             }),
             json!({
                 "name": "debug_stack",
-                "description": "The stopped thread's whole call stack: frame number, function, file:line.",
+                "description": "The stopped thread's whole call stack: frame number, function, file:line. An inline function's body is a frame of its own (`inlined`) above its caller; under a resumed coroutine come the suspend functions waiting for it (`suspended`), which aren't on the thread.",
                 "inputSchema": { "type": "object", "properties": {} },
             }),
             json!({
                 "name": "debug_variables",
-                "description": "A frame's `this` and local variables (frame 0, the innermost, by default) — or, with `expand`, the fields or elements of the value a path names (`order`, `order.items`).",
+                "description": "A frame's `this` and local variables (frame 0, the innermost, by default; numbers as `debug_stack` gives them) — or, with `expand`, the fields or elements of the value a path names (`order`, `order.items`). A suspended frame's are its coroutine's saved state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -128,7 +137,7 @@ impl DebugTools {
             }),
             json!({
                 "name": "debug_output",
-                "description": "The program's (and Gradle's) latest output lines.",
+                "description": "The program's (and Gradle's) latest output lines, logpoints' messages among them.",
                 "inputSchema": { "type": "object", "properties": { "lines": { "type": "integer", "minimum": 1 } } },
             }),
             json!({
@@ -166,16 +175,23 @@ impl DebugTools {
                 );
                 let line = line_of(&arguments["line"])?;
                 if arguments["remove"].as_bool() == Some(true) {
-                    let id = debug
+                    let ids: Vec<u32> = debug
                         .session
                         .breakpoints()
                         .into_iter()
-                        .find(|breakpoint| breakpoint.path == file && breakpoint.line == line)
+                        .filter(|breakpoint| breakpoint.path == file && breakpoint.line == line)
                         .map(|breakpoint| breakpoint.id)
-                        .ok_or("no breakpoint there")?;
-                    debug.session.remove_breakpoint(id);
+                        .collect();
+                    if ids.is_empty() {
+                        return Err("no breakpoint there".to_owned());
+                    }
+                    for id in ids {
+                        debug.session.remove_breakpoint(id);
+                    }
                 } else {
-                    debug.session.set_breakpoint(&file, line)?;
+                    debug
+                        .session
+                        .set_breakpoint_with(&file, line, options_of(arguments))?;
                 }
                 Ok(debug.breakpoint_list())
             }
@@ -209,22 +225,23 @@ impl DebugTools {
                 let frames = debug.session.stack(thread)?;
                 Ok(frames
                     .iter()
-                    .map(|frame| debug.frame_line(frame))
+                    .enumerate()
+                    .map(|(number, frame)| format!("#{number} {}", debug.frame_line(frame)))
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
             "debug_variables" => {
                 let thread = debug.stopped_thread()?;
-                let frame = arguments["frame"].as_u64().unwrap_or(0) as usize;
+                let frame = debug.frame(thread, &arguments["frame"])?;
                 let shown = match arguments["expand"].as_str() {
                     Some(path) => {
-                        let value = debug.session.evaluate(thread, frame, path)?;
+                        let value = debug.session.evaluate(thread, &frame, path)?;
                         let object = value.children.ok_or_else(|| {
                             format!("`{path}` = {} opens into nothing", value.value)
                         })?;
                         debug.session.children(object)?
                     }
-                    None => debug.session.variables(thread, frame)?,
+                    None => debug.session.variables(thread, &frame)?,
                 };
                 if shown.is_empty() {
                     return Ok("No variables (compiled without debug information?)".to_owned());
@@ -237,11 +254,11 @@ impl DebugTools {
             }
             "debug_evaluate" => {
                 let thread = debug.stopped_thread()?;
-                let frame = arguments["frame"].as_u64().unwrap_or(0) as usize;
+                let frame = debug.frame(thread, &arguments["frame"])?;
                 let expression = arguments["expression"]
                     .as_str()
                     .ok_or("`expression` is required")?;
-                let value = debug.session.evaluate(thread, frame, expression)?;
+                let value = debug.session.evaluate(thread, &frame, expression)?;
                 Ok(variable_line(&value))
             }
             "debug_output" => {
@@ -301,7 +318,8 @@ impl DebugTools {
             let line = line_of(&breakpoint["line"]);
             match (path, line) {
                 (Some(path), Ok(line)) => {
-                    if let Err(error) = debug.session.set_breakpoint(&path, line) {
+                    let options = options_of(breakpoint);
+                    if let Err(error) = debug.session.set_breakpoint_with(&path, line, options) {
                         problems.push(error);
                     }
                 }
@@ -329,6 +347,17 @@ impl DebugTools {
 }
 
 impl DebugSession {
+    /// The frame numbered `number` in the stack (`debug_stack`'s
+    /// numbers), the innermost by default.
+    fn frame(&mut self, thread: ThreadId, number: &Value) -> Result<debugger::Frame, String> {
+        let number = number.as_u64().unwrap_or(0) as usize;
+        let mut frames = self.session.stack(thread)?;
+        if number >= frames.len() {
+            return Err(format!("no frame {number}: the stack has {}", frames.len()));
+        }
+        Ok(frames.swap_remove(number))
+    }
+
     fn stopped_thread(&self) -> Result<ThreadId, String> {
         if self.running {
             return Err(
@@ -393,10 +422,13 @@ impl DebugSession {
         // The project's frames: the libraries' (JUnit, reflection) only
         // counted.
         text.push_str("\n\nStack:");
-        let in_project: Vec<&debugger::Frame> =
-            frames.iter().filter(|frame| frame.path.is_some()).collect();
-        for frame in in_project.iter().take(FRAMES_SHOWN) {
-            text.push_str(&format!("\n  #{} {}", frame.index, self.frame_line(frame)));
+        let in_project: Vec<(usize, &debugger::Frame)> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.path.is_some())
+            .collect();
+        for (number, frame) in in_project.iter().take(FRAMES_SHOWN) {
+            text.push_str(&format!("\n  #{number} {}", self.frame_line(frame)));
         }
         let hidden = frames.len() - in_project.len().min(FRAMES_SHOWN);
         if hidden > 0 {
@@ -404,7 +436,10 @@ impl DebugSession {
                 "\n  … {hidden} more frames, in libraries mostly (`debug_stack`)"
             ));
         }
-        let variables = self.session.variables(thread, 0).unwrap_or_default();
+        let variables = match frames.first() {
+            Some(top) => self.session.variables(thread, top).unwrap_or_default(),
+            None => Vec::new(),
+        };
         if !variables.is_empty() {
             text.push_str("\n\nVariables:");
             for variable in &variables {
@@ -424,7 +459,12 @@ impl DebugSession {
             (None, Some(line)) => format!("{}:{line}", frame.source_name.as_deref().unwrap_or("?")),
             _ => "(no line)".to_owned(),
         };
-        format!("{place} {} ({})", frame.method, frame.class_name)
+        let kind = match frame.kind {
+            debugger::FrameKind::Code => "",
+            debugger::FrameKind::Inlined { .. } => " [inlined]",
+            debugger::FrameKind::Async { .. } => " [suspended]",
+        };
+        format!("{place} {} ({}){kind}", frame.method, frame.class_name)
     }
 
     /// The frame's line of source, numbered.
@@ -444,8 +484,26 @@ impl DebugSession {
         breakpoints
             .iter()
             .map(|breakpoint| {
+                let options = &breakpoint.options;
+                let checks: String = [
+                    options
+                        .condition
+                        .as_ref()
+                        .map(|condition| format!(" if {condition}")),
+                    options
+                        .hit_condition
+                        .as_ref()
+                        .map(|hits| format!(" on hits {hits}")),
+                    options
+                        .log_message
+                        .as_ref()
+                        .map(|message| format!(" logs \"{message}\"")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 format!(
-                    "{}: {}:{}{}",
+                    "{}: {}:{}{checks}{}",
                     breakpoint.id,
                     breakpoint
                         .path
@@ -462,6 +520,16 @@ impl DebugSession {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// A breakpoint's `condition`, `hitCondition` and `logMessage`.
+fn options_of(arguments: &Value) -> debugger::BreakpointOptions {
+    let text = |key: &str| arguments[key].as_str().map(str::to_owned);
+    debugger::BreakpointOptions {
+        condition: text("condition"),
+        hit_condition: text("hitCondition"),
+        log_message: text("logMessage"),
     }
 }
 
@@ -499,5 +567,49 @@ fn absolute(path: &str, working_directory: &Path) -> PathBuf {
         path
     } else {
         working_directory.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_breakpoints_checks_come_from_its_arguments() {
+        let options = options_of(&json!({
+            "file": "Order.kt",
+            "line": 3,
+            "condition": "count > 3",
+            "hitCondition": "% 2",
+            "logMessage": "count {count}",
+        }));
+        assert_eq!(
+            options,
+            debugger::BreakpointOptions {
+                condition: Some("count > 3".to_owned()),
+                hit_condition: Some("% 2".to_owned()),
+                log_message: Some("count {count}".to_owned()),
+            }
+        );
+        assert_eq!(
+            options_of(&json!({ "file": "Order.kt", "line": 3 })),
+            debugger::BreakpointOptions::default()
+        );
+    }
+
+    #[test]
+    fn every_breakpoint_location_takes_the_checks() {
+        let tools = DebugTools::tools();
+        for name in ["debug_start", "debug_breakpoint"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let schema = if name == "debug_start" {
+                &tool["inputSchema"]["properties"]["breakpoints"]["items"]["properties"]
+            } else {
+                &tool["inputSchema"]["properties"]
+            };
+            for key in ["condition", "hitCondition", "logMessage"] {
+                assert!(schema.get(key).is_some(), "{name} lacks {key}");
+            }
+        }
     }
 }

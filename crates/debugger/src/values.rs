@@ -25,6 +25,18 @@ pub struct Shown {
     pub children: Option<ObjectId>,
 }
 
+/// The JDK's boxes of primitives: each holds its value in `value`.
+pub const BOXED: &[&str] = &[
+    "Ljava/lang/Integer;",
+    "Ljava/lang/Long;",
+    "Ljava/lang/Short;",
+    "Ljava/lang/Byte;",
+    "Ljava/lang/Double;",
+    "Ljava/lang/Float;",
+    "Ljava/lang/Boolean;",
+    "Ljava/lang/Character;",
+];
+
 /// Reads values, remembering each class's fields and names.
 #[derive(Default)]
 pub struct Inspector {
@@ -248,17 +260,7 @@ impl Inspector {
         signature: &str,
         type_name: &str,
     ) -> Result<String, Error> {
-        let boxed = matches!(
-            signature,
-            "Ljava/lang/Integer;"
-                | "Ljava/lang/Long;"
-                | "Ljava/lang/Short;"
-                | "Ljava/lang/Byte;"
-                | "Ljava/lang/Double;"
-                | "Ljava/lang/Float;"
-                | "Ljava/lang/Boolean;"
-                | "Ljava/lang/Character;"
-        );
+        let boxed = BOXED.contains(&signature);
         if boxed && let Some(value) = self.field_value(connection, object, "value")? {
             return Ok(self.brief(connection, value));
         }
