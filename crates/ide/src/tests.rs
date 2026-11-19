@@ -3656,3 +3656,27 @@ fun Result.isResolved(): Boolean = this is Result.Resolved
         expect![[r#""#]],
     );
 }
+
+#[test]
+fn a_file_opened_before_the_workspace_loads_is_analysed_without_a_model() {
+    let text = "package app\nclass Shop(val name: String) {\n    fun label() = name.length\n}\nfun use(shop: Shop) = shop.name.length\n";
+    let mut vfs = vfs::Vfs::default();
+    let file = vfs.set_contents(std::path::Path::new("/app/Shop.kt"), Some(text.into()));
+    let mut host = crate::AnalysisHost::default();
+    host.apply_change(vec![hir::FileChange {
+        file,
+        text: Some(text.into()),
+        language: hir::Language::Kotlin,
+        source_set: None,
+        directory_package: None,
+    }]);
+    let analysis = host.analysis();
+    // Every check, not only syntax: whatever asks before the model loads
+    // sees a workspace without source sets.
+    let diagnostics = analysis
+        .diagnostics(file, &crate::DiagnosticsConfig::default())
+        .unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    analysis.semantic_tokens(file).unwrap();
+    analysis.document_symbols(file).unwrap();
+}

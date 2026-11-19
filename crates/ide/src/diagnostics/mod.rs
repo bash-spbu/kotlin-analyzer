@@ -260,6 +260,11 @@ pub struct DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
+    /// Whether any check needs more than the syntax tree.
+    pub fn runs_more_than_syntax(&self) -> bool {
+        self.only.is_empty() || self.only.iter().any(|check| *check != Check::Syntax)
+    }
+
     pub fn runs(&self, check: Check) -> bool {
         if !self.only.is_empty() {
             return self.only.contains(&check);
@@ -313,7 +318,10 @@ pub(crate) fn diagnostics(
         }));
     }
     // A file that doesn't parse cleanly would make every other check guess.
-    let semantic = source.language(db) == Language::Kotlin && parse.errors().is_empty();
+    // Before the workspace loads, only syntax is asked for.
+    let semantic = source.language(db) == Language::Kotlin
+        && parse.errors().is_empty()
+        && config.runs_more_than_syntax();
     if semantic {
         found.extend(imports::diagnostics(db, source, &parse, config));
         found.extend(facts::diagnostics(db, source, config));

@@ -87,6 +87,8 @@ pub fn parse(db: &dyn SourceDatabase, file: SourceFile) -> Arc<Parse> {
 #[derive(Clone)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
+    /// Set when the database is created — empty until the project model is
+    /// loaded: what's asked before then sees no source sets.
     workspace: Option<Workspace>,
     files: Arc<FxHashMap<FileId, SourceFile>>,
     classpaths: Option<Classpaths>,
@@ -115,6 +117,11 @@ impl Default for RootDatabase {
             libraries: Arc::default(),
             parse_cache: Arc::default(),
         };
+        database.workspace = Some(Workspace::new(
+            &database,
+            Arc::new(ProjectModel::empty(std::path::PathBuf::new())),
+            Arc::new([]),
+        ));
         database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None));
         database
     }
@@ -127,7 +134,7 @@ impl salsa::Database for RootDatabase {}
 impl SourceDatabase for RootDatabase {
     fn workspace(&self) -> Workspace {
         self.workspace
-            .expect("a workspace is set before the database is queried")
+            .expect("a workspace is set when the database is created")
     }
 
     fn source_file(&self, file: FileId) -> Option<SourceFile> {

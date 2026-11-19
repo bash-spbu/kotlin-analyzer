@@ -275,10 +275,10 @@ impl Inferrer<'_> {
     /// Whether `file` is in this file's Gradle module (whose source sets
     /// are friends: `main` and `test`), when both are known.
     fn same_module(&self, file: SourceFile) -> Option<bool> {
+        let own = self.file.source_set(self.db)?;
+        let other = file.source_set(self.db)?;
         let model = self.db.workspace().model(self.db);
-        let own = model.source_set(self.file.source_set(self.db)?).module;
-        let other = model.source_set(file.source_set(self.db)?).module;
-        Some(own == other)
+        Some(model.source_set(own).module == model.source_set(other).module)
     }
 
     /// Whether a property is `open`: written so, `abstract`, or an
