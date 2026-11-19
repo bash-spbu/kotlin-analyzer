@@ -155,7 +155,10 @@ impl Scrubbed {
     pub(crate) fn of(message: &str) -> Scrubbed {
         let mut scrubbed = String::new();
         let mut quote: Option<char> = None;
+        let mut previous: Option<char> = None;
         for char in message.chars() {
+            // `can't`: an apostrophe inside a word quotes nothing.
+            let apostrophe = char == '\'' && previous.is_some_and(char::is_alphanumeric);
             match quote {
                 Some(open) if char == open => {
                     scrubbed.push('…');
@@ -163,12 +166,13 @@ impl Scrubbed {
                     quote = None;
                 }
                 Some(_) => {}
-                None if matches!(char, '"' | '\'' | '`') => {
+                None if matches!(char, '"' | '\'' | '`') && !apostrophe => {
                     scrubbed.push(char);
                     quote = Some(char);
                 }
                 None => scrubbed.push(char),
             }
+            previous = Some(char);
         }
         let words: Vec<String> = scrubbed
             .split(' ')
@@ -268,6 +272,15 @@ mod tests {
             "no item `secretName` in \"Payroll.kt\" at /Users/someone/work/Payroll.kt: index 5",
         );
         assert_eq!(scrubbed.0, "no item `…` in \"…\" at <path> index 5");
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_word_quotes_nothing() {
+        let scrubbed = Scrubbed::of("the index can't be 5 for 'secret' here, it isn't known");
+        assert_eq!(
+            scrubbed.0,
+            "the index can't be 5 for '…' here, it isn't known"
+        );
     }
 
     #[test]

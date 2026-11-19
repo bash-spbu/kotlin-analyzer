@@ -387,8 +387,15 @@ pub(crate) fn anonymize(text: &str, language: Language) -> String {
         let replacement = match (language, node.kind()) {
             (_, "line_comment") => Some(String::new()),
             (_, "multiline_comment" | "block_comment") => Some("/* */".to_owned()),
-            (Language::Kotlin, "string_content") | (Language::Java, "string_fragment") => {
+            (Language::Kotlin, "string_content")
+            | (Language::Java, "string_fragment" | "multiline_string_fragment") => {
                 Some(stand_ins.string(original))
+            }
+            // `outer@` and `return@outer`: the label's name, as the name's.
+            (Language::Kotlin, "label") => {
+                let name = original.trim_matches('@');
+                let keep = kept.contains(name);
+                (!keep).then(|| original.replace(name, &stand_ins.name(name)))
             }
             (_, "character_literal") => Some("'c'".to_owned()),
             (
@@ -457,6 +464,20 @@ impl StandIns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_and_java_text_blocks_go_too() {
+        let kotlin = "package app\nfun f(xs: List<Int>) = xs.forEach secretLabel@{ if (it > 0) return@secretLabel }\nfun g(xs: List<Int>) = xs.forEach { return@forEach }\n";
+        let anonymized = anonymize(kotlin, Language::Kotlin);
+        assert!(!anonymized.contains("secretLabel"), "{anonymized}");
+        assert!(anonymized.contains("return@forEach"), "{anonymized}");
+        assert_eq!(anonymized.matches("name4@").count(), 1, "{anonymized}");
+        assert_eq!(anonymized.matches("@name4").count(), 1, "{anonymized}");
+        let java =
+            "class A {\n    String s = \"\"\"\n        SecretTextBlock\n        \"\"\";\n}\n";
+        let anonymized = anonymize(java, Language::Java);
+        assert!(!anonymized.contains("SecretTextBlock"), "{anonymized}");
+    }
 
     const PAYROLL: &str = r#"package com.acme.secret
 import com.acme.secret.billing.Invoice

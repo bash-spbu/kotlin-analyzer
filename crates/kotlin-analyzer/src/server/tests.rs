@@ -386,6 +386,7 @@ fn a_sessions_log_holds_no_code_names_or_paths() {
         "\"method\":\"textDocument/hover\"",
         "\"method\":\"workspace/symbol\"",
         "\"event\":\"diagnostics\"",
+        "\"waited\":",
     ] {
         assert!(log.contains(expected), "no {expected} in the log:\n{log}");
     }
@@ -420,6 +421,29 @@ fn a_panic_in_a_request_is_answered_and_logged_and_the_server_goes_on() {
     assert!(
         panic.contains("crates/kotlin-analyzer/src/server/handlers.rs"),
         "{panic}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_panic_while_loading_ends_the_load_and_the_server_goes_on() {
+    crate::log::capture();
+    let root = workspace("loader-panic");
+    std::fs::write(root.join("panic-while-loading"), "").unwrap();
+    let mut client = Client::start(&root);
+    let ended = client.wait_for(|notification| {
+        notification.method == "$/progress"
+            && notification.params["token"] == "kotlin-analyzer/loading/1"
+            && notification.params["value"]["kind"] == "end"
+    });
+    let message = ended.params["value"]["message"].as_str().unwrap_or("");
+    assert!(message.starts_with("loading failed"), "{message}");
+    assert!(client.workspace_symbols("Anything").is_empty());
+    client.shut_down();
+    let log = crate::log::captured().join("\n");
+    assert!(
+        log.contains("\"event\":\"load-failed\"") && log.contains("\"reason\":\"panicked\""),
+        "{log}"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }

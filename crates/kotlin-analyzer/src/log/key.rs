@@ -12,19 +12,49 @@ pub(crate) fn current() -> (u64, u64) {
     *KEY.get_or_init(|| stored().unwrap_or_else(random))
 }
 
-/// The machine's key, made and stored on first use.
+/// The machine's key, made and stored on first use — readable by its user
+/// only. Tests have a fixed one and leave the user's cache alone.
 fn stored() -> Option<(u64, u64)> {
+    if cfg!(test) {
+        return Some((1, 2));
+    }
     let path = crate::server::cache_directory()?.join("log-key");
-    if let Some(key) = std::fs::read_to_string(&path)
+    let existing = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|text| parse(&text))
-    {
+        .and_then(|text| parse(&text));
+    if let Some(key) = existing {
+        make_private(&path);
         return Some(key);
     }
     let key = random();
     std::fs::create_dir_all(path.parent()?).ok()?;
-    std::fs::write(&path, format!("{:016x} {:016x}\n", key.0, key.1)).ok()?;
+    write_private(&path, &format!("{:016x} {:016x}\n", key.0, key.1))?;
     Some(key)
+}
+
+/// Writes a file only its owner may read.
+fn write_private(path: &std::path::Path, text: &str) -> Option<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path).ok()?;
+    file.write_all(text.as_bytes()).ok()?;
+    make_private(path);
+    Some(())
+}
+
+/// A key stored before it was kept private (or under a wider umask) is
+/// made private.
+fn make_private(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn parse(text: &str) -> Option<(u64, u64)> {
@@ -43,4 +73,19 @@ fn random() -> (u64, u64) {
         hasher.finish()
     };
     (word(1), word(2))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn the_key_file_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("kotlin-analyzer-key-{}", std::process::id()));
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private(&path, "1 2\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_file(&path).unwrap();
+    }
 }

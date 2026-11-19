@@ -93,6 +93,8 @@ pub(super) enum ExportFailureKind {
     BuildFailed,
     /// Gradle succeeded without writing the model.
     NoModel,
+    /// The export panicked (the log has where).
+    Panicked,
 }
 
 impl ExportFailureKind {
@@ -102,6 +104,17 @@ impl ExportFailureKind {
             ExportFailureKind::CannotRun => "cannot-run-gradle",
             ExportFailureKind::BuildFailed => "build-failed",
             ExportFailureKind::NoModel => "no-model-written",
+            ExportFailureKind::Panicked => "panicked",
+        }
+    }
+}
+
+impl ExportFailure {
+    pub(super) fn panicked() -> ExportFailure {
+        ExportFailure {
+            kind: ExportFailureKind::Panicked,
+            exit_code: None,
+            detail: "kotlin-analyzer failed while exporting; its log says where".to_owned(),
         }
     }
 }

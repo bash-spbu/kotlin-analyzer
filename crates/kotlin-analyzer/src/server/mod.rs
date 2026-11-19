@@ -164,7 +164,11 @@ fn log_session_start(
         .texts("disabled-checks", disabled)
         .emit();
     if let Some(location) = crate::log::file_location() {
-        eprintln!("kotlin-analyzer: this session's log is {location}");
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "kotlin-analyzer: this session's log is {location}"
+        );
     }
 }
 
@@ -235,7 +239,7 @@ enum Task {
     /// A load finished; `generation` tells it from a later one.
     Loaded {
         generation: u64,
-        loaded: Result<LoadedFiles, project_model::LoadError>,
+        loaded: Result<LoadedFiles, LoadFailure>,
     },
     /// The background Gradle export finished, after `took`.
     ModelExported {
@@ -422,9 +426,22 @@ impl GlobalState {
         std::thread::Builder::new()
             .name("kotlin-analyzer-loader".to_owned())
             .spawn(move || {
+                // A panic (logged by the hook) still ends the load: the
+                // editor isn't left waiting for it.
                 let loaded = crate::log::within(Context::Loading { generation }, || {
-                    load::read_workspace(&root, project_json.as_deref())
+                    std::panic::catch_unwind(|| {
+                        #[cfg(test)]
+                        if root.join("panic-while-loading").exists() {
+                            panic!("a test panic while loading");
+                        }
+                        load::read_workspace(&root, project_json.as_deref())
+                    })
                 });
+                let loaded = match loaded {
+                    Ok(Ok(loaded)) => Ok(loaded),
+                    Ok(Err(error)) => Err(LoadFailure::Model(error)),
+                    Err(_) => Err(LoadFailure::Panicked),
+                };
                 let _ = sender.send(Task::Loaded { generation, loaded });
             })
             .expect("a thread can be spawned");
@@ -497,7 +514,10 @@ impl GlobalState {
             .spawn(move || {
                 let started = Instant::now();
                 let export = crate::log::within(Context::GradleExport, || {
-                    gradle_export::export_if_stale(&root, &cached)
+                    std::panic::catch_unwind(|| gradle_export::export_if_stale(&root, &cached))
+                })
+                .unwrap_or_else(|_| {
+                    gradle_export::Export::Failed(gradle_export::ExportFailure::panicked())
                 });
                 let took = started.elapsed();
                 let _ = sender.send(Task::ModelExported { export, took });
@@ -595,14 +615,14 @@ impl GlobalState {
         }
     }
 
-    fn on_loaded(&mut self, loaded: Result<LoadedFiles, project_model::LoadError>) {
+    fn on_loaded(&mut self, loaded: Result<LoadedFiles, LoadFailure>) {
         let token = loading_token(self.load_generation);
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 Event::warn("load-failed")
                     .count("generation", self.load_generation)
-                    .text("reason", load_failure_kind(&error))
+                    .text("reason", error.kind())
                     .emit();
                 self.loaded = true;
                 self.progress_on(
@@ -776,6 +796,7 @@ impl GlobalState {
             diagnostics_config: self.diagnostics_config.clone(),
         };
         let sender = self.task_sender.clone();
+        let received = Instant::now();
         self.pool.spawn(move || {
             let started = Instant::now();
             let request_id = request.id.clone();
@@ -792,7 +813,11 @@ impl GlobalState {
                     "kotlin-analyzer failed on this request; its log says where".to_owned(),
                 )
             });
-            log_response(&response, id, method, file, started.elapsed());
+            let timing = Timing {
+                waited: started - received,
+                took: started.elapsed(),
+            };
+            log_response(&response, id, method, file, timing);
             let _ = sender.send(Task::Response(response));
         });
     }
@@ -989,6 +1014,7 @@ impl GlobalState {
                     ..ide::DiagnosticsConfig::default()
                 })
             };
+            let received = Instant::now();
             self.pool.spawn(move || {
                 let started = Instant::now();
                 let context = Context::Diagnostics {
@@ -1000,13 +1026,16 @@ impl GlobalState {
                         handlers::diagnostics(&analysis, file, &config)
                     }))
                 });
-                let took = started.elapsed();
+                let timing = Timing {
+                    waited: started - received,
+                    took: started.elapsed(),
+                };
                 let outcome = match &computed {
                     Ok(Ok(_)) => "computed",
                     Ok(Err(_)) => "cancelled",
                     Err(_) => "panicked",
                 };
-                let slow = took > SLOW_DIAGNOSTICS;
+                let slow = timing.total() > SLOW_DIAGNOSTICS;
                 let event = if slow {
                     Event::warn("slow-diagnostics")
                 } else {
@@ -1016,15 +1045,14 @@ impl GlobalState {
                     Ok(Ok(diagnostics)) => diagnostics.len(),
                     _ => 0,
                 };
-                event
+                let event = event
                     .file("file", file_ref)
                     .number("version", i64::from(version))
                     .count("generation", generation)
                     .flag("syntax-only", syntax_only)
                     .text("outcome", outcome)
-                    .count("found", count)
-                    .duration("took", took)
-                    .emit();
+                    .count("found", count);
+                timing.describe(event).emit();
                 let Ok(Ok(diagnostics)) = computed else {
                     return;
                 };
@@ -1139,9 +1167,9 @@ fn log_response(
     id: i64,
     method: &'static str,
     file: Option<FileRef>,
-    took: Duration,
+    timing: Timing,
 ) {
-    let slow = took > SLOW_REQUEST;
+    let slow = timing.total() > SLOW_REQUEST;
     let mut event = if slow {
         Event::warn("slow-request")
     } else {
@@ -1160,7 +1188,27 @@ fn log_response(
             .number("code", i64::from(error.code)),
         Ok(result) => event.text("outcome", "ok").count("items", items_in(result)),
     };
-    event.duration("took", took).emit();
+    timing.describe(event).emit();
+}
+
+/// How long work waited for a free worker, and how long it then took: the
+/// user waits for both.
+#[derive(Clone, Copy)]
+struct Timing {
+    waited: Duration,
+    took: Duration,
+}
+
+impl Timing {
+    fn total(self) -> Duration {
+        self.waited + self.took
+    }
+
+    fn describe(self, event: Event) -> Event {
+        event
+            .duration("waited", self.waited)
+            .duration("took", self.took)
+    }
 }
 
 /// How many things an answer holds: an array's elements, a list's items,
@@ -1256,11 +1304,36 @@ impl LoadSummary {
     }
 }
 
-/// Why the model couldn't be read, for the log.
-fn load_failure_kind(error: &project_model::LoadError) -> &'static str {
-    match error {
-        project_model::LoadError::Unreadable(_) => "model-unreadable",
-        project_model::LoadError::Malformed(_) => "model-malformed",
+/// Why a workspace load ended without a workspace.
+enum LoadFailure {
+    Model(project_model::LoadError),
+    /// The loader panicked (the log has where).
+    Panicked,
+}
+
+impl LoadFailure {
+    /// For the log.
+    fn kind(&self) -> &'static str {
+        match self {
+            LoadFailure::Model(project_model::LoadError::Unreadable(_)) => "model-unreadable",
+            LoadFailure::Model(project_model::LoadError::Malformed(_)) => "model-malformed",
+            LoadFailure::Panicked => "panicked",
+        }
+    }
+}
+
+/// For the user.
+impl std::fmt::Display for LoadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadFailure::Model(error) => write!(formatter, "{error}"),
+            LoadFailure::Panicked => {
+                write!(
+                    formatter,
+                    "kotlin-analyzer failed while loading; its log says where"
+                )
+            }
+        }
     }
 }
 

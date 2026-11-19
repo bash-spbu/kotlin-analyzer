@@ -17,7 +17,8 @@ path-like cut out).
 
 A file is `file#<id>:<hash>` — the server's id for it in the session and a
 SipHash of its path relative to the workspace, keyed with a random key made
-once per machine (`<cache>/kotlin-analyzer/log-key`) and never logged. The
+once per machine (`<cache>/kotlin-analyzer/log-key`, readable by its owner
+only) and never logged. The
 workspace is a hash of its root. `kotlin-analyzer log-whois <root> <hash>…`
 tells the user, on their machine, which file a hash stands for.
 
@@ -30,15 +31,16 @@ tells the user, on their machine, which file a hash stands for.
   Gradle export (the tool, how it ended, how long it took; on failure its
   kind and Gradle's exit code), settings changes, a reload, the shutdown and
   the session's end (how it ended, requests received, panics).
-- **warn**: a request slower than 1 s, diagnostics slower than 2 s, a load or
-  an export that failed.
+- **warn**: a request slower than 1 s, diagnostics slower than 2 s — counting
+  the time they waited for a free worker (`waited`) and the time they took
+  (`took`), logged apart —, a load or an export that failed.
 - **error**: a panic — its scrubbed message, where in the server's source it
   happened, what the thread was doing (the request: its id, method and file;
   the diagnostics of a file; a load; the export), and the stack's frames in
   the server's own code.
 - **debug**: each request (id, method, file, line and column) and its answer
   (how it ended — ok, cancelled, error and its code —, how many items, how
-  long it took), each document opened, changed or closed (its size in bytes
+  long it waited and took), each document opened, changed or closed (its size in bytes
   and lines, its version), each diagnostics run (the file, its version, how
   many found, how long), files changed on disk (how many), stale results
   dropped.
@@ -49,7 +51,9 @@ led to it are in the log at any level.
 
 A panic while answering a request is answered with an error (`InternalError`)
 and the server goes on; one while checking a file leaves its diagnostics as
-they were.
+they were; one while loading or exporting ends the load (or export) as
+failed. Writing the log never panics (a closed standard error is ignored),
+and a panic while an event is being written isn't logged again.
 
 ## Where
 
@@ -57,8 +61,9 @@ they were.
   recorder's events only before an error.
 - `<cache>/kotlin-analyzer/logs/<workspace hash>/<start>-<pid>.jsonl`, one
   JSON object per event (`t` seconds since the start, `seq`, `level`,
-  `event`, `thread`, the fields); at most 5 MB per session, the last 5
-  sessions kept. Its location is printed to standard error at the start.
+  `event`, `thread`, the fields); everything up to 5 MB per session, past
+  that only warnings, errors and the recent events before them (up to 6 MB);
+  the last 5 sessions kept. Its location is printed to standard error at the start.
 
 The level: `log` in `initializationOptions` or in a configuration change
 (`"info"`, `"debug"`), else `KOTLIN_ANALYZER_LOG`.

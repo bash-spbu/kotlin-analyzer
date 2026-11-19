@@ -84,6 +84,8 @@ struct Logger {
     /// Whether events leave the process (standard error, the log file):
     /// only the server run on stdio says so — not the tests.
     output: AtomicBool,
+    /// Whether tests capture every event (see `capture`).
+    capturing: AtomicBool,
     recorder: Mutex<VecDeque<event::Record>>,
     sinks: Mutex<sink::Sinks>,
 }
@@ -96,6 +98,7 @@ fn logger() -> &'static Logger {
         sequence: AtomicU64::new(0),
         panics: AtomicU64::new(0),
         output: AtomicBool::new(false),
+        capturing: AtomicBool::new(false),
         recorder: Mutex::new(VecDeque::with_capacity(RECORDER_CAPACITY)),
         sinks: Mutex::new(sink::Sinks::default()),
     })
@@ -137,10 +140,22 @@ pub(crate) fn panics_so_far() -> u64 {
     logger().panics.load(Ordering::SeqCst)
 }
 
-/// Records `event`: written now when at the threshold or above, kept in
-/// the flight recorder either way. A warning or an error first writes out
-/// what the recorder has that wasn't written.
+/// Records `event`: written now when at the threshold or above, else
+/// kept in the flight recorder. A warning or an error first writes out
+/// what the recorder kept.
 pub(crate) fn emit(event: Event) {
+    // A panic while an event is being written comes back here through the
+    // panic hook, on a thread that may hold the sinks: it isn't logged.
+    if EMITTING.with(|emitting| emitting.replace(true)) {
+        return;
+    }
+    struct Emitted;
+    impl Drop for Emitted {
+        fn drop(&mut self) {
+            EMITTING.with(|emitting| emitting.set(false));
+        }
+    }
+    let _emitted = Emitted;
     let logger = logger();
     let threshold = Level::from_number(logger.threshold.load(Ordering::SeqCst));
     let record = event::Record {
@@ -153,30 +168,30 @@ pub(crate) fn emit(event: Event) {
         event,
     };
     let level = record.event.level;
-    if level == Level::Error {
-        logger
-            .panics
-            .fetch_add(u64::from(record.event.name == "panic"), Ordering::SeqCst);
+    if level == Level::Error && record.event.name == "panic" {
+        logger.panics.fetch_add(1, Ordering::SeqCst);
     }
+    let written = level >= threshold;
     let recent: Vec<event::Record> = if level >= Level::Warn {
-        let mut recorder = lock(&logger.recorder);
-        recorder
-            .drain(..)
-            .filter(|earlier| earlier.event.level < threshold)
-            .collect()
+        lock(&logger.recorder).drain(..).collect()
     } else {
         Vec::new()
     };
-    let mut sinks = lock(&logger.sinks);
-    sinks.capture(&record);
-    if !recent.is_empty() {
-        sinks.write_recent(&recent, level);
+    let capturing = logger.capturing.load(Ordering::SeqCst);
+    // Most events are only recorded: the sinks aren't touched for them.
+    if written || capturing || !recent.is_empty() {
+        let mut sinks = lock(&logger.sinks);
+        if capturing {
+            sinks.capture(&record);
+        }
+        if !recent.is_empty() {
+            sinks.write_recent(&recent, level);
+        }
+        if written {
+            sinks.write(&record);
+        }
     }
-    if level >= threshold {
-        sinks.write(&record);
-    }
-    drop(sinks);
-    if level < Level::Warn {
+    if !written {
         let mut recorder = lock(&logger.recorder);
         if recorder.len() == RECORDER_CAPACITY {
             recorder.pop_front();
@@ -185,11 +200,18 @@ pub(crate) fn emit(event: Event) {
     }
 }
 
+thread_local! {
+    /// Whether this thread is writing an event.
+    static EMITTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Every event from now on, whatever its level, is also kept in memory as
 /// JSON lines (for tests: the most a session could write).
 #[cfg(test)]
 pub(crate) fn capture() {
-    lock(&logger().sinks).memory.get_or_insert_with(Vec::new);
+    let logger = logger();
+    lock(&logger.sinks).memory.get_or_insert_with(Vec::new);
+    logger.capturing.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -201,4 +223,21 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_event_written_while_another_is_being_written_is_dropped_not_deadlocked() {
+        capture();
+        EMITTING.with(|emitting| emitting.set(true));
+        Event::info("written-while-writing").emit();
+        EMITTING.with(|emitting| emitting.set(false));
+        Event::info("written-after").emit();
+        let captured = captured().join("\n");
+        assert!(!captured.contains("written-while-writing"));
+        assert!(captured.contains("written-after"));
+    }
 }

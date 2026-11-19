@@ -8,8 +8,11 @@ use super::Level;
 use super::event::Record;
 use super::fields::Hashed;
 
-/// How large a session's log file may grow.
+/// How large a session's log file grows with everything; past it only
+/// warnings and errors (and the recent events before them) are written, up
+/// to `FILE_HARD_LIMIT`.
 const FILE_LIMIT: u64 = 5 * 1024 * 1024;
+const FILE_HARD_LIMIT: u64 = 6 * 1024 * 1024;
 
 /// How many sessions' log files are kept per workspace.
 const SESSIONS_KEPT: usize = 5;
@@ -38,10 +41,13 @@ impl Sinks {
 
     fn write_one(&mut self, record: &Record, recent: bool, to_stderr: bool) {
         if self.stderr && to_stderr {
-            eprintln!("{}", record.to_human_line(recent));
+            // Not `eprintln!`: it panics when the editor has closed the
+            // pipe, and a log mustn't take the server down.
+            let _ = writeln!(std::io::stderr().lock(), "{}", record.to_human_line(recent));
         }
         if let Some(file) = &mut self.file {
-            file.write_line(&record.to_json_line(recent));
+            let wanted_past_limit = recent || record.event.level >= Level::Warn;
+            file.write_line(&record.to_json_line(recent), wanted_past_limit);
         }
     }
 
@@ -85,13 +91,20 @@ impl FileSink {
         })
     }
 
-    fn write_line(&mut self, line: &str) {
-        if self.full {
-            return;
-        }
-        if self.written + line.len() as u64 > FILE_LIMIT {
-            self.full = true;
-            let _ = writeln!(self.file, "{{\"event\":\"log-full\"}}");
+    /// Writes `line` unless the file is full: past `FILE_LIMIT` only a
+    /// line `wanted_past_limit` (a warning, an error, what led to them).
+    fn write_line(&mut self, line: &str, wanted_past_limit: bool) {
+        let size = self.written + line.len() as u64;
+        let limit = if wanted_past_limit {
+            FILE_HARD_LIMIT
+        } else {
+            FILE_LIMIT
+        };
+        if size > limit {
+            if !self.full {
+                self.full = true;
+                let _ = writeln!(self.file, "{{\"event\":\"log-full\"}}");
+            }
             return;
         }
         if writeln!(self.file, "{line}").is_ok() {
@@ -127,5 +140,28 @@ fn remove_old_sessions(directory: &std::path::Path) {
     let excess = sessions.len().saturating_sub(SESSIONS_KEPT);
     for old in sessions.into_iter().take(excess) {
         let _ = std::fs::remove_file(old);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn past_the_limit_only_warnings_errors_and_what_led_to_them_are_written() {
+        let path =
+            std::env::temp_dir().join(format!("kotlin-analyzer-sink-{}", std::process::id()));
+        let mut sink = FileSink {
+            file: std::fs::File::create(&path).unwrap(),
+            path: path.clone(),
+            written: FILE_LIMIT - 10,
+            full: false,
+        };
+        sink.write_line("{\"event\":\"response\"}", false);
+        sink.write_line("{\"event\":\"panic\"}", true);
+        sink.write_line("{\"event\":\"response\"}", false);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "{\"event\":\"log-full\"}\n{\"event\":\"panic\"}\n");
+        std::fs::remove_file(&path).unwrap();
     }
 }
