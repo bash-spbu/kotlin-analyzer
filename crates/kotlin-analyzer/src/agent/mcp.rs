@@ -68,6 +68,8 @@ pub(crate) trait Answerer {
 
 pub(crate) struct McpServer<A> {
     answerer: A,
+    /// The agent's debug session, if any.
+    debug: super::debug::DebugTools,
     /// Where a query without a file looks: the directory this process
     /// started in.
     working_directory: PathBuf,
@@ -77,6 +79,7 @@ impl<A: Answerer> McpServer<A> {
     pub(crate) fn new(answerer: A, working_directory: PathBuf) -> McpServer<A> {
         McpServer {
             answerer,
+            debug: super::debug::DebugTools::default(),
             working_directory,
         }
     }
@@ -104,7 +107,11 @@ impl<A: Answerer> McpServer<A> {
                 "instructions": INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => {
+                let mut listed = tools().as_array().cloned().unwrap_or_default();
+                listed.extend(super::debug::DebugTools::tools());
+                Ok(json!({ "tools": listed }))
+            }
             "tools/call" => Ok(self.call(params)),
             _ => Err((-32601, format!("unknown method {method}"))),
         };
@@ -118,8 +125,12 @@ impl<A: Answerer> McpServer<A> {
     fn call(&mut self, params: &Value) -> Value {
         let name = params["name"].as_str().unwrap_or_default();
         let arguments = &params["arguments"];
-        let answered = query_of(name, arguments, &self.working_directory)
-            .and_then(|(root, query)| self.answerer.ask(&root, query));
+        let answered = if super::debug::DebugTools::handles(name) {
+            self.debug.call(name, arguments, &self.working_directory)
+        } else {
+            query_of(name, arguments, &self.working_directory)
+                .and_then(|(root, query)| self.answerer.ask(&root, query))
+        };
         let (text, is_error) = match answered {
             Ok(text) => (text, false),
             Err(why) => (why, true),
@@ -493,7 +504,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert_eq!(
-            names,
+            names[..7],
             [
                 "symbols",
                 "definition",
@@ -503,6 +514,10 @@ mod tests {
                 "outline",
                 "diagnostics"
             ]
+        );
+        assert!(
+            names.contains(&"debug_start") && names.contains(&"debug_evaluate"),
+            "{names:?}"
         );
 
         let checkout = "src/main/kotlin/shop/Checkout.kt";

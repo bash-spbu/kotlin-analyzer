@@ -21,6 +21,8 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
     ("syntax", &[]),
     ("project-model", &["intern"]),
     ("classfile", &["intern"]),
+    ("jdwp", &[]),
+    ("debugger", &["jdwp"]),
     ("base-db", &["intern", "vfs", "syntax", "project-model"]),
     (
         "hir-def",
@@ -63,6 +65,8 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
             "hir",
             "ide",
             "classfile",
+            "jdwp",
+            "debugger",
         ],
     ),
 ];

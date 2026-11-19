@@ -156,6 +156,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "debugger"
+version = "1.0.1"
+dependencies = [
+ "jdwp",
+ "walkdir",
+]
+
+[[package]]
 name = "derive_arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -339,16 +347,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
+name = "jdwp"
+version = "1.0.1"
+
+[[package]]
 name = "kotlin-analyzer"
 version = "1.0.1"
 dependencies = [
  "base-db",
  "classfile",
  "crossbeam-channel",
+ "debugger",
  "hir",
  "hir-def",
  "hir-ty",
  "ide",
+ "jdwp",
  "lsp-server",
  "lsp-types",
  "memory-stats",

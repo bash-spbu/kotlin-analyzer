@@ -44,3 +44,30 @@ what changed (`workspace/didChangeWatchedFiles`), so an agent's edits on
 disk are seen. A host gone (its editor closed) is replaced once per query.
 A query waits up to 45 s; past that the tool says the project is still
 loading. On exit the process stops the hosts it started.
+
+## Debugging
+
+The same process debugs JVM code for the agent, its own session (one at a
+time; not an editor's), over JDWP (crates `jdwp` and `debugger`):
+
+| tool | does |
+|---|---|
+| `debug_start` | `test`: runs Gradle's test task for a `--tests` filter in the module holding `file`, with an init script that gives each `Test` (and `JavaExec`) JVM the debug agent through `jvmArgumentProviders` (a build's `jvmArgs = [...]` doesn't replace it), connecting to the debugger's free port and waiting for it (`server=n,suspend=y`; one fork); or `attach`: a JVM listening at `host:port`. Sets `breakpoints`, stops on `exceptions` (`uncaught` by default, `all`, `none`), runs, and waits for the first stop |
+| `debug_breakpoint` | sets (or `remove`s) a breakpoint at a file's line: in the loaded classes of the file — its package, and the source file name each class records — and, through a class-prepare request, in those that load later |
+| `debug_continue` | resumes and waits for the next stop, or keeps waiting while it runs |
+| `debug_step` | `over`, `into` or `out` of a line; the JDK's and Kotlin's classes are stepped over |
+| `debug_pause`, `debug_stack` | suspends the program; the stopped thread's frames |
+| `debug_variables` | a frame's `this` and live locals (`$i$` markers of inlined code left out), or with `expand` the fields or elements a path names |
+| `debug_evaluate` | a path: a variable, `this` or its field, then `.field`, `[index]` (arrays, `ArrayList`), `.length`/`.size` of an array |
+| `debug_output`, `debug_stop` | the program's and Gradle's latest output; ends the program |
+
+A stop is told as text: why (a breakpoint, a step, a caught or uncaught
+exception with its message), where (`path:line` and the line's source), the
+project's frames (libraries' only counted) and the variables. Values show as
+`42`, `"text"`, `int[3] {1, 2, 3}`, `Status.ACTIVE`, `ArrayList(size = 2)`,
+a boxed value as its value; the JDK's value types (`java.math`, `java.time`,
+`UUID`, `URI`) and Kotlin's data classes by their `toString()`, called in the
+thread an event stopped — no other `toString()`, as it runs the program's
+code; anything else as `Type@id`. Every stop suspends the whole JVM. A tool
+waits up to `wait` seconds (50 by default, below a client's own timeout);
+past that it says the program still runs.

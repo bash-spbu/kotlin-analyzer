@@ -4,6 +4,7 @@
 //! process starts when there is none (a git worktree an agent works in,
 //! a project no editor has open).
 
+mod debug;
 mod host;
 pub(crate) mod mcp;
 pub(crate) mod protocol;

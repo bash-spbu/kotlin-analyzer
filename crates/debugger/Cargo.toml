@@ -1,0 +1,16 @@
+[package]
+name = "debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "A JVM debugger for Kotlin and Java over JDWP"
+
+[dependencies]
+jdwp.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

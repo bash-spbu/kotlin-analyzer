@@ -22,6 +22,8 @@ hir-ty = { path = "crates/hir-ty" }
 hir = { path = "crates/hir" }
 ide = { path = "crates/ide" }
 classfile = { path = "crates/classfile" }
+jdwp = { path = "crates/jdwp" }
+debugger = { path = "crates/debugger" }
 
 # External
 salsa = "0.28"
