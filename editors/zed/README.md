@@ -75,7 +75,8 @@ the `PATH`. `python3` must be on the `PATH`; the tasks are run by
 Zed tasks can't reach a file inside an extension, so
 `languages/kotlin/tasks.json` embeds the script, in base64. Each task is
 one `/bin/sh -c` command quoted by `zed_tasks.py`, with no `args`: Zed puts
-arguments into the shell's command line unquoted. `editors/gradle/zed_tasks.py`
+arguments into the shell's command line unquoted. The command isn't shown
+(`show_command: false`); the script prints the Gradle command it runs. `editors/gradle/zed_tasks.py`
 writes that file, and `editors/gradle/test_gradle_task.py` checks it.
 
 ## Settings

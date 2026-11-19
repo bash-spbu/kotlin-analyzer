@@ -72,6 +72,9 @@ def task(label: str, arguments: list[str]) -> dict:
         "use_new_terminal": False,
         "allow_concurrent_runs": False,
         "reveal": "always",
+        # The command is mostly the script in base64; gradle_task.py prints
+        # the Gradle command it runs instead.
+        "show_command": False,
         "shell": {"with_arguments": {"program": "/bin/sh", "args": ["-c"]}},
     }
 

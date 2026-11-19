@@ -5,6 +5,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -20,6 +21,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -35,6 +37,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -50,6 +53,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -65,6 +69,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -83,6 +88,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -101,6 +107,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",
@@ -119,6 +126,7 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always",
+    "show_command": false,
     "shell": {
       "with_arguments": {
         "program": "/bin/sh",

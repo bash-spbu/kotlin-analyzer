@@ -216,6 +216,7 @@ class ZedTasksTest(unittest.TestCase):
         }
         for task in json.loads(zed_tasks.TASKS_FILE.read_text()):
             self.assertNotIn("args", task)
+            self.assertFalse(task["show_command"], "the base64 script isn't shown")
             self.assertEqual(task["shell"], {"with_arguments": {"program": "/bin/sh", "args": ["-c"]}})
             command = zed_expanded(task["command"], tricky)
             self.assertNotIn("\n", command)
