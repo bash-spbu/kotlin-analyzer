@@ -122,10 +122,19 @@ impl CompiledBodies {
         if StubLanguage::of(item) != StubLanguage::Java {
             return;
         }
-        let decompiled = read_class(binary).and_then(|bytes| decompile_class(&bytes));
+        let mut decompiled = read_class(binary).and_then(|bytes| decompile_class(&bytes));
+        if let Some(decompiled) = decompiled.as_mut() {
+            name_enum_cases(decompiled, &self.package_directory(tree), read_class);
+        }
         if let Some(decompiled) = &decompiled {
+            let is_enum = item.kind == ItemKind::Class(ClassKind::Enum);
             for child in item.children.iter() {
-                if let Some(body) = matching_body(tree.item(*child), &decompiled.methods) {
+                let member = tree.item(*child);
+                if is_enum && is_implicit_enum_member(member) {
+                    continue;
+                }
+                if let Some(mut body) = matching_body(member, &decompiled.methods) {
+                    name_ordinal_cases(tree, member, &mut body);
                     self.methods.insert(*child, body);
                 }
             }
@@ -134,13 +143,23 @@ impl CompiledBodies {
                 .iter()
                 .find(|method| method.name == "<clinit>")
                 .and_then(|method| method.body.as_ref().ok())
+                .map(|body| {
+                    let mut body = body.clone();
+                    if is_enum {
+                        // The constants and `$VALUES` are what the enum's
+                        // declaration says.
+                        body.statements
+                            .retain(|statement| !sets_enum_constant(tree, item, statement));
+                    }
+                    body
+                })
                 .filter(|body| {
                     body.statements
                         .iter()
                         .any(|statement| *statement != Statement::Return(None))
                 });
             if let Some(body) = static_initializer {
-                self.static_initializers.insert(class, body.clone());
+                self.static_initializers.insert(class, body);
             }
         }
         for child in item.children.iter() {
@@ -152,6 +171,15 @@ impl CompiledBodies {
         }
     }
 
+    /// `a/b/` of the tree's package.
+    fn package_directory(&self, tree: &ItemTree) -> String {
+        tree.package
+            .segments()
+            .iter()
+            .map(|segment| format!("{segment}/"))
+            .collect()
+    }
+
     /// How many methods have a body: for the header.
     pub fn len(&self) -> usize {
         self.methods.len()
@@ -159,6 +187,352 @@ impl CompiledBodies {
 
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty()
+    }
+}
+
+/// An enum's `values()` and `valueOf(String)`: Java declares them, the
+/// source doesn't.
+fn is_implicit_enum_member(member: &Item) -> bool {
+    let Signature::Function { parameters, .. } = &member.signature else {
+        return false;
+    };
+    let is_static = member.modifiers.contains(Modifiers::STATIC);
+    let name = member.name.as_str();
+    is_static
+        && ((name == "values" && parameters.is_empty())
+            || (name == "valueOf" && parameters.len() == 1))
+}
+
+/// `Mode.FAST = new Mode("FAST", 0);`, `Mode.$VALUES = …;`: what javac
+/// compiles an enum's constants into.
+fn sets_enum_constant(tree: &ItemTree, enum_item: &Item, statement: &Statement) -> bool {
+    let Statement::Assign {
+        target: Expression::Field {
+            owner: Owner::Static(_),
+            name,
+        },
+        ..
+    } = statement
+    else {
+        return false;
+    };
+    let is_entry = enum_item.children.iter().any(|child| {
+        tree.item(*child).kind == ItemKind::EnumEntry && tree.item(*child).name.as_str() == name
+    });
+    is_entry || name == "$VALUES"
+}
+
+/// `switch (value.ordinal()) { case 0: … }` — javac's `switch` on an enum
+/// of the same file — as `switch (value) { case FAST: … }`, when `value`
+/// is a parameter or variable whose type is an enum this file declares:
+/// a case's number is the constant's place in it.
+fn name_ordinal_cases(tree: &ItemTree, method: &Item, body: &mut MethodBody) {
+    let Signature::Function { parameters, .. } = &method.signature else {
+        return;
+    };
+    let mut types: Vec<(String, TypeRef)> = body
+        .parameter_names
+        .iter()
+        .zip(parameters.iter())
+        .filter_map(|(name, parameter)| Some((name.clone(), parameter.type_ref.clone()?)))
+        .collect();
+    declared_types(&body.body.statements, &mut types);
+    rewrite_ordinal_switches(tree, &mut body.body.statements, &types);
+}
+
+/// The variables `statements` declare with a type.
+fn declared_types(statements: &[Statement], types: &mut Vec<(String, TypeRef)>) {
+    for statement in statements {
+        if let Statement::Declare {
+            name,
+            type_ref: Some(type_ref),
+            ..
+        } = statement
+        {
+            types.push((name.clone(), crate::library::type_ref(type_ref)));
+        }
+        for list in statement_lists(statement) {
+            declared_types(list, types);
+        }
+    }
+}
+
+/// The constants of the enum this file declares that `type_ref` names, in
+/// order.
+fn enum_constants(tree: &ItemTree, type_ref: &TypeRef) -> Option<Vec<String>> {
+    let TypeRef::Qualified {
+        package, classes, ..
+    } = type_ref
+    else {
+        return None;
+    };
+    if *package != tree.package {
+        return None;
+    }
+    let mut level: Vec<ItemId> = tree.top_level.to_vec();
+    let mut found = None;
+    for class in classes.iter() {
+        let next = level.iter().copied().find(|item| {
+            tree.item(*item).name == class.name
+                && matches!(tree.item(*item).kind, ItemKind::Class(_))
+        })?;
+        found = Some(next);
+        level = tree.item(next).children.to_vec();
+    }
+    let enum_item = tree.item(found?);
+    if enum_item.kind != ItemKind::Class(ClassKind::Enum) {
+        return None;
+    }
+    Some(
+        enum_item
+            .children
+            .iter()
+            .filter(|child| tree.item(**child).kind == ItemKind::EnumEntry)
+            .map(|child| tree.item(*child).name.to_string())
+            .collect(),
+    )
+}
+
+fn rewrite_ordinal_switches(
+    tree: &ItemTree,
+    statements: &mut [Statement],
+    types: &[(String, TypeRef)],
+) {
+    for statement in statements.iter_mut() {
+        if let Statement::Switch { value, cases } = statement
+            && let Expression::Call {
+                receiver: Receiver::Instance(receiver),
+                name,
+                arguments,
+            } = value
+            && name == "ordinal"
+            && arguments.is_empty()
+            && let Expression::Local(variable) = receiver.as_ref()
+            && let Some((_, type_ref)) = types.iter().find(|(known, _)| known == variable)
+            && let Some(constants) = enum_constants(tree, type_ref)
+        {
+            let named: Option<Vec<Vec<Literal>>> = cases
+                .iter()
+                .map(|case| {
+                    case.values
+                        .iter()
+                        .map(|label| match label {
+                            Literal::Int(number) => usize::try_from(*number)
+                                .ok()
+                                .and_then(|index| constants.get(index))
+                                .map(|constant| Literal::EnumConstant(constant.clone())),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            if let Some(named) = named {
+                for (case, values) in cases.iter_mut().zip(named) {
+                    case.values = values;
+                }
+                *value = Expression::Local(variable.clone());
+            }
+        }
+        for list in statement_lists_mut(statement) {
+            rewrite_ordinal_switches(tree, list, types);
+        }
+    }
+}
+
+/// `switch (Outer$1.$SwitchMap$…[value.ordinal()]) { case 1: … }` — javac's
+/// `switch` on an enum — as `switch (value) { case ACTIVE: … }`: the
+/// numbers are the ones the synthetic class's static initializer gives
+/// each constant.
+fn name_enum_cases(
+    decompiled: &mut classfile::decompile::DecompiledClass,
+    package_directory: &str,
+    read_class: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) {
+    let mut maps: Vec<(ClassName, String)> = Vec::new();
+    for method in &decompiled.methods {
+        if let Ok(body) = &method.body {
+            switch_maps(&body.statements, &mut maps);
+        }
+    }
+    if maps.is_empty() {
+        return;
+    }
+    // (map class, map field, number) → constant.
+    let mut constants: Vec<(ClassName, String, i32, String)> = Vec::new();
+    let mut read: Vec<ClassName> = Vec::new();
+    for (class, _) in &maps {
+        if read.contains(class) {
+            continue;
+        }
+        read.push(class.clone());
+        let binary = format!(
+            "{package_directory}{}",
+            class
+                .classes
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join("$")
+        );
+        let Some(map_class) = read_class(&binary).and_then(|bytes| decompile_class(&bytes)) else {
+            continue;
+        };
+        for method in map_class
+            .methods
+            .iter()
+            .filter(|method| method.name == "<clinit>")
+        {
+            if let Ok(body) = &method.body {
+                map_entries(&body.statements, class, &mut constants);
+            }
+        }
+    }
+    for method in decompiled.methods.iter_mut() {
+        if let Ok(body) = &mut method.body {
+            rewrite_enum_switches(&mut body.statements, &constants);
+        }
+    }
+}
+
+/// The `$SwitchMap$…` arrays switches in `statements` index, with their
+/// class.
+fn switch_maps(statements: &[Statement], maps: &mut Vec<(ClassName, String)>) {
+    for statement in statements {
+        if let Statement::Switch { value, .. } = statement
+            && let Some((class, field, _)) = switch_map_index(value)
+            && !maps
+                .iter()
+                .any(|(known, name)| known == class && name == field)
+        {
+            maps.push((class.clone(), field.to_owned()));
+        }
+        for list in statement_lists(statement) {
+            switch_maps(list, maps);
+        }
+    }
+}
+
+/// `Outer$1.$SwitchMap$…[value.ordinal()]`: the map's class and field,
+/// and the enum value.
+fn switch_map_index(expression: &Expression) -> Option<(&ClassName, &str, &Expression)> {
+    let Expression::ArrayElement { array, index } = expression else {
+        return None;
+    };
+    let Expression::Field {
+        owner: Owner::Static(class),
+        name,
+    } = array.as_ref()
+    else {
+        return None;
+    };
+    let Expression::Call {
+        receiver: Receiver::Instance(value),
+        name: method,
+        arguments,
+    } = index.as_ref()
+    else {
+        return None;
+    };
+    let is_map = name.starts_with("$SwitchMap$") && method == "ordinal" && arguments.is_empty();
+    is_map.then_some((class, name.as_str(), value.as_ref()))
+}
+
+/// `Outer$1.$SwitchMap$…[Status.ACTIVE.ordinal()] = 1;` in a static
+/// initializer (inside javac's `try`s): the numbers of the constants.
+fn map_entries(
+    statements: &[Statement],
+    class: &ClassName,
+    into: &mut Vec<(ClassName, String, i32, String)>,
+) {
+    for statement in statements {
+        if let Statement::Assign {
+            target,
+            value: Expression::Literal(Literal::Int(number)),
+        } = statement
+            && let Some((map_class, field, constant)) = switch_map_index(target)
+            && map_class == class
+            && let Expression::Field { name: constant, .. } = constant
+        {
+            into.push((class.clone(), field.to_owned(), *number, constant.clone()));
+        }
+        for list in statement_lists(statement) {
+            map_entries(list, class, into);
+        }
+    }
+}
+
+fn rewrite_enum_switches(
+    statements: &mut [Statement],
+    constants: &[(ClassName, String, i32, String)],
+) {
+    for statement in statements.iter_mut() {
+        if let Statement::Switch { value, cases } = statement
+            && let Some((class, field, enum_value)) = switch_map_index(value)
+        {
+            let constant_of = |number: i32| {
+                constants
+                    .iter()
+                    .find(|(map_class, map_field, known, _)| {
+                        map_class == class && map_field == field && *known == number
+                    })
+                    .map(|(_, _, _, constant)| constant.clone())
+            };
+            let named: Option<Vec<Vec<Literal>>> = cases
+                .iter()
+                .map(|case| {
+                    case.values
+                        .iter()
+                        .map(|label| match label {
+                            Literal::Int(number) => constant_of(*number).map(Literal::EnumConstant),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            if let Some(named) = named {
+                let enum_value = enum_value.clone();
+                for (case, values) in cases.iter_mut().zip(named) {
+                    case.values = values;
+                }
+                *value = enum_value;
+            }
+        }
+        for list in statement_lists_mut(statement) {
+            rewrite_enum_switches(list, constants);
+        }
+    }
+}
+
+/// A statement's nested statement lists.
+fn statement_lists(statement: &Statement) -> Vec<&[Statement]> {
+    match statement {
+        Statement::If {
+            then, otherwise, ..
+        } => vec![then.as_slice(), otherwise.as_slice()],
+        Statement::Loop { body, .. } | Statement::Block { body, .. } => vec![body.as_slice()],
+        Statement::Switch { cases, .. } => cases.iter().map(|case| case.body.as_slice()).collect(),
+        Statement::Try { body, catches } => {
+            let mut lists = vec![body.as_slice()];
+            lists.extend(catches.iter().map(|clause| clause.body.as_slice()));
+            lists
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn statement_lists_mut(statement: &mut Statement) -> Vec<&mut Vec<Statement>> {
+    match statement {
+        Statement::If {
+            then, otherwise, ..
+        } => vec![then, otherwise],
+        Statement::Loop { body, .. } | Statement::Block { body, .. } => vec![body],
+        Statement::Switch { cases, .. } => cases.iter_mut().map(|case| &mut case.body).collect(),
+        Statement::Try { body, catches } => {
+            let mut lists = vec![body];
+            lists.extend(catches.iter_mut().map(|clause| &mut clause.body));
+            lists
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -371,6 +745,20 @@ impl Renderer<'_> {
         self.text.push('\n');
     }
 
+    /// A class's members, a blank line around each that isn't one field
+    /// after another.
+    fn members(&mut self, members: &[ItemId], depth: usize, write: fn(&mut Self, ItemId, usize)) {
+        let is_field =
+            |member: &ItemId| matches!(self.tree.item(*member).kind, ItemKind::Property { .. });
+        for (position, member) in members.iter().enumerate() {
+            let after_field = position > 0 && is_field(&members[position - 1]) && is_field(member);
+            if position > 0 && !after_field {
+                self.text.push('\n');
+            }
+            write(self, *member, depth);
+        }
+    }
+
     fn indent(&mut self, depth: usize) {
         for _ in 0..depth {
             self.text.push_str("    ");
@@ -508,9 +896,7 @@ impl Renderer<'_> {
                 self.text.push('\n');
             }
         }
-        for member in members {
-            self.kotlin_item(member, depth + 1);
-        }
+        self.members(&members, depth + 1, Self::kotlin_item);
         self.indent(depth);
         self.text.push_str("}\n");
     }
@@ -677,7 +1063,10 @@ impl Renderer<'_> {
     /// Enum entries, members, then the static initializer when decompiled.
     fn java_class_body(&mut self, class: ItemId, kind: ClassKind, depth: usize) {
         let item = self.tree.item(class);
-        let (entries, members) = entries_and_members(self.tree, item);
+        let (entries, mut members) = entries_and_members(self.tree, item);
+        if kind == ClassKind::Enum {
+            members.retain(|member| !is_implicit_enum_member(self.tree.item(*member)));
+        }
         if kind == ClassKind::Enum {
             let names: Vec<String> = entries
                 .iter()
@@ -689,9 +1078,7 @@ impl Renderer<'_> {
                 self.text.push('\n');
             }
         }
-        for member in members {
-            self.java_item(member, depth + 1);
-        }
+        self.members(&members, depth + 1, Self::java_item);
         if let Some(body) = self.bodies.static_initializers.get(&class) {
             self.indent(depth + 1);
             self.text.push_str("static {\n");
@@ -797,10 +1184,16 @@ impl Renderer<'_> {
         self.java_block(statements, depth);
     }
 
+    /// A line at `depth`, its arguments wrapped when it is too long.
     fn line(&mut self, depth: usize, text: &str) {
-        self.indent(depth);
-        self.text.push_str(text);
-        self.text.push('\n');
+        for (offset, piece) in wrapped(text, depth * 4).into_iter().enumerate() {
+            self.indent(depth);
+            if offset > 0 {
+                self.text.push_str(CONTINUATION);
+            }
+            self.text.push_str(&piece);
+            self.text.push('\n');
+        }
     }
 
     fn java_block(&mut self, statements: &[Statement], depth: usize) {
@@ -843,6 +1236,14 @@ impl Renderer<'_> {
                 by => format!("{name} += {by};"),
             },
             Statement::Return(Some(value)) => format!("return {};", self.expression(value)),
+            Statement::Assert { condition, message } => match message {
+                Some(message) => format!(
+                    "assert {} : {};",
+                    self.expression(condition),
+                    self.expression(message)
+                ),
+                None => format!("assert {};", self.expression(condition)),
+            },
             Statement::Return(None) => "return;".to_owned(),
             Statement::Throw(thrown) => format!("throw {};", self.expression(thrown)),
             Statement::SuperConstructor(arguments) => {
@@ -1235,6 +1636,16 @@ impl Renderer<'_> {
             Expression::PostIncrement { name, by } => {
                 format!("{name}{}", if *by > 0 { "++" } else { "--" })
             }
+            Expression::Stringified(value) => format!("String.valueOf({})", self.expression(value)),
+            Expression::FieldIncrement { field, by, prefix } => {
+                let operator = if *by > 0 { "++" } else { "--" };
+                let field = self.expression(field);
+                if *prefix {
+                    format!("{operator}{field}")
+                } else {
+                    format!("{field}{operator}")
+                }
+            }
             Expression::Unboxed { method, value } => {
                 format!("{}.{method}()", self.operand(value, PRIMARY))
             }
@@ -1281,6 +1692,103 @@ fn compound<'value>(
         _ => false,
     };
     (is_simple_target && **left == *target).then_some((*operator, right.as_ref()))
+}
+
+/// How long a line may be before its arguments wrap.
+const LINE_LIMIT: usize = 100;
+
+/// What a wrapped line's continuation lines are indented by, beyond it.
+const CONTINUATION: &str = "        ";
+
+/// `text`, `indent` columns in: as it is when it fits, else broken after
+/// the `(` of its outermost call with more than one argument, each
+/// argument on a line of its own (wrapped again if need be) — the lines
+/// after the first to be indented by [`CONTINUATION`] more. What has no
+/// such call (one long string, a condition), or holds a block lambda,
+/// stays whole.
+fn wrapped(text: &str, indent: usize) -> Vec<String> {
+    let fits = indent + text.chars().count() <= LINE_LIMIT;
+    if fits || text.contains('\n') {
+        return vec![text.to_owned()];
+    }
+    let Some((open, close, commas)) = outermost_call_arguments(text) else {
+        return vec![text.to_owned()];
+    };
+    let mut pieces = vec![text[..=open].to_owned()];
+    let mut start = open + 1;
+    let continuation = indent + CONTINUATION.len();
+    let mut arguments: Vec<String> = Vec::new();
+    for comma in commas.iter().copied().chain([close]) {
+        arguments.push(text[start..comma].trim().to_owned());
+        start = comma + 1;
+    }
+    let tail = &text[close..];
+    let last = arguments.len() - 1;
+    for (position, argument) in arguments.into_iter().enumerate() {
+        let argument = if position == last {
+            format!("{argument}{tail}")
+        } else {
+            format!("{argument},")
+        };
+        for (offset, line) in wrapped(&argument, continuation).into_iter().enumerate() {
+            if offset == 0 {
+                pieces.push(line);
+            } else {
+                pieces.push(format!("{CONTINUATION}{line}"));
+            }
+        }
+    }
+    pieces
+}
+
+/// The longest `(…)` whose inside has a comma at its own level, if it
+/// holds a good part of the line: where it opens and closes, and those
+/// commas. Strings and chars are skipped.
+fn outermost_call_arguments(text: &str) -> Option<(usize, usize, Vec<usize>)> {
+    let bytes = text.as_bytes();
+    // Each `(`: where it opens, its depth, the commas at its level.
+    let mut open: Vec<(usize, Vec<usize>)> = Vec::new();
+    // The longest call so far: its span, where it opens and closes, its
+    // commas.
+    let mut best: Option<(usize, usize, usize, Vec<usize>)> = None;
+    let mut position = 0;
+    while position < bytes.len() {
+        match bytes[position] {
+            quote @ (b'"' | b'\'') => {
+                position += 1;
+                while position < bytes.len() && bytes[position] != quote {
+                    position += if bytes[position] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' | b'[' | b'{' => open.push((position, Vec::new())),
+            b')' | b']' | b'}' => {
+                // A closing bracket of what came before (a wrapped
+                // argument's tail): not this text's.
+                let Some((start, commas)) = open.pop() else {
+                    position += 1;
+                    continue;
+                };
+                let is_call = bytes[position] == b')' && !commas.is_empty();
+                let span = position - start;
+                let longer = best
+                    .as_ref()
+                    .is_none_or(|(best_span, ..)| span > *best_span);
+                if is_call && longer {
+                    best = Some((span, start, position, commas));
+                }
+            }
+            b',' => {
+                if let Some((_, commas)) = open.last_mut() {
+                    commas.push(position);
+                }
+            }
+            _ => {}
+        }
+        position += 1;
+    }
+    // A call holding little of the line isn't what makes it long.
+    let (span, start, end, commas) = best?;
+    (span * 10 >= bytes.len() * 3).then_some((start, end, commas))
 }
 
 /// `label1` for a statement's label.
@@ -1391,6 +1899,7 @@ fn java_literal(literal: &Literal) -> String {
         }
         Literal::Double(value) => format!("{value:?}"),
         Literal::Char(unit) => format!("'{}'", escaped_units(&[*unit], '\'')),
+        Literal::EnumConstant(name) => name.clone(),
         Literal::String(text) => {
             let units: Vec<u16> = text.encode_utf16().collect();
             format!("\"{}\"", escaped_units(&units, '"'))
@@ -1668,6 +2177,12 @@ impl Imports {
                 Statement::Expression(expression)
                 | Statement::Return(Some(expression))
                 | Statement::Throw(expression) => self.collect_expression(expression),
+                Statement::Assert { condition, message } => {
+                    self.collect_expression(condition);
+                    if let Some(message) = message {
+                        self.collect_expression(message);
+                    }
+                }
                 Statement::Declare {
                     type_ref, value, ..
                 } => {
@@ -1831,6 +2346,9 @@ impl Imports {
                     .for_each(|value| self.collect_expression(value));
             }
             Expression::PostIncrement { .. } => {}
+            Expression::FieldIncrement { field, .. } | Expression::Stringified(field) => {
+                self.collect_expression(field)
+            }
             Expression::Unboxed { value, .. } => self.collect_expression(value),
             Expression::Lambda { body, .. } => match body {
                 LambdaBody::Expression(value) => self.collect_expression(value),
@@ -2003,5 +2521,55 @@ impl Imports {
                 },
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_line_wraps_at_its_outermost_call_with_arguments() {
+        let text = "Reporter.warn(String.format(\"Detected logger name mismatch. Given name: \\\"%s\\\"; computed, name: \\\"%s\\\".\", logger.getName(), callingClass.getName()));";
+        assert_eq!(
+            wrapped(text, 16),
+            [
+                "Reporter.warn(String.format(",
+                "\"Detected logger name mismatch. Given name: \\\"%s\\\"; computed, name: \\\"%s\\\".\",",
+                "logger.getName(),",
+                "callingClass.getName()));",
+            ],
+            "the commas inside the string don't split it"
+        );
+        let short = "return this.name;";
+        assert_eq!(wrapped(short, 8), [short]);
+        // Arguments still too long wrap again, further in.
+        let nested = format!(
+            "outer(first, inner({}, {}))",
+            "a".repeat(60),
+            "b".repeat(60)
+        );
+        assert_eq!(
+            wrapped(&nested, 0),
+            [
+                "outer(".to_owned(),
+                "first,".to_owned(),
+                "inner(".to_owned(),
+                format!("{CONTINUATION}{},", "a".repeat(60)),
+                format!("{CONTINUATION}{}))", "b".repeat(60)),
+            ]
+        );
+        let lambda = format!("call(x -> {{\n{}\n}}, y);", "z".repeat(120));
+        assert_eq!(
+            wrapped(&lambda, 0),
+            std::slice::from_ref(&lambda),
+            "a block lambda stays whole"
+        );
+        let condition = format!("if ({}) {{", "c && ".repeat(30));
+        assert_eq!(
+            wrapped(&condition, 0),
+            std::slice::from_ref(&condition),
+            "no call to break"
+        );
     }
 }

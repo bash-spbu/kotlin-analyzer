@@ -19,7 +19,9 @@ pub(super) fn form_source_shapes(statements: &mut Vec<Statement>) {
         for child in children(statement) {
             form_source_shapes(child);
         }
+        form_assert(statement);
     }
+    statements.retain(|statement| !sets_assertions_disabled(statement));
     let mut index = 0;
     while index < statements.len() {
         form_for(statements, index);
@@ -454,4 +456,77 @@ fn strings_chosen(
         }
     }
     true
+}
+
+/// The field javac adds to a class with `assert`s.
+const ASSERTIONS_DISABLED: &str = "$assertionsDisabled";
+
+/// `X.$assertionsDisabled = !X.class.desiredAssertionStatus();`: javac's,
+/// in the static initializer.
+fn sets_assertions_disabled(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Assign { target: Expression::Field { name, .. }, .. } if name == ASSERTIONS_DISABLED
+    )
+}
+
+/// `if (!X.$assertionsDisabled && !c) { throw new AssertionError(m); }` is
+/// `assert c : m;`.
+fn form_assert(statement: &mut Statement) {
+    let Statement::If {
+        condition,
+        then,
+        otherwise,
+    } = statement
+    else {
+        return;
+    };
+    let [Statement::Throw(Expression::New { class, arguments })] = then.as_slice() else {
+        return;
+    };
+    let is_assertion_error = class.qualified() == "java.lang.AssertionError";
+    if !is_assertion_error || !otherwise.is_empty() || arguments.len() > 1 {
+        return;
+    }
+    let mut conjuncts = Vec::new();
+    flatten_and(condition, &mut conjuncts);
+    let Some((first, rest)) = conjuncts.split_first() else {
+        return;
+    };
+    let checks_enabled = matches!(
+        first,
+        Expression::Not(field) if matches!(field.as_ref(), Expression::Field { name, .. } if name == ASSERTIONS_DISABLED)
+    );
+    if !checks_enabled || rest.is_empty() {
+        return;
+    }
+    let failing = rest
+        .iter()
+        .cloned()
+        .reduce(|left, right| Expression::Logical {
+            operator: super::LogicalOperator::And,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+        .unwrap_or(Expression::Literal(Literal::Boolean(true)));
+    let message = arguments.first().cloned().map(super::plain);
+    *statement = Statement::Assert {
+        condition: super::negated(failing),
+        message,
+    };
+}
+
+/// The operands of a chain of `&&`, in order.
+fn flatten_and(expression: &Expression, into: &mut Vec<Expression>) {
+    match expression {
+        Expression::Logical {
+            operator: super::LogicalOperator::And,
+            left,
+            right,
+        } => {
+            flatten_and(left, into);
+            flatten_and(right, into);
+        }
+        other => into.push(other.clone()),
+    }
 }

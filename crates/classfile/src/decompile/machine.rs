@@ -347,7 +347,7 @@ impl<'class> Machine<'class> {
             0x59 => {
                 let top = self.stack.last().ok_or(Unsupported::Malformed)?.clone();
                 let can_repeat = matches!(top.kind, Kind::Uninitialized(_))
-                    || is_repeatable(&top.expression)
+                    || is_pure(&top.expression)
                     || is_array_being_initialized(&top.expression);
                 if !can_repeat {
                     return Err(Unsupported::StackShape);
@@ -355,7 +355,19 @@ impl<'class> Machine<'class> {
                 self.stack.push(top);
                 1
             }
-            0x5a..=0x5f => return Err(Unsupported::StackShape),
+            // `[a, b]` → `[b, a, b]`: a field's `++` keeping its value.
+            0x5a => {
+                let top = self.pop()?;
+                let below = self.pop()?;
+                if !is_pure(&top.expression) {
+                    return Err(Unsupported::StackShape);
+                }
+                self.stack.push(top.clone());
+                self.stack.push(below);
+                self.stack.push(top);
+                1
+            }
+            0x5b..=0x5f => return Err(Unsupported::StackShape),
             0x60..=0x83 => {
                 self.arithmetic(opcode)?;
                 1
@@ -967,7 +979,7 @@ impl<'class> Machine<'class> {
                     name,
                 };
                 let value = coerced(plain(value.expression), &descriptor);
-                self.emit(Statement::Assign { target, value })?;
+                self.store_field(target, value)?;
             }
             0xb4 => {
                 let object = self.pop()?;
@@ -987,10 +999,47 @@ impl<'class> Machine<'class> {
                     name,
                 };
                 let value = coerced(plain(value.expression), &descriptor);
-                self.emit(Statement::Assign { target, value })?;
+                self.store_field(target, value)?;
             }
         }
         Ok(())
+    }
+
+    /// `target = value;` — or, when the stack still holds the field's
+    /// value from before (`this.count++`) or after (`++this.count`), that
+    /// increment as the value.
+    fn store_field(&mut self, target: Expression, value: Expression) -> Result<(), Unsupported> {
+        let step = match &value {
+            Expression::Binary {
+                operator,
+                left,
+                right,
+            } if **left == target => match (operator, right.as_ref()) {
+                (BinaryOperator::Add, Expression::Literal(Literal::Int(1))) => Some(1),
+                (BinaryOperator::Subtract, Expression::Literal(Literal::Int(1))) => Some(-1),
+                _ => None,
+            },
+            _ => None,
+        };
+        let kept = self.stack.last().map(|top| top.expression.clone());
+        let prefix = match (step, kept) {
+            (Some(_), Some(kept)) if kept == target => Some(false),
+            (Some(_), Some(kept)) if kept == value => Some(true),
+            _ => None,
+        };
+        match (step, prefix) {
+            (Some(by), Some(prefix)) => {
+                if let Some(top) = self.stack.last_mut() {
+                    top.expression = Expression::FieldIncrement {
+                        field: Box::new(target),
+                        by,
+                        prefix,
+                    };
+                }
+                Ok(())
+            }
+            _ => self.emit(Statement::Assign { target, value }),
+        }
     }
 
     /// The arguments of a call to a method of `descriptor`, in order, each
@@ -1010,11 +1059,24 @@ impl<'class> Machine<'class> {
         let (owner, name, descriptor) =
             self.class.reference(index).ok_or(Unsupported::Malformed)?;
         let (name, descriptor) = (name.to_owned(), descriptor.to_owned());
-        let arguments = self.arguments(&descriptor)?;
+        let mut arguments = self.arguments(&descriptor)?;
+        if self.takes_varargs(&owner, &name, &descriptor) {
+            spread_varargs(&mut arguments);
+        }
         let result = result_descriptor(&descriptor)
             .ok_or(Unsupported::Malformed)?
             .to_owned();
         let owner_class = self.class_name(&owner);
+        let stringifies = owner == "java/lang/String"
+            && name == "valueOf"
+            && descriptor == "(Ljava/lang/Object;)Ljava/lang/String;";
+        if stringifies && let [value] = arguments.as_slice() {
+            self.push(
+                Expression::Stringified(Box::new(value.clone())),
+                Kind::Reference,
+            );
+            return Ok(());
+        }
         if boxing(&owner, &name, &descriptor) == Some(Boxing::Box) {
             let [value] =
                 <[Expression; 1]>::try_from(arguments).map_err(|_| Unsupported::Malformed)?;
@@ -1061,6 +1123,43 @@ impl<'class> Machine<'class> {
             arguments,
         };
         self.call_result(call, &result)
+    }
+
+    /// Whether the method's last parameter is `...`: a method of this class
+    /// says so; of others, the JDK's that every reader knows.
+    fn takes_varargs(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        const KNOWN: [(&str, &str); 16] = [
+            ("java/lang/String", "format"),
+            ("java/lang/String", "join"),
+            ("java/util/Arrays", "asList"),
+            ("java/util/List", "of"),
+            ("java/util/Set", "of"),
+            ("java/util/stream/Stream", "of"),
+            ("java/util/EnumSet", "of"),
+            ("java/util/Objects", "hash"),
+            ("java/util/Collections", "addAll"),
+            ("java/io/PrintStream", "printf"),
+            ("java/io/PrintStream", "format"),
+            ("java/text/MessageFormat", "format"),
+            ("java/nio/file/Paths", "get"),
+            ("java/nio/file/Path", "of"),
+            ("java/lang/Class", "getMethod"),
+            ("java/lang/Class", "getDeclaredMethod"),
+        ];
+        let last_is_array = parameter_descriptors(descriptor)
+            .and_then(|parameters| parameters.last().map(|last| last.starts_with('[')))
+            .unwrap_or(false);
+        if !last_is_array {
+            return false;
+        }
+        if owner == self.class.name {
+            return self.class.methods.iter().any(|method| {
+                method.name == name
+                    && method.descriptor == descriptor
+                    && method.access & access::VARARGS != 0
+            });
+        }
+        KNOWN.contains(&(owner, name))
     }
 
     /// A call's value, or — `void` — its statement. `new StringBuilder()
@@ -1168,6 +1267,7 @@ impl<'class> Machine<'class> {
                 .ok_or(Unsupported::Malformed)?;
             pieces_of_recipe(&recipe, arguments, constants)?
         };
+        let pieces = pieces.into_iter().map(unstringified).collect();
         self.push(Expression::Concatenation(pieces), Kind::Reference);
         Ok(())
     }
@@ -1281,6 +1381,62 @@ impl<'class> Machine<'class> {
         self.class
             .reference(*reference_index)
             .map(|(owner, _, _)| owner)
+    }
+}
+
+/// The last argument of a call to a `...` method, an array made for it,
+/// as the arguments it was written as. An only element that may itself
+/// be an array stays wrapped: unwrapped, Java would pass it as the array.
+fn spread_varargs(arguments: &mut Vec<Expression>) {
+    let spread = match arguments.last() {
+        Some(Expression::ArrayInitializer { values, length, .. }) if values.len() == *length => {
+            let single_unknown = match values.as_slice() {
+                // `null` alone would be a `null` array.
+                [only] => !matches!(
+                    only,
+                    Expression::Literal(
+                        Literal::Int(_)
+                            | Literal::Long(_)
+                            | Literal::Float(_)
+                            | Literal::Double(_)
+                            | Literal::Char(_)
+                            | Literal::Boolean(_)
+                            | Literal::String(_)
+                    ) | Expression::Boxed { .. }
+                        | Expression::Concatenation(_)
+                        | Expression::New { .. }
+                ),
+                _ => false,
+            };
+            (!single_unknown).then(|| values.clone())
+        }
+        Some(Expression::NewArray { length, .. })
+            if **length == Expression::Literal(Literal::Int(0)) =>
+        {
+            Some(Vec::new())
+        }
+        _ => None,
+    };
+    if let Some(values) = spread {
+        arguments.pop();
+        arguments.extend(values.into_iter().map(plain));
+    }
+}
+
+/// A piece of a concatenation: converted to text by it anyway.
+fn unstringified(piece: Expression) -> Expression {
+    match piece {
+        Expression::Stringified(value) => *value,
+        other => other,
+    }
+}
+
+/// An expression without effects: reading it twice is reading it once.
+fn is_pure(expression: &Expression) -> bool {
+    match expression {
+        Expression::Binary { left, right, .. } => is_pure(left) && is_pure(right),
+        Expression::Negate(operand) | Expression::Cast { operand, .. } => is_pure(operand),
+        other => is_repeatable(other),
     }
 }
 
@@ -1529,7 +1685,9 @@ fn concatenation_of(call: &Expression) -> Option<Expression> {
         }
     }
     pieces.reverse();
-    Some(Expression::Concatenation(pieces))
+    Some(Expression::Concatenation(
+        pieces.into_iter().map(unstringified).collect(),
+    ))
 }
 
 fn is_string_builder(class: &ClassName) -> bool {

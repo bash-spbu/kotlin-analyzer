@@ -576,7 +576,7 @@ public abstract class Shapes {
     public int[] initialized() { return new int[] { 1, 2 }; }
     public abstract int perimeter();
     public int finished() { try { return side; } finally { side = 0; } }
-    public int counted() { return side++; }
+    public int counted(int[] values) { return values[0]++; }
 }
 "#,
     )
@@ -610,8 +610,8 @@ public abstract class Shapes {
     assert_eq!(outcome("guarded"), Ok(()));
     assert_eq!(outcome("initialized"), Ok(()));
     assert_eq!(outcome("perimeter"), Err(Unsupported::NoCode));
-    // `finally` catches anything; a field's `++` inside an expression keeps
-    // its old value under the object (`dup_x1`).
+    // `finally` catches anything; an element's `++` inside an expression
+    // keeps its old value under the array and index (`dup_x2`).
     assert_eq!(outcome("finished"), Err(Unsupported::ExceptionHandlers));
     assert_eq!(outcome("counted"), Err(Unsupported::StackShape));
     // `synchronized` on the method is a flag, not code: its body is plain.

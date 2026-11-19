@@ -1239,6 +1239,9 @@ fn undeclare(statements: &mut Vec<Statement>, name: &str) {
 pub(super) fn mentions(statement: &Statement, name: &str) -> bool {
     let in_expression = |expression: &Expression| expression_mentions(expression, name);
     match statement {
+        Statement::Assert { condition, message } => {
+            in_expression(condition) || message.as_ref().is_some_and(in_expression)
+        }
         Statement::Expression(expression)
         | Statement::Return(Some(expression))
         | Statement::Throw(expression) => in_expression(expression),
@@ -1337,7 +1340,9 @@ fn operands(expression: &Expression) -> Vec<&Expression> {
         | Expression::Cast { operand, .. }
         | Expression::InstanceOf { operand, .. }
         | Expression::Boxed { value: operand, .. }
-        | Expression::Unboxed { value: operand, .. } => vec![operand.as_ref()],
+        | Expression::Unboxed { value: operand, .. }
+        | Expression::FieldIncrement { field: operand, .. }
+        | Expression::Stringified(operand) => vec![operand.as_ref()],
         Expression::Binary { left, right, .. }
         | Expression::Logical { left, right, .. }
         | Expression::Compare { left, right, .. }
@@ -1387,6 +1392,9 @@ fn expression_holds_comparison_result(expression: &Expression) -> bool {
 fn holds_comparison_result(statement: &Statement) -> bool {
     let in_expression = expression_holds_comparison_result;
     match statement {
+        Statement::Assert { condition, message } => {
+            in_expression(condition) || message.as_ref().is_some_and(in_expression)
+        }
         Statement::Expression(expression)
         | Statement::Return(Some(expression))
         | Statement::Throw(expression) => in_expression(expression),

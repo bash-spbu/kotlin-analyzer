@@ -123,6 +123,11 @@ pub enum Statement {
         body: Vec<Statement>,
         catches: Vec<CatchClause>,
     },
+    /// `assert condition : message;`
+    Assert {
+        condition: Expression,
+        message: Option<Expression>,
+    },
 }
 
 /// `catch (A | B name) { … }`.
@@ -240,6 +245,15 @@ pub enum Expression {
         name: String,
         by: i32,
     },
+    /// `String.valueOf(x)` of an object, as newer javac writes a piece of
+    /// a concatenation (to call `toString()` in order): in one, just `x`.
+    Stringified(Box<Expression>),
+    /// `field++`, `field--`, `++field`, `--field` as a value.
+    FieldIncrement {
+        field: Box<Expression>,
+        by: i32,
+        prefix: bool,
+    },
     /// `Integer.valueOf(x)` as javac boxes a primitive: where Java boxes
     /// by itself (a return, an assignment), just `x`.
     Boxed {
@@ -315,6 +329,8 @@ pub enum Literal {
     /// A UTF-16 unit.
     Char(u16),
     String(String),
+    /// A `case` of a `switch` on an enum: the constant's name.
+    EnumConstant(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -591,6 +607,12 @@ fn statement_expressions_mut(statement: &mut Statement, visit: &mut dyn FnMut(&m
         Statement::Expression(expression)
         | Statement::Return(Some(expression))
         | Statement::Throw(expression) => each(expression),
+        Statement::Assert { condition, message } => {
+            each(condition);
+            if let Some(message) = message {
+                each(message);
+            }
+        }
         Statement::Declare { value, .. } => {
             if let Some(value) = value {
                 each(value);
@@ -705,7 +727,9 @@ fn expression_mut(expression: &mut Expression, visit: &mut dyn FnMut(&mut Expres
         | Expression::Cast { operand, .. }
         | Expression::InstanceOf { operand, .. }
         | Expression::Boxed { value: operand, .. }
-        | Expression::Unboxed { value: operand, .. } => expression_mut(operand, visit),
+        | Expression::Unboxed { value: operand, .. }
+        | Expression::FieldIncrement { field: operand, .. }
+        | Expression::Stringified(operand) => expression_mut(operand, visit),
         Expression::Binary { left, right, .. }
         | Expression::Logical { left, right, .. }
         | Expression::Compare { left, right, .. }

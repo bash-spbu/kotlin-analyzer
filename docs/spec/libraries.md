@@ -99,7 +99,26 @@ unboxing (`x.intValue()`) are left out where Java does them by itself — a
 return, an assignment, arithmetic, a comparison — and kept in calls'
 arguments, where they choose the overload. `new T[] { a, b }` is read from
 its element stores (gaps javac leaves the default); `x++` inside an
-expression from the load before `iinc`; `x = x + y` is written `x += y`.
+expression from the load before `iinc`, and a field's `f++`/`++f` from the
+value the stack keeps around its store; `x = x + y` is written `x += y`.
+A `...` method's last argument, an array made for the call, is written as
+the arguments it was — for this class's methods marked varargs and the
+JDK's well known ones (`String.format`, `Arrays.asList`, `List.of`,
+`printf`…), unless its only element might itself be an array. javac's
+`String.valueOf(x)` in a concatenation is just `x`. `if (!X.$assertionsDisabled
+&& !c) throw new AssertionError(m)` is `assert c : m;` (the field's setting
+in the static initializer left out). A `switch` on an enum: on
+`Outer$1.$SwitchMap$…[e.ordinal()]`, its numbers named by that synthetic
+class's static initializer; on `e.ordinal()` (an enum of the same file),
+by the constants' order when `e`'s type is known. An enum's `values()`,
+`valueOf` and the static initializer making its constants are Java's, not
+shown.
+
+Layout is the renderer's: four spaces a level, a blank line between
+members (but fields in a row), a statement a line; a line past 100
+characters breaks after the `(` of the call taking most of it, an argument
+a line, eight spaces further in (again for an argument still too long) —
+a string or a condition stays whole. No formatter runs.
 
 `try`/`catch`: each range of the exception table is a `try` whose code is
 the blocks inside it, entered at its first; its handlers are `catch`es
@@ -110,15 +129,15 @@ after it. Ranges nest or are apart.
 A body is decompiled whole or not at all: anything else — `finally`,
 `synchronized` blocks and try-with-resources (handlers catching anything),
 two `try`s starting together, values kept on the stack across statements
-some other way (`dup_x1`: `this.count++` inside an expression), jumps no
-loop nesting describes — leaves it compiled code. Not yet: `switch` on an
-enum (javac's `$SwitchMap`), assertions read as such. Nearly all of a Java
+some other way (`a[i]++` inside an expression), jumps no loop nesting
+describes — leaves it compiled code. Nearly all of a Java
 library's bodies read (slf4j-api 99.6%, jackson-databind 98%, guava 96%,
 commons-lang3 97%). Kotlin classes keep their bodies out. Tests compile
-four classes — straight-line code; branches, loops, labeled breaks,
+five classes — straight-line code; branches, loops, labeled breaks,
 `switch` (fall-through, strings), NaN, `for`-each, array initializers;
 lambdas and method references; `try`/`catch` (several, multi-catch, in a
-loop, nested, rethrowing) — back from their decompiled text and run a
+loop, nested, rethrowing); field increments, `assert` (run with `-ea`),
+varargs, `switch` on an enum — back from their decompiled text and run a
 program against them, which must print the same.
 
 The file starts with a header: where it comes from (the JAR), why (no

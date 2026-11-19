@@ -999,7 +999,7 @@ fn a_library_without_sources_opens_as_its_declarations_rendered() {
         "under the library's own license",
         "package kotlin\n",
         "import java.io.Serializable\n",
-        "data class Pair<out A, out B> : Serializable {\n    constructor(first: A, second: B)\n    val first: A\n",
+        "data class Pair<out A, out B> : Serializable {\n    constructor(first: A, second: B)\n\n    val first: A\n",
         "    fun copy(first: A /* = … */, second: B /* = … */): Pair<A, B> { /* compiled code */ }\n",
         "infix fun <A, B> A.to(that: B): Pair<A, B> { /* compiled code */ }\n",
     ] {
@@ -1465,11 +1465,66 @@ public class Catching {
 }
 "#;
 
+/// A Java class of what javac compiles less directly: increments of
+/// fields as values, `assert`, varargs, `switch` on an enum.
+const EXTRAS_JAVA: &str = r#"package demo;
+
+import java.util.Arrays;
+
+public class Extras {
+    public enum Mode { FAST, SAFE, LAZY }
+
+    public int count;
+    public static int created;
+
+    public int nextCount() {
+        return count++;
+    }
+
+    public int bumpCount() {
+        return ++count;
+    }
+
+    public static int nextCreated() {
+        return created++;
+    }
+
+    public static int checked(int value) {
+        assert value >= 0 : "negative: " + value;
+        return value * 2;
+    }
+
+    public static String joined(String separator, String... parts) {
+        return String.join(separator, parts);
+    }
+
+    public static String described(int count) {
+        return String.format("%d items, %s", count, "ok");
+    }
+
+    public static String listed() {
+        return joined("-", "a", "b", "c") + Arrays.asList(1, 2, 3) + "[" + joined(",") + "]";
+    }
+
+    public static String mode(Mode mode) {
+        switch (mode) {
+            case FAST:
+                return "fast";
+            case SAFE:
+                return "safe";
+            default:
+                return "other";
+        }
+    }
+}
+"#;
+
 /// Calls every method of `Account`, printing what each gives.
 const STRAIGHT_JAVA_DRIVER: &str = r#"import demo.Account;
 import demo.Flow;
 import demo.Functions;
 import demo.Catching;
+import demo.Extras;
 
 public class Main {
     public static void main(String[] arguments) {
@@ -1516,6 +1571,15 @@ public class Main {
         } catch (IllegalArgumentException failure) {
             System.out.println("rethrown " + failure.getMessage() + " " + failure.getCause().getClass().getSimpleName());
         }
+        Extras extras = new Extras();
+        System.out.println(extras.nextCount() + "|" + extras.nextCount() + "|" + extras.bumpCount() + "|" + extras.count + "|"
+            + Extras.nextCreated() + Extras.nextCreated() + "|" + Extras.checked(4) + "|" + Extras.described(3) + "|"
+            + Extras.listed() + "|" + Extras.mode(Extras.Mode.FAST) + Extras.mode(Extras.Mode.SAFE) + Extras.mode(Extras.Mode.LAZY));
+        try {
+            Extras.checked(-1);
+        } catch (AssertionError failure) {
+            System.out.println("asserted " + failure.getMessage());
+        }
         int[] box = { 1 };
         Functions.counter(box).run();
         System.out.println(box[0]);
@@ -1557,6 +1621,7 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
     std::fs::write(root.join("src/demo/Flow.java"), BRANCHING_JAVA).unwrap();
     std::fs::write(root.join("src/demo/Functions.java"), FUNCTIONAL_JAVA).unwrap();
     std::fs::write(root.join("src/demo/Catching.java"), CATCHING_JAVA).unwrap();
+    std::fs::write(root.join("src/demo/Extras.java"), EXTRAS_JAVA).unwrap();
     std::fs::write(root.join("Main.java"), STRAIGHT_JAVA_DRIVER).unwrap();
     let javac = |arguments: &[&std::ffi::OsStr]| {
         run_tool(std::process::Command::new("javac").args(arguments))
@@ -1570,6 +1635,7 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         &path("src/demo/Flow.java"),
         &path("src/demo/Functions.java"),
         &path("src/demo/Catching.java"),
+        &path("src/demo/Extras.java"),
     ]);
     if compiled.is_none() {
         eprintln!("skipped: no javac");
@@ -1641,6 +1707,35 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         catching.text.as_bytes(),
     )
     .unwrap();
+    let extras = render("Extras");
+    for expected in [
+        "        return this.count++;\n",
+        "        return ++this.count;\n",
+        "        return Extras.created++;\n",
+        "        assert value >= 0 : \"negative: \" + value;\n",
+        "Extras.joined(\"-\", \"a\", \"b\", \"c\")",
+        "Arrays.asList(1, 2, 3)",
+        "Extras.joined(\",\")",
+        "String.format(\"%d items, %s\", count, \"ok\")",
+        "            case FAST:\n",
+    ] {
+        assert!(
+            extras.text.contains(expected),
+            "{expected:?} in\n{}",
+            extras.text
+        );
+    }
+    assert!(!extras.text.contains("compiled code"), "{}", extras.text);
+    assert!(
+        !extras.text.contains("$assertionsDisabled"),
+        "{}",
+        extras.text
+    );
+    std::fs::write(
+        root.join("decompiled/demo/Extras.java"),
+        extras.text.as_bytes(),
+    )
+    .unwrap();
     assert!(
         !rendered.text.contains("compiled code"),
         "every body decompiled:\n{}",
@@ -1683,11 +1778,13 @@ fn decompiled_straight_bodies_compile_again_and_behave_the_same() {
         &path("decompiled/demo/Flow.java"),
         &path("decompiled/demo/Functions.java"),
         &path("decompiled/demo/Catching.java"),
+        &path("decompiled/demo/Extras.java"),
     ]);
     let run = |classes: &str| {
         let classpath = std::env::join_paths([root.join(classes), root.join("main")]).unwrap();
         run_tool(
             std::process::Command::new("java")
+                .arg("-ea")
                 .arg("-cp")
                 .arg(classpath)
                 .arg("Main"),
