@@ -1,7 +1,7 @@
 {
   "name": "kotlin-analyzer",
   "displayName": "kotlin-analyzer",
-  "description": "Kotlin for VS Code: highlighting and the kotlin-analyzer language server (navigation, completion, diagnostics, rename), also for Java.",
+  "description": "Kotlin for VS Code: highlighting, the kotlin-analyzer language server (navigation, completion, diagnostics, rename) and its debugger, also for Java.",
   "version": "1.0.1",
   "publisher": "bash-spbu",
   "license": "Apache-2.0",
@@ -12,11 +12,12 @@
   "engines": {
     "vscode": "^1.91.0"
   },
-  "categories": ["Programming Languages", "Linters"],
+  "categories": ["Programming Languages", "Linters", "Debuggers"],
   "keywords": ["kotlin", "java", "gradle", "language server"],
   "main": "./dist/extension.js",
   "activationEvents": [
     "onTaskType:kotlin-gradle",
+    "onDebugResolve:kotlin-analyzer",
     "onLanguage:kotlin",
     "onLanguage:java",
     "workspaceContains:settings.gradle.kts",
@@ -58,6 +59,98 @@
             "markdownDescription": "For `test`: only the tests this filter names (Gradle's `--tests`, e.g. `app.OrderTest` or `app.OrderTest.creates an order`), in the project holding `path`."
           }
         }
+      }
+    ],
+    "breakpoints": [{ "language": "kotlin" }, { "language": "java" }],
+    "debuggers": [
+      {
+        "type": "kotlin-analyzer",
+        "label": "Kotlin (kotlin-analyzer)",
+        "languages": ["kotlin", "java"],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "test": {
+                "type": "object",
+                "markdownDescription": "A test, run by Gradle's test task in its file's project with the debugger attached to the test JVM: `file` and Gradle's `--tests` `filter` (`shop.OrderTest.creates an order`) — or the filter's pieces `package`, `outerClass`, `class`, `method`.",
+                "properties": {
+                  "file": { "type": "string", "markdownDescription": "The test's file: its Gradle project is the nearest directory with a build script." },
+                  "filter": { "type": "string", "markdownDescription": "Gradle's `--tests` filter." },
+                  "package": { "type": "string" },
+                  "outerClass": { "type": "string" },
+                  "class": { "type": "string" },
+                  "method": { "type": "string" }
+                },
+                "required": ["file"]
+              },
+              "program": {
+                "type": "string",
+                "markdownDescription": "Instead of `test`: `java`, or Gradle (`${workspaceFolder}/gradlew`, `gradle`), whose `Test` and `JavaExec` JVMs (`bootRun` is one) get the debugger."
+              },
+              "args": { "type": "array", "items": { "type": "string" }, "markdownDescription": "The program's arguments." },
+              "cwd": { "type": "string", "markdownDescription": "Where the program runs: the Gradle build's root for Gradle." },
+              "env": { "type": "object", "additionalProperties": { "type": "string" }, "markdownDescription": "Environment variables added." }
+            }
+          },
+          "attach": {
+            "required": ["port"],
+            "properties": {
+              "host": { "type": "string", "default": "localhost" },
+              "port": { "type": "integer", "markdownDescription": "The debug port of a JVM started with `-agentlib:jdwp=transport=dt_socket,server=y,address=5005`." },
+              "cwd": { "type": "string", "markdownDescription": "The project whose sources the frames map to." }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "kotlin-analyzer",
+            "request": "launch",
+            "name": "Gradle: run",
+            "program": "${workspaceFolder}/gradlew",
+            "args": ["run"],
+            "cwd": "${workspaceFolder}"
+          },
+          {
+            "type": "kotlin-analyzer",
+            "request": "attach",
+            "name": "Attach to :5005",
+            "port": 5005
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "kotlin-analyzer: Gradle program",
+            "description": "Debug the JVM a Gradle task runs (`bootRun`, `run`).",
+            "body": {
+              "type": "kotlin-analyzer",
+              "request": "launch",
+              "name": "${1:Gradle: bootRun}",
+              "program": "^\"\\${workspaceFolder}/gradlew\"",
+              "args": ["${2:bootRun}"],
+              "cwd": "^\"\\${workspaceFolder}\""
+            }
+          },
+          {
+            "label": "kotlin-analyzer: test",
+            "description": "Debug the tests a Gradle filter names.",
+            "body": {
+              "type": "kotlin-analyzer",
+              "request": "launch",
+              "name": "${1:Debug tests}",
+              "test": { "file": "^\"\\${file}\"", "filter": "${2:shop.OrderTest}" }
+            }
+          },
+          {
+            "label": "kotlin-analyzer: attach",
+            "description": "Attach to a JVM listening for a debugger.",
+            "body": {
+              "type": "kotlin-analyzer",
+              "request": "attach",
+              "name": "${1:Attach to :5005}",
+              "port": 5005
+            }
+          }
+        ]
       }
     ],
     "semanticTokenModifiers": [

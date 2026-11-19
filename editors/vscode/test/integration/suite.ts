@@ -22,6 +22,8 @@ export async function run(): Promise<void> {
     ["Format Document runs the configured formatter", () => formats(workspace, sources)],
     ["Gradle tasks build, clean and test the file's project or a parent", () => runsGradleTasks(workspace)],
     ["code lenses run a test and count references", () => runsTestsFromLenses(workspace)],
+    ["a Debug test lens debugs the test through Gradle", () => debugsTestsFromLenses(workspace)],
+    ["the debugger stops at a breakpoint and runs a logpoint", () => debugsAProgram(workspace)],
   ];
   const failures: string[] = [];
   for (const [name, check] of checks) {
@@ -131,6 +133,98 @@ async function runsTestsFromLenses(workspace: string): Promise<void> {
   assert.equal(await ended, 0);
   const call: string[] = (await fs.readFile(callFile, "utf8")).trim().split("\n");
   assert.deepEqual(call.slice(1), ["-p", "lib", "test", "--tests", "lib.LibTest.works", "--rerun"]);
+}
+
+async function debugsTestsFromLenses(workspace: string): Promise<void> {
+  const file = vscode.Uri.file(path.join(workspace, "lib/src/test/kotlin/lib/LibTest.kt"));
+  await vscode.window.showTextDocument(file);
+  const lenses = await waitFor(async () => {
+    const found = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", file, 100);
+    return found.some((lens) => lens.command?.title === "Debug test") ? found : undefined;
+  }, "a Debug test lens in LibTest.kt");
+  const titles = lenses.map((lens) => lens.command?.title).filter((title) => title?.includes("test"));
+  assert.deepEqual(titles, ["▶ Run tests", "Debug tests", "▶ Run test", "Debug test"]);
+  const debugTest = lenses.find((lens) => lens.command?.title === "Debug test")!.command!;
+  const callFile = process.env.GRADLE_CALL;
+  assert.ok(callFile, "run.ts sets GRADLE_CALL");
+  await fs.rm(callFile, { force: true });
+  // The recording gradlew starts no JVM: the launch fails, saying so (in a
+  // dialog, which VS Code refuses in tests and throws instead).
+  await assert.rejects(
+    Promise.resolve(vscode.commands.executeCommand(debugTest.command, ...(debugTest.arguments ?? []))),
+    /before the JVM connected/,
+  );
+  const call: string[] = (await fs.readFile(callFile, "utf8")).trim().split("\n");
+  const tests = call.indexOf("--tests");
+  assert.deepEqual(call.slice(tests - 3, tests + 3), ["-p", "lib", "test", "--tests", "lib.LibTest.works", "--rerun"]);
+  assert.ok(call.includes("-I"), `the init script giving the test JVM the debugger: ${call.join(" ")}`);
+}
+
+async function debugsAProgram(workspace: string): Promise<void> {
+  const source = path.join(workspace, "debug/src/demo/Main.java");
+  const text = await fs.readFile(source, "utf8");
+  const lineOf = (needle: string): number => text.split("\n").findIndex((line) => line.includes(needle));
+  const at = (needle: string) => new vscode.Location(vscode.Uri.file(source), new vscode.Position(lineOf(needle), 0));
+  const breakpoints = [
+    new vscode.SourceBreakpoint(at("\"hello \""), true, undefined, undefined, "name is {name}"),
+    new vscode.SourceBreakpoint(at("int doubled"), true, "count == 3"),
+  ];
+  vscode.debug.addBreakpoints(breakpoints);
+  const events: Array<{ event: string; body: any }> = [];
+  const tracker = vscode.debug.registerDebugAdapterTrackerFactory("kotlin-analyzer", {
+    createDebugAdapterTracker: () => ({
+      onDidSendMessage: (message: { type: string; event: string; body: any }) => {
+        if (message.type === "event") {
+          events.push(message);
+        }
+      },
+    }),
+  });
+  try {
+    const started = await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], {
+      type: "kotlin-analyzer",
+      request: "launch",
+      name: "Main",
+      program: "java",
+      args: ["-cp", path.join(workspace, "debug/classes"), "demo.Main"],
+      cwd: path.join(workspace, "debug"),
+    });
+    assert.ok(started, "the session starts");
+    const stopped = await waitFor(() => events.find((event) => event.event === "stopped"), "a stop");
+    const session = vscode.debug.activeDebugSession;
+    assert.ok(session, "a session");
+    const stack = await session.customRequest("stackTrace", { threadId: stopped.body.threadId });
+    const top = stack.stackFrames[0];
+    assert.equal(top.line, lineOf("int doubled") + 1);
+    assert.equal(top.source.path, source);
+    const scopes = await session.customRequest("scopes", { frameId: top.id });
+    const variables = await session.customRequest("variables", {
+      variablesReference: scopes.scopes[0].variablesReference,
+    });
+    const shown = variables.variables.map((variable: { name: string; value: string }) => `${variable.name} = ${variable.value}`);
+    assert.ok(shown.includes("count = 3"), shown.join(", "));
+    const terminated = new Promise<void>((resolve) => {
+      const listener = vscode.debug.onDidTerminateDebugSession(() => {
+        listener.dispose();
+        resolve();
+      });
+    });
+    await session.customRequest("continue", { threadId: stopped.body.threadId });
+    await terminated;
+    const output = events
+      .filter((event) => event.event === "output")
+      .map((event) => event.body.output)
+      .join("");
+    assert.ok(output.includes("name is kotlin\n"), output);
+    assert.ok(output.includes("doubled 6\n"), output);
+    assert.deepEqual(
+      events.filter((event) => event.event === "exited").map((event) => event.body.exitCode),
+      [0],
+    );
+  } finally {
+    tracker.dispose();
+    vscode.debug.removeBreakpoints(breakpoints);
+  }
 }
 
 async function reloads(): Promise<void> {

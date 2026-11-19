@@ -74,13 +74,13 @@ past that it says the program still runs.
 
 ### For editors
 
-`kotlin-analyzer dap` is the same debugger for an editor (Zed's), over the
+`kotlin-analyzer dap` is the same debugger for an editor (Zed's, VS Code's), over the
 Debug Adapter Protocol on stdin/stdout. A configuration (`launch` or
 `attach` arguments) is one of:
 
 | configuration | debugs |
 |---|---|
-| `{ "request": "launch", "test": { "file", "package", "outerClass", "class", "method" } }` | the test, as `debug_start` does: Gradle's test task in the file's project, `--tests pkg.Outer$Class.method` (backticks dropped, empty pieces left out) |
+| `{ "request": "launch", "test": { "file", "filter" } }` or `{ …, "test": { "file", "package", "outerClass", "class", "method" } }` | the test, as `debug_start` does: Gradle's test task in the file's project, `--tests` the `filter` as given (VS Code's lenses) or of the pieces, `pkg.Outer$Class.method` (backticks dropped, empty pieces left out; Zed's runnables) |
 | `{ "request": "launch", "program": "…/gradlew" \| "gradle", "args", "cwd", "env" }` | Gradle with `args` in the build at `cwd`: its `Test` and `JavaExec` JVMs |
 | `{ "request": "launch", "program": "java", "args", "cwd", "env" }` | `java` with `args`, the agent first |
 | `{ "request": "attach", "host", "port", "cwd" }` | a JVM listening for a debugger |

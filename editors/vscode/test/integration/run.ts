@@ -15,6 +15,7 @@ import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
+import { execFileSync } from "node:child_process";
 import { runTests } from "@vscode/test-electron";
 
 import { assetName, targetOf } from "../../src/release";
@@ -78,6 +79,20 @@ async function main(): Promise<void> {
   }
 }
 
+/** The program the debugger check runs (suite.ts finds its lines by text). */
+const JAVA_PROGRAM = `package demo;
+
+public class Main {
+    public static void main(String[] arguments) {
+        String name = "kotlin";
+        int count = 3;
+        System.out.println("hello " + name);
+        int doubled = count * 2;
+        System.out.println("doubled " + doubled);
+    }
+}
+`;
+
 async function writeWorkspace(root: string): Promise<void> {
   const sources = path.join(root, "src/main/kotlin/app");
   await fs.mkdir(sources, { recursive: true });
@@ -109,6 +124,11 @@ async function writeWorkspace(root: string): Promise<void> {
     path.join(root, "lib/src/test/kotlin/lib/LibTest.kt"),
     "package lib\n\nimport org.junit.jupiter.api.Test\n\nclass LibTest {\n    @Test\n    fun works() { Lib() }\n}\n",
   );
+  // A program to debug, compiled with its variables.
+  const program = path.join(root, "debug/src/demo");
+  await fs.mkdir(program, { recursive: true });
+  await fs.writeFile(path.join(program, "Main.java"), JAVA_PROGRAM);
+  execFileSync("javac", ["-g", "-d", path.join(root, "debug/classes"), path.join(program, "Main.java")]);
   // Records where and how it was called instead of running Gradle.
   await fs.writeFile(
     path.join(root, "gradlew"),

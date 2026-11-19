@@ -11,12 +11,13 @@
           "type": "object",
           "properties": {
             "file": { "type": "string", "description": "The test's file: its Gradle project is the nearest directory with a build script." },
+            "filter": { "type": "string", "description": "Gradle's --tests filter (`shop.OrderTest.creates an order`), instead of the pieces below." },
             "package": { "type": "string", "description": "The test class's package." },
             "outerClass": { "type": "string", "description": "The class holding the test class when it is nested." },
             "class": { "type": "string", "description": "The test class." },
             "method": { "type": "string", "description": "The test function: all of the class's tests when empty." }
           },
-          "required": ["file", "class"]
+          "required": ["file"]
         }
       },
       "required": ["request", "test"]

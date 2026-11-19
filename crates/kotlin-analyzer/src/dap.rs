@@ -587,12 +587,19 @@ fn launch_of(arguments: &Value, working_directory: &Path) -> Result<(Launch, Pat
         let root = crate::agent::protocol::project_root(&file)
             .ok_or_else(|| format!("{} isn't in a Gradle project", file.display()))?;
         let piece = |key: &str| test[key].as_str().unwrap_or("").trim().to_owned();
-        let filter = test_filter(
-            &piece("package"),
-            &piece("outerClass"),
-            &piece("class"),
-            &piece("method"),
-        );
+        // A filter as given (VS Code's lenses), else made of a runnable's
+        // pieces (Zed's).
+        let given = piece("filter");
+        let filter = if given.is_empty() {
+            test_filter(
+                &piece("package"),
+                &piece("outerClass"),
+                &piece("class"),
+                &piece("method"),
+            )
+        } else {
+            given
+        };
         if filter.is_empty() {
             return Err("the test has no class".to_owned());
         }
@@ -683,6 +690,41 @@ mod tests {
         );
         assert_eq!(test_filter("", "", "Loose", ""), "Loose");
         assert_eq!(test_filter("shop", "", "", "method"), "");
+    }
+
+    #[test]
+    fn a_test_is_a_filter_as_given_or_a_runnables_pieces() {
+        let root =
+            std::env::temp_dir().join(format!("kotlin-analyzer-dap-test-{}", std::process::id()));
+        let module = root.join("lib");
+        std::fs::create_dir_all(module.join("src")).unwrap();
+        std::fs::write(root.join("settings.gradle.kts"), "").unwrap();
+        std::fs::write(module.join("build.gradle.kts"), "").unwrap();
+        let file = module.join("src/OrderTest.kt");
+        let launch = |test: Value| launch_of(&json!({ "test": test }), &root).unwrap().0;
+        let filter_of = |launch: Launch| match launch {
+            Launch::GradleTests {
+                filter, project, ..
+            } => {
+                assert_eq!(project, module);
+                filter
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            filter_of(launch(
+                json!({ "file": file, "filter": "shop.OrderTest.creates an order" })
+            )),
+            "shop.OrderTest.creates an order"
+        );
+        assert_eq!(
+            filter_of(launch(
+                json!({ "file": file, "package": "shop", "class": "OrderTest" })
+            )),
+            "shop.OrderTest"
+        );
+        assert!(launch_of(&json!({ "test": { "file": file } }), &root).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

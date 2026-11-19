@@ -7,6 +7,8 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 
+import { RUN_TESTS_COMMAND, type TestRun } from "./debugging";
+
 export const TASK_TYPE = "kotlin-gradle";
 
 type GradleTask = "build" | "clean" | "test";
@@ -38,15 +40,6 @@ export function registerGradleTasks(context: vscode.ExtensionContext): vscode.Di
     },
   });
   return vscode.Disposable.from(runTests, provider);
-}
-
-/** The command of the server's "Run test" lenses (docs/spec/lsp.md). */
-export const RUN_TESTS_COMMAND = "kotlin-analyzer.runTests";
-
-/** A "Run test" lens's argument: the test file, and Gradle's `--tests` filter. */
-interface TestRun {
-  uri: string;
-  filter: string;
 }
 
 async function runFilteredTests(script: string, run: TestRun): Promise<void> {

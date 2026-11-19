@@ -15,6 +15,8 @@ Kotlin support in one extension:
 
   The server's semantic tokens refine the grammar's colours once the
   workspace has loaded.
+- **the debugger**: the same binary, as `kotlin-analyzer dap`, for JVM
+  tests and programs. Nothing to install but a JDK (see Debugging).
 
 Remove other Kotlin extensions that define the `kotlin` language
 (`fwcd.kotlin`, `mathiasfrohlich.Kotlin`), or VS Code will pick one grammar
@@ -58,12 +60,46 @@ Code lenses show how many references each declaration has (click to peek
 them), and *▶ Run test* / *▶ Run tests* above test functions (JUnit 4 and 5,
 kotlin.test, TestNG) and the classes holding them. Running one starts the
 `kotlin-gradle` task `gradle test --tests <filter> --rerun` in the file's
-project (`"tests"` in `tasks.json` does the same). *Expand Selection*
+project (`"tests"` in `tasks.json` does the same); *Debug test* / *Debug
+tests* next to each runs it under the debugger. *Expand Selection*
 (`⌃⇧⌘→`) grows through the server's syntax-aware ranges.
 
 Open the Gradle build's root folder. The server exports the build's model
 in the background, then reloads; until then it works from the directory
 layout.
+
+## Debugging
+
+The debug type `kotlin-analyzer` is the server's `kotlin-analyzer dap`,
+over JDWP. Besides the *Debug test* lenses, `launch.json` takes:
+
+```jsonc
+{
+  "configurations": [
+    // A Gradle task's JVM: Test and JavaExec tasks (bootRun is one).
+    { "type": "kotlin-analyzer", "request": "launch", "name": "bootRun",
+      "program": "${workspaceFolder}/gradlew", "args": ["-p", "app", "bootRun"],
+      "cwd": "${workspaceFolder}", "env": { "SPRING_PROFILES_ACTIVE": "local" } },
+    // Tests, by Gradle's --tests filter.
+    { "type": "kotlin-analyzer", "request": "launch", "name": "OrderTest",
+      "test": { "file": "${file}", "filter": "shop.OrderTest" } },
+    // `java` itself.
+    { "type": "kotlin-analyzer", "request": "launch", "name": "Main",
+      "program": "java", "args": ["-cp", "build/classes/kotlin/main", "shop.MainKt"] },
+    // A JVM started with -agentlib:jdwp=transport=dt_socket,server=y,address=5005.
+    { "type": "kotlin-analyzer", "request": "attach", "name": "attach", "port": 5005 }
+  ]
+}
+```
+
+Breakpoints in Kotlin and Java files take conditions (`count > 3 &&
+order.id == "A-1"`: paths and literals, no calls), hit counts (`5`, `>= 5`,
+`% 10`) and log messages (`total {order.total}`, a logpoint). The call
+stack shows an inline function's body as a frame of its own, and under a
+resumed coroutine the suspend functions waiting for it; stepping goes
+through inlined library code and over a coroutine's suspension to its next
+line. The debug console evaluates paths (`order.items[0].price`). See
+`docs/spec/agents.md` (Debugging) for the details and what isn't there yet.
 
 ## Gradle tasks
 
@@ -124,11 +160,11 @@ Inlay hints follow VS Code's `editor.inlayHints.enabled`.
 ```bash
 npm ci
 npm run check             # types, downloader unit tests, grammar tests
-npm run test:integration  # a real VS Code: download, diagnostics, hover, definition, formatting, lenses
+npm run test:integration  # a real VS Code: download, diagnostics, hover, definition, formatting, lenses, debugging
 npm run package           # kotlin-analyzer-<version>.vsix
 ```
 
 `test:integration` serves `target/release/kotlin-analyzer` as the release
 (build it first). It runs the VS Code named by `VSCODE_EXECUTABLE`, or
-downloads one. The grammar's tests are `test/grammar/*.kt`: each `^` line
+downloads one; the debugging check needs `javac`. The grammar's tests are `test/grammar/*.kt`: each `^` line
 asserts the scopes of the line above it.

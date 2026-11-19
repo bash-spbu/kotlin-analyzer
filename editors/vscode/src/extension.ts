@@ -1,5 +1,6 @@
 // Starts kotlin-analyzer for the workspace's Kotlin (and Java) files and
 // keeps it running: restarted when a setting it reads only at start changes.
+// The same binary is the debugger (`debugger.ts`).
 
 import * as vscode from "vscode";
 import {
@@ -12,6 +13,8 @@ import {
   type ServerOptions,
 } from "vscode-languageclient/node";
 
+import { registerDebugger } from "./debugger";
+import { debugTwin } from "./debugging";
 import { registerGradleTasks } from "./gradle";
 import { findFormatter, findServer, type ServerBinary } from "./server";
 import { RESTART_SETTINGS, initializationOptions, serverSettings } from "./settings";
@@ -37,6 +40,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Api> {
     vscode.commands.registerCommand(`${SECTION}.restartServer`, () => restart(context)),
     vscode.commands.registerCommand(`${SECTION}.showLogs`, () => output?.show()),
     registerGradleTasks(context),
+    registerDebugger(async () => (binary ?? (await findServer(context))).path),
     vscode.commands.registerCommand(SHOW_REFERENCES_COMMAND, showReferences),
     vscode.workspace.onDidChangeConfiguration((change) => {
       const needsRestart = RESTART_SETTINGS.some((setting) => change.affectsConfiguration(setting));
@@ -81,9 +85,23 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
     documentSelector: selector,
     initializationOptions: initializationOptions(configuration, formatterPath),
     outputChannel: output,
+    middleware: {
+      provideCodeLenses: async (document, token, next) => withDebugLenses(await next(document, token)),
+    },
   };
   client = new LanguageClient(SECTION, "kotlin-analyzer", serverOptions, clientOptions);
   await client.start();
+}
+
+/** The server's lenses, each "Run test" one followed by its "Debug test". */
+function withDebugLenses(lenses: vscode.CodeLens[] | null | undefined): vscode.CodeLens[] | null | undefined {
+  if (!lenses) {
+    return lenses;
+  }
+  return lenses.flatMap((lens) => {
+    const twin = debugTwin(lens.command);
+    return twin === undefined ? [lens] : [lens, new vscode.CodeLens(lens.range, twin)];
+  });
 }
 
 /** The command of the server's reference-count lenses (docs/spec/lsp.md). */
