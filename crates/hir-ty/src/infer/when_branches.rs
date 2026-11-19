@@ -7,7 +7,7 @@ use hir_def::item_tree::{ClassKind, ItemKind};
 use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, named_children};
 
-use super::declarations::Inferrer;
+use super::body_facts::BodyFacts;
 use super::{Reference, WhenFinding};
 use crate::ty::Ty;
 
@@ -59,29 +59,10 @@ const LITERALS: [&str; 9] = [
     "null_literal",
 ];
 
-impl Inferrer<'_> {
-    /// Records what `node`, a `when` with a subject of `subject_type`, has
-    /// twice or needlessly.
-    pub(super) fn examine_when_branches(
-        &mut self,
-        node: SyntaxNode<'_>,
-        subject_type: &Ty,
-        has_else: bool,
-    ) {
-        let mut findings: Vec<WhenFinding> = self
-            .duplicate_conditions(node)
-            .into_iter()
-            .map(|range| WhenFinding::DuplicateCondition { range })
-            .collect();
-        if has_else && self.covers_all_cases(node, subject_type) {
-            findings.extend(redundant_else(node));
-        }
-        self.record_when_findings(node.start_byte() as u32, findings);
-    }
-
+impl BodyFacts<'_, '_> {
     /// Conditions an earlier one in the same `when` already checks. A
     /// branch with a guard (`is T if …`) isn't a plain check of its own.
-    fn duplicate_conditions(&self, node: SyntaxNode<'_>) -> Vec<TextRange> {
+    pub(super) fn duplicate_conditions(&self, node: SyntaxNode<'_>) -> Vec<TextRange> {
         let mut seen: Vec<Condition> = Vec::new();
         let mut duplicates = Vec::new();
         let entries = named_children(node).filter(|child| child.kind() == "when_entry");
@@ -166,7 +147,7 @@ impl Inferrer<'_> {
 }
 
 /// The `else` branch of `node`: its keyword, and the whole entry to remove.
-fn redundant_else(node: SyntaxNode<'_>) -> Option<WhenFinding> {
+pub(super) fn redundant_else(node: SyntaxNode<'_>) -> Option<WhenFinding> {
     let entry = named_children(node).find(|child| {
         child.kind() == "when_entry"
             && !named_children(*child).any(|part| part.kind() == "when_condition")

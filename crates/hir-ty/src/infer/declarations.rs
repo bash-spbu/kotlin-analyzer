@@ -4,12 +4,13 @@
 use std::rc::Rc;
 
 use base_db::{SourceDatabase, SourceFile};
-use hir_def::item_tree::{ItemKind, kotlin_type_ref};
+use hir_def::item_tree::ItemKind;
 use hir_def::resolver::top_level_levels;
 use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::body_facts::BodyFacts;
 use super::flow::Flow;
 use super::narrowing::Narrowed;
 use super::type_mismatches::Requirement;
@@ -21,10 +22,8 @@ use syntax::{Parse, SyntaxNode, TextRange, has_token, named_children};
 
 use super::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, NameSite,
-    NonExhaustiveWhen, NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName,
-    UnsafeCall,
+    NullCheckKind, RedundantNullCheck, Reference, ResolvedName, UnresolvedName, UnsafeCall,
 };
-use crate::lower::{TypeScope, lower_type};
 use crate::members::Types;
 use crate::ty::{FunctionType, Nullability, Ty};
 
@@ -120,8 +119,8 @@ pub(crate) struct Inferrer<'db> {
         (super::property_paths::PathRoot, ItemLocation),
         super::narrowing::PropertyPathId,
     >,
-    /// `val x: T` declared without a value: its first assignment gives it.
-    pub(super) values_without_initializer: FxHashSet<LocalId>,
+    /// What the checks after inference need of it (see `validation`).
+    pending: super::validation::Pending,
     /// The flow each lambda (by its start) ends with: what holds after a
     /// call that surely runs it in place (`run { x!! }`); dead when it
     /// always leaves the function around (`apply { return x }`).
@@ -178,13 +177,48 @@ impl<'db> Inferrer<'db> {
             path_ids: FxHashMap::default(),
             property_reads: FxHashMap::default(),
             lambda_ends: FxHashMap::default(),
-            values_without_initializer: FxHashSet::default(),
+            pending: super::validation::Pending::default(),
             condition_aliases: FxHashMap::default(),
         }
     }
 
-    pub(crate) fn finish(self) -> InferenceResult {
+    /// What inference found, with the checks that need only that run on
+    /// it.
+    pub(crate) fn finish(mut self) -> InferenceResult {
+        let findings = super::validation::validate(&self.facts(), &self.pending);
+        self.result.add_findings(findings);
         self.result
+    }
+
+    /// `receiver.member` where the receiver may be null and the data flow
+    /// doesn't follow it: whether anything around checks it is told after
+    /// inference.
+    pub(super) fn record_unfollowed_receiver(
+        &mut self,
+        receiver: SyntaxNode<'_>,
+        call: UnsafeCall,
+    ) {
+        let unfollowed = super::validation::UnfollowedReceiver {
+            receiver: super::validation::NodeSpan::of(receiver),
+            call,
+        };
+        self.pending
+            .unfollowed_receivers
+            .insert(unfollowed.call.range.start, unfollowed);
+    }
+
+    /// The type of the subject of the `when` at `node`, for the checks
+    /// after inference.
+    pub(super) fn record_when_subject(&mut self, node: SyntaxNode<'_>, subject_type: &Ty) {
+        self.pending
+            .when_subjects
+            .insert(node.start_byte() as u32, subject_type.clone());
+    }
+
+    /// Whether `node`'s branches cover every case of `subject_type`
+    /// without its `else`.
+    pub(super) fn covers_all_cases(&self, node: SyntaxNode<'_>, subject_type: &Ty) -> bool {
+        self.facts().covers_all_cases(node, subject_type)
     }
 
     // --- names and text -------------------------------------------------
@@ -226,33 +260,20 @@ impl<'db> Inferrer<'db> {
 
     /// A type written in this file.
     pub(super) fn written_type(&self, node: SyntaxNode<'_>) -> Ty {
-        if node.kind() == "type_identifier" {
-            // A bare class name, as `Type::class` and `Type::member` write it.
-            let path = intern::Path::new([self.name(node)]);
-            return match hir_def::resolver::resolve_type_path(
-                self.db,
-                self.file,
-                &path,
-                node.start_byte(),
-            ) {
-                hir_def::resolver::Resolution::Declaration(class) => {
-                    let mut class_type = self.types.self_type(class);
-                    class_type.arguments =
-                        class_type.arguments.iter().map(|_| Ty::Unknown).collect();
-                    Ty::Class(class_type)
-                }
-                _ => Ty::Unknown,
-            };
-        }
-        let type_ref = kotlin_type_ref(self.parse, node);
-        lower_type(
-            self.db,
-            TypeScope::written_at(self.db, self.file, node.start_byte()),
-            &type_ref,
-        )
+        self.facts().written_type(node)
     }
 
-    /// The first type node among `node`'s children.
+    /// What's inferred so far, for the checks that read only that.
+    pub(super) fn facts(&self) -> BodyFacts<'_, 'db> {
+        BodyFacts {
+            db: self.db,
+            file: self.file,
+            parse: self.parse,
+            types: &self.types,
+            result: &self.result,
+        }
+    }
+
     pub(super) fn type_child<'tree>(&self, node: SyntaxNode<'tree>) -> Option<SyntaxNode<'tree>> {
         named_children(node).find(|child| syntax::ast::kotlin::is_type(*child))
     }
@@ -351,36 +372,6 @@ impl<'db> Inferrer<'db> {
         }
     }
 
-    /// `x = …`, `x++`: records it when `x` is a local that can't be
-    /// assigned again — a `val` that has a value (one declared without
-    /// may get its first), a parameter, a loop's or a lambda's variable.
-    pub(super) fn check_reassigned(&mut self, target: SyntaxNode<'_>) {
-        let name = match target.kind() {
-            "directly_assignable_expression" => {
-                let mut parts = named_children(target);
-                match (parts.next(), parts.next()) {
-                    (Some(only), None) if only.kind() == "simple_identifier" => only,
-                    _ => return,
-                }
-            }
-            "simple_identifier" => target,
-            _ => return,
-        };
-        let Some(Reference::Local(local)) =
-            self.recorded_at(name).map(|resolved| resolved.reference)
-        else {
-            return;
-        };
-        let has_value = match self.local_kind(local) {
-            LocalKind::Value => !self.values_without_initializer.contains(&local),
-            LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::ImplicitIt => true,
-            _ => false,
-        };
-        if has_value {
-            self.result.val_reassignments.push(TextRange::of(name));
-        }
-    }
-
     pub(super) fn record_unsafe_call(&mut self, call: UnsafeCall) {
         self.result.unsafe_calls.push(call);
     }
@@ -393,20 +384,12 @@ impl<'db> Inferrer<'db> {
         self.result.type_mismatches.insert(start, mismatch);
     }
 
-    pub(super) fn record_when_findings(&mut self, start: u32, findings: Vec<super::WhenFinding>) {
-        self.result.when_findings.insert(start, findings);
-    }
-
     pub(super) fn record_type_operation(
         &mut self,
         start: u32,
         finding: Option<super::TypeOperationFinding>,
     ) {
         self.result.type_operations.insert(start, finding);
-    }
-
-    pub(super) fn record_non_exhaustive_when(&mut self, when: NonExhaustiveWhen) {
-        self.result.non_exhaustive_whens.push(when);
     }
 
     /// Whether a lookup of `name` at `site`, here, searched everything there
@@ -1517,11 +1500,6 @@ impl<'db> Inferrer<'db> {
                         {
                             self.assign_local(local, initialized);
                         }
-                        let delegated =
-                            named_children(node).any(|part| part.kind() == "property_delegate");
-                        if initializer_of(node).is_none() && !delegated {
-                            self.values_without_initializer.insert(local);
-                        }
                         let initializer = initializer_of(node).filter(|_| kind == LocalKind::Value);
                         if let Some(initializer) = initializer {
                             self.remember_not_null_implication(local, initializer);
@@ -1701,7 +1679,7 @@ fn function_result(node: SyntaxNode<'_>) -> FunctionResult<'_> {
 
 /// A property's initializer: the expression after its name (not a
 /// delegate, accessors or modifiers).
-fn initializer_of(property: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+pub(super) fn initializer_of(property: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
     let mut after_variable = false;
     for child in named_children(property) {
         match child.kind() {

@@ -64,7 +64,7 @@ rules of whoever owns this checkout.
 | what a type or import name means | `crates/hir-def/src/resolver.rs` (imports, default imports, nested and inherited names), `def_map.rs` (visibility, classpath per source set), `expect_actual.rs` (Multiplatform) |
 | reading JARs, the JDK's `ct.sym`, Kotlin metadata | `crates/classfile/`, `crates/hir-def/src/library.rs` |
 | types, members, overrides, supertypes | `crates/hir-ty/src/members.rs` (overriding: `members/overrides.rs`), `lower.rs`, `signature.rs` |
-| what a call or name in a body means | `crates/hir-ty/src/infer/`: `call.rs` (levels in Kotlin's scope order, overloads), `expressions.rs`, `declarations.rs` (locals, receivers, scopes), `narrowing.rs` (smart casts), `fit.rs` |
+| what a call or name in a body means | `crates/hir-ty/src/infer/`: `call.rs` (levels in Kotlin's scope order, overloads), `expressions.rs`, `declarations.rs` (locals, receivers, scopes), `narrowing.rs` (smart casts), `flow.rs` (the data flow), `fit.rs`; checks that need only what inference found run after it in `validation.rs`, over `BodyFacts` (syntax + resolved names; `value_path.rs` names values by what they resolve to) |
 | a diagnostic | `crates/ide/src/diagnostics/`; `facts.rs` turns inference facts into diagnostics, `imports.rs`, `package.rs`. Spec: `docs/spec/diagnostics.md` |
 | an editor feature (hover, completion, rename, …) | `crates/ide/src/<feature>.rs`, exposed by `crates/ide/src/lib.rs`, wired in `crates/kotlin-analyzer/src/server/handlers.rs` / `editing.rs`; capabilities in `server/mod.rs`; settings in `server/settings.rs` |
 | loading, reloading, the Gradle export the server runs | `crates/kotlin-analyzer/src/load.rs`, `server/gradle_export.rs` |

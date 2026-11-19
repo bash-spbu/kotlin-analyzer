@@ -8,7 +8,6 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
-use super::member_scope::data_flow_scope;
 use super::property_paths::{PropertyRead, property_name};
 use super::{LocalId, NullCheckKind, UnsafeCall};
 use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
@@ -16,44 +15,6 @@ use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
 /// Members every value has, which Kotlin also offers on a nullable
 /// receiver (`Any?.toString()`, `Any?.hashCode()`).
 const NULL_SAFE_MEMBERS: &[&str] = &["equals", "hashCode", "toString"];
-
-/// Calls that assert their argument isn't null, or a condition about it.
-const ASSERTIONS: &[&str] = &[
-    "require",
-    "requireNotNull",
-    "check",
-    "checkNotNull",
-    "assert",
-    "assertNotNull",
-    "assertThat",
-];
-
-/// An expression as data flow compares it: its text without whitespace,
-/// without a leading `this.`, and with `?.` and `!!.` read as `.` —
-/// `this.user`, `user`, and the `user?.name` of `user?.name != null` and
-/// the `user.name` after it are one path.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) struct StablePath(String);
-
-impl StablePath {
-    pub(super) fn of(text: &str) -> StablePath {
-        let compact: String = text
-            .chars()
-            .filter(|char| !char.is_whitespace())
-            .collect::<String>()
-            .replace("?.", ".")
-            .replace("!!.", ".");
-        match compact.strip_prefix("this.") {
-            Some(member) => StablePath(member.to_owned()),
-            None => StablePath(compact),
-        }
-    }
-
-    /// Whether `text` mentions the path anywhere (an assertion's argument).
-    fn mentioned_in(&self, text: &str) -> bool {
-        text.replace(char::is_whitespace, "").contains(&self.0)
-    }
-}
 
 /// What a smart cast narrows: a local, or a stable property read from a
 /// stable value (`order.status`, the `status` of `this`), which the
@@ -542,10 +503,10 @@ pub(super) enum NullKnowledge {
 impl Inferrer<'_> {
     /// Records `receiver.member` (with a plain `.`) as unsafe when the
     /// receiver's type is nullable, the member is the class's own (not an
-    /// extension, which may take a nullable receiver), and nothing in the
-    /// declaration around could have smart-cast the receiver: it's never
-    /// compared with `null`, type-checked, asserted, assigned or used with
-    /// `?.`, `!!` or `?:` there.
+    /// extension, which may take a nullable receiver), and the receiver
+    /// isn't smart-cast — by the data flow where it follows the receiver;
+    /// else by nothing in the declaration around (see
+    /// `validation::unguarded`), told once inference is done.
     pub(super) fn check_receiver_not_null(
         &mut self,
         receiver: SyntaxNode<'_>,
@@ -561,19 +522,16 @@ impl Inferrer<'_> {
         if NULL_SAFE_MEMBERS.contains(&self.text(name)) || !self.is_own_member(member) {
             return;
         }
-        let guarded = match self.null_knowledge(receiver) {
-            NullKnowledge::Followed => false,
-            NullKnowledge::Unfollowed => {
-                self.null_guarded(receiver, &StablePath::of(self.text(receiver)))
-            }
-        };
-        if guarded {
-            return;
-        }
-        self.record_unsafe_call(UnsafeCall {
+        let call = UnsafeCall {
             range: TextRange::of(name),
             receiver: receiver_type.clone(),
-        });
+        };
+        match self.null_knowledge(receiver) {
+            NullKnowledge::Followed => self.record_unsafe_call(call),
+            // Whether anything around could have narrowed it is told once
+            // every name in the body is resolved.
+            NullKnowledge::Unfollowed => self.record_unfollowed_receiver(receiver, call),
+        }
     }
 
     /// Whether no value of `ty` is null: a non-null class or function type,
@@ -643,62 +601,6 @@ impl Inferrer<'_> {
             }
         );
         item.parent.is_some() && !is_extension
-    }
-
-    /// Whether the expression spelled `path` is checked for `null` (or
-    /// asserted, assigned, used null-safely) anywhere in the declaration
-    /// around `node`.
-    fn null_guarded(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
-        let scope = data_flow_scope(node);
-        syntax::descendants(scope).any(|candidate| self.guards(candidate, path))
-    }
-
-    /// Whether `node` compares the expression spelled `path` with `null`,
-    /// type-checks, asserts, assigns or uses it null-safely.
-    pub(super) fn guards(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
-        let spelled = |child: Option<SyntaxNode<'_>>| {
-            child.is_some_and(|child| StablePath::of(self.text(child)) == *path)
-        };
-        let mut children = named_children(node);
-        match node.kind() {
-            "equality_expression" => {
-                let operands: Vec<SyntaxNode<'_>> = named_children(node).collect();
-                let has_null = operands
-                    .iter()
-                    .any(|operand| operand.kind() == "null_literal");
-                has_null && operands.iter().any(|operand| spelled(Some(*operand)))
-            }
-            "check_expression" | "postfix_expression" | "elvis_expression" | "when_subject"
-            | "assignment" => spelled(children.next()),
-            "directly_assignable_expression" => StablePath::of(self.text(node)) == *path,
-            "navigation_expression" => {
-                let receiver = children.next();
-                let suffix = children.next();
-                let null_safe = suffix.is_some_and(|suffix| {
-                    has_token(suffix, "?.")
-                        || named_children(suffix).any(|name| {
-                            self.text(name).starts_with("isNull") || self.text(name) == "orEmpty"
-                        })
-                });
-                null_safe && spelled(receiver)
-            }
-            "call_expression" => {
-                let callee = children
-                    .next()
-                    .map(|callee| self.text(callee))
-                    .unwrap_or("");
-                let asserts = ASSERTIONS.contains(&callee) || callee.starts_with("assert");
-                asserts && path.mentioned_in(self.text(node))
-            }
-            "variable_declaration" => {
-                // `var x: T? = value`: what was assigned may have been
-                // non-null.
-                named_children(node)
-                    .next()
-                    .is_some_and(|name| StablePath::of(self.text(name)) == *path)
-            }
-            _ => false,
-        }
     }
 }
 

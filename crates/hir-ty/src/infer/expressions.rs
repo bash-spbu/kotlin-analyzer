@@ -800,9 +800,6 @@ impl Inferrer<'_> {
             return self.types.builtin("Boolean");
         }
         let operand_type = self.expression(operand, expected);
-        if has_token(node, "++") || has_token(node, "--") {
-            self.check_reassigned(operand);
-        }
         if has_token(node, "-") {
             return self
                 .operator_result(&operand_type, "unaryMinus", Vec::new())
@@ -816,9 +813,6 @@ impl Inferrer<'_> {
             return Ty::Unknown;
         };
         let operand_type = self.expression(operand, None);
-        if has_token(node, "++") || has_token(node, "--") {
-            self.check_reassigned(operand);
-        }
         if let Some(assertion) = syntax::token(node, "!!") {
             self.check_null_check(
                 operand,
@@ -978,7 +972,6 @@ impl Inferrer<'_> {
             None => self.expression(value, expected),
         };
         if is_plain {
-            self.check_reassigned(target);
             self.narrow_assigned(target, &ty);
         }
     }
@@ -1237,11 +1230,8 @@ impl Inferrer<'_> {
         self.pop_scope();
         // What follows knows what every way it can come from knows.
         self.flow = self.merge(branch_ends);
-        if let (false, Some(subject_type)) = (has_else, &subject_type) {
-            self.check_exhaustive(node, subject_type);
-        }
         if let Some(subject_type) = &subject_type {
-            self.examine_when_branches(node, subject_type, has_else);
+            self.record_when_subject(node, subject_type);
         }
         let exhaustive_enough = has_else || expected.is_some();
         if branches.is_empty() || !exhaustive_enough && subject_type.is_none() {

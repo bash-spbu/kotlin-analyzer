@@ -15,6 +15,7 @@
 //! keeps its candidates (or none) and its type is `Unknown`, so checks built
 //! on this stay silent instead of guessing.
 
+mod body_facts;
 mod call;
 mod completion;
 mod contracts;
@@ -30,6 +31,8 @@ mod property_paths;
 mod reassociation;
 mod type_mismatches;
 mod type_operations;
+mod validation;
+mod value_path;
 mod when_branches;
 
 use std::sync::Arc;
@@ -290,8 +293,7 @@ pub struct InferenceResult {
     /// By the start of the cast's `as` or the check; `None` once examined
     /// and found fine (a lambda inferred again overwrites it).
     type_operations: FxHashMap<u32, Option<TypeOperationFinding>>,
-    /// By the start of the `when`; a lambda inferred again overwrites them.
-    when_findings: FxHashMap<u32, Vec<WhenFinding>>,
+    when_findings: Vec<WhenFinding>,
     /// By the start of the value; `None` once examined and fine.
     type_mismatches: FxHashMap<u32, Option<TypeMismatch>>,
 }
@@ -361,7 +363,7 @@ impl InferenceResult {
 
     /// What `when`s have twice or needlessly, in text order.
     pub fn when_findings(&self) -> Vec<&WhenFinding> {
-        let mut found: Vec<&WhenFinding> = self.when_findings.values().flatten().collect();
+        let mut found: Vec<&WhenFinding> = self.when_findings.iter().collect();
         found.sort_by_key(|finding| finding.range().start);
         found
     }
@@ -372,6 +374,16 @@ impl InferenceResult {
             self.type_operations.values().flatten().collect();
         found.sort_by_key(|finding| finding.range.start);
         found
+    }
+}
+
+impl InferenceResult {
+    fn add_findings(&mut self, findings: validation::Findings) {
+        self.non_exhaustive_whens
+            .extend(findings.non_exhaustive_whens);
+        self.when_findings.extend(findings.when_findings);
+        self.val_reassignments.extend(findings.val_reassignments);
+        self.unsafe_calls.extend(findings.unsafe_calls);
     }
 }
 

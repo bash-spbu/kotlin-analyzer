@@ -1167,6 +1167,31 @@ fun other(text: String?) {
 }
 
 #[test]
+fn checks_around_an_unfollowed_receiver_are_matched_by_what_they_name_not_by_spelling() {
+    check_facts(
+        r#"
+//- /app/Use.kt
+package app
+open class Account(open val owner: String?, open val aliasCount: Int, open val alias: String?) {
+    fun shadowed(owner: String?) {
+        if (owner != null) this.owner.length
+    }
+    fun mentioned() {
+        check(aliasCount > 0)
+        alias.length
+    }
+    fun parenthesized() {
+        if ((this.owner) != null) owner.length
+    }
+}
+"#,
+        expect![[r#"
+            unsafe@4 String?
+            unsafe@8 String?"#]],
+    );
+}
+
+#[test]
 fn facts_for_when_over_enums_sealed_types_and_booleans() {
     check_facts(
         r#"

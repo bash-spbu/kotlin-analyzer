@@ -7,13 +7,13 @@
 use hir_def::item_tree::{ClassKind, ItemKind, Modifiers, Signature};
 use hir_def::{ItemContainer, ItemLocation};
 use syntax::ast::kotlin::TypeTest;
-use syntax::{SyntaxNode, TextRange, named_children};
+use syntax::{SyntaxNode, named_children};
 
-use super::declarations::Inferrer;
+use super::Reference;
+use super::body_facts::BodyFacts;
 use super::fit::Fit;
 use super::member_scope::data_flow_scope;
-use super::narrowing::StablePath;
-use super::{NonExhaustiveWhen, Reference};
+use super::value_path::ValuePath;
 use crate::lower::lower_supertype;
 use crate::ty::{Nullability, Ty};
 
@@ -31,7 +31,7 @@ struct Covered {
 /// How sure a list of cases must be: complete enough to call one missing,
 /// or so complete that nothing can be missing (an `else` redundant).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Completeness {
+pub(super) enum Completeness {
     /// Every case found is real.
     Found,
     /// No case exists beyond those found.
@@ -46,22 +46,7 @@ enum Cases {
     Inheritors(Vec<ItemLocation>),
 }
 
-impl Inferrer<'_> {
-    /// Records `node` (a `when` without `else`) when it misses cases.
-    pub(super) fn check_exhaustive(&mut self, node: SyntaxNode<'_>, subject_type: &Ty) {
-        let Some(missing) = self.missing_cases(node, subject_type, Completeness::Found) else {
-            return;
-        };
-        if missing.is_empty() {
-            return;
-        }
-        let start = node.start_byte();
-        self.record_non_exhaustive_when(NonExhaustiveWhen {
-            range: TextRange::new(start, start + "when".len()),
-            missing,
-        });
-    }
-
+impl BodyFacts<'_, '_> {
     /// Whether `node`'s branches cover every case of `subject_type` without
     /// its `else` — then the `else` is redundant. A Java value may be null
     /// too.
@@ -71,7 +56,7 @@ impl Inferrer<'_> {
     }
 
     /// The cases `node`'s branches miss; `None` when that isn't known.
-    fn missing_cases(
+    pub(super) fn missing_cases(
         &self,
         node: SyntaxNode<'_>,
         subject_type: &Ty,
@@ -172,7 +157,10 @@ impl Inferrer<'_> {
         else {
             return true;
         };
-        let path = StablePath::of(self.text(subject));
+        // A value no path names (a call's result) is never narrowed.
+        let Some(path) = self.value_path(subject) else {
+            return false;
+        };
         let scope = data_flow_scope(node);
         syntax::descendants(scope)
             .filter(|candidate| candidate.end_byte() <= node.start_byte())
@@ -181,12 +169,13 @@ impl Inferrer<'_> {
 
     /// Whether `node` compares the expression spelled `path` with anything,
     /// or tests its type.
-    fn compares(&self, node: SyntaxNode<'_>, path: &StablePath) -> bool {
+    fn compares(&self, node: SyntaxNode<'_>, path: &ValuePath) -> bool {
         let is_test = matches!(
             node.kind(),
             "equality_expression" | "check_expression" | "when_subject"
         );
-        is_test && named_children(node).any(|operand| StablePath::of(self.text(operand)) == *path)
+        is_test
+            && named_children(node).any(|operand| self.value_path(operand).as_ref() == Some(path))
     }
 
     fn cases_of(&self, subject_type: &Ty, completeness: Completeness) -> Option<Cases> {
