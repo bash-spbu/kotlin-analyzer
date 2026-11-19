@@ -81,7 +81,7 @@ fn document(snapshot: &Snapshot) -> ide::Cancellable<Option<(FileId, Arc<str>, L
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(None);
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     Ok(Some((file, text, index)))
 }
 
@@ -92,7 +92,11 @@ fn completion(
     let Some((file, text, index)) = document(snapshot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position.position);
+    let offset = convert::offset(
+        &text,
+        params.text_document_position.position,
+        snapshot.encoding,
+    );
     let completions = snapshot.analysis.completions(file, offset)?;
     let document = params.text_document_position.text_document;
     let items: Vec<lsp_types::CompletionItem> = completions
@@ -103,6 +107,12 @@ fn completion(
             label: item.label.clone(),
             kind: Some(completion_kind(item.kind)),
             detail: item.detail.clone(),
+            label_details: (item.label_detail.is_some() || item.label_description.is_some()).then(
+                || lsp_types::CompletionItemLabelDetails {
+                    detail: item.label_detail.clone(),
+                    description: item.label_description.clone(),
+                },
+            ),
             sort_text: Some(format!("{position:05}")),
             filter_text: Some(item.label.clone()),
             text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
@@ -184,7 +194,11 @@ fn signature_help(
     let Some((file, text, _)) = document(snapshot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position_params.position);
+    let offset = convert::offset(
+        &text,
+        params.text_document_position_params.position,
+        snapshot.encoding,
+    );
     let Some(help) = snapshot.analysis.signature_help(file, offset)? else {
         return Ok(serde_json::Value::Null);
     };
@@ -234,7 +248,7 @@ fn location(
     else {
         return Ok(None);
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     Ok(Some(lsp_types::Location {
         uri,
         range: convert::range(&index, &text, range.range),
@@ -248,7 +262,11 @@ fn references(
     let Some((file, text, _)) = document(snapshot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position.position);
+    let offset = convert::offset(
+        &text,
+        params.text_document_position.position,
+        snapshot.encoding,
+    );
     let mut locations = Vec::new();
     for found in snapshot
         .analysis
@@ -266,7 +284,11 @@ fn highlights(
     let Some((file, text, index)) = document(snapshot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position_params.position);
+    let offset = convert::offset(
+        &text,
+        params.text_document_position_params.position,
+        snapshot.encoding,
+    );
     let highlights: Vec<lsp_types::DocumentHighlight> = snapshot
         .analysis
         .highlights(file, offset)?
@@ -289,7 +311,7 @@ fn prepare_rename(
     let Some((file, text, index)) = document(snapshot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.position);
+    let offset = convert::offset(&text, params.position, snapshot.encoding);
     match snapshot.analysis.prepare_rename(file, offset)? {
         Ok(range) => {
             Ok(serde_json::to_value(convert::range(&index, &text, range)).unwrap_or_default())
@@ -303,7 +325,11 @@ fn rename(snapshot: &Snapshot, params: lsp_types::RenameParams) -> Answer {
         let Some((file, text, _)) = document(snapshot)? else {
             return Ok(Ok(serde_json::Value::Null));
         };
-        let offset = convert::offset(&text, params.text_document_position.position);
+        let offset = convert::offset(
+            &text,
+            params.text_document_position.position,
+            snapshot.encoding,
+        );
         let change = match snapshot.analysis.rename(file, offset, &params.new_name)? {
             Ok(change) => change,
             Err(error) => return Ok(Err(error.to_string())),
@@ -385,7 +411,7 @@ pub(super) fn workspace_edit(
         ) else {
             continue;
         };
-        let index = LineIndex::new(&text);
+        let index = LineIndex::with_unit(&text, snapshot.encoding);
         document_edits.push(lsp_types::TextDocumentEdit {
             text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
                 uri,

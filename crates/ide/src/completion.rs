@@ -41,6 +41,12 @@ pub struct CompletionItem {
     /// What accepting it writes when that isn't its label (`count = ` of
     /// a named argument).
     pub text: Option<String>,
+    /// Shown right after the label: the rest of a declaration's signature
+    /// (`(amount: Long): Unit`, `: String`).
+    pub label_detail: Option<String>,
+    /// Shown apart, less prominently: where it's declared (its class, its
+    /// package) or the import accepting it adds.
+    pub label_description: Option<String>,
 }
 
 impl CompletionItem {
@@ -300,6 +306,8 @@ impl<'db> Builder<'db> {
                 relevance: source.relevance(),
                 declaration: None,
                 text: None,
+                label_detail: None,
+                label_description: None,
             },
         ));
         true
@@ -604,6 +612,8 @@ impl<'db> Builder<'db> {
                     relevance: Source::Import.relevance(),
                     declaration: Some(location),
                     text: None,
+                    label_detail: None,
+                    label_description: None,
                 },
             ));
         }
@@ -631,6 +641,11 @@ impl<'db> Builder<'db> {
 
     fn finish(self) -> Completions {
         let mut items = self.items;
+        for (_, item) in &mut items {
+            let (detail, description) = label_details(self.db, item);
+            item.label_detail = detail;
+            item.label_description = description;
+        }
         // Stable: within a level, items keep the order they were found in —
         // a class's own members before inherited ones, `Any`'s last.
         items.sort_by_key(|(quality, item)| (item.relevance, *quality));
@@ -701,4 +716,37 @@ fn kind_of(kind: ItemKind, is_member: bool) -> CompletionKind {
         ItemKind::TypeAlias => CompletionKind::TypeAlias,
         ItemKind::EnumEntry => CompletionKind::EnumMember,
     }
+}
+
+/// What follows an item's label (the rest of its signature) and what's
+/// shown apart (where it's declared, or the import it adds).
+fn label_details(db: &RootDatabase, item: &CompletionItem) -> (Option<String>, Option<String>) {
+    let import = item
+        .import
+        .as_ref()
+        .map(|import| format!("import {import}"));
+    let Some(location) = item.declaration else {
+        // A local: `name: Type` as its detail.
+        let after_name = item
+            .detail
+            .as_deref()
+            .and_then(|detail| detail.strip_prefix(item.label.as_str()))
+            .filter(|rest| rest.starts_with(':'))
+            .map(str::to_owned);
+        return (after_name, import);
+    };
+    let tree = hir::item_tree(db, location.container);
+    let declared = tree.item(location.item);
+    let signature = tree.signature(location.item);
+    let name = declared.name.as_str();
+    let after_name = [format!("{name}("), format!("{name}:"), format!("{name}<")]
+        .iter()
+        .find_map(|start| signature.find(start.as_str()))
+        .map(|start| signature[start + name.len()..].to_owned());
+    let container = match declared.parent {
+        Some(parent) => Some(tree.item(parent).name.to_string()),
+        None if tree.package.is_root() => None,
+        None => Some(tree.package.to_string()),
+    };
+    (after_name, import.or(container))
 }

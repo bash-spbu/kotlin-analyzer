@@ -28,6 +28,17 @@ impl Client {
     }
 
     fn start_with(root: &Path, initialization_options: Value) -> Client {
+        Client::start_offering(root, initialization_options, json!({})).0
+    }
+
+    /// A client with `offered` added to its capabilities (`general`,
+    /// `textDocument`, more of `workspace`), with the server's answer to
+    /// `initialize`.
+    fn start_offering(
+        root: &Path,
+        initialization_options: Value,
+        offered: Value,
+    ) -> (Client, Value) {
         let (server, connection) = Connection::memory();
         let thread = std::thread::spawn(move || super::run_on(&server));
         let mut client = Client {
@@ -37,18 +48,60 @@ impl Client {
             unread: Vec::new(),
             server_requests: Vec::new(),
         };
-        client.request(
+        let mut capabilities = json!({
+            "workspace": {
+                "semanticTokens": { "refreshSupport": true },
+                "didChangeWatchedFiles": { "dynamicRegistration": true }
+            }
+        });
+        for (key, value) in offered.as_object().into_iter().flatten() {
+            match (capabilities[key].as_object_mut(), value.as_object()) {
+                (Some(existing), Some(added)) => {
+                    existing.extend(
+                        added
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    );
+                }
+                _ => capabilities[key] = value.clone(),
+            }
+        }
+        let initialized = client.request(
             "initialize",
             json!({
                 "processId": null,
                 "rootUri": uri(root),
-                "capabilities": {
-                    "workspace": {
-                        "semanticTokens": { "refreshSupport": true },
-                        "didChangeWatchedFiles": { "dynamicRegistration": true }
-                    }
-                },
+                "capabilities": capabilities,
                 "initializationOptions": initialization_options,
+            }),
+        );
+        client.notify("initialized", json!({}));
+        (client, initialized)
+    }
+
+    /// A client of a workspace of several folders.
+    fn start_in_folders(folders: &[&Path]) -> Client {
+        let (server, connection) = Connection::memory();
+        let thread = std::thread::spawn(move || super::run_on(&server));
+        let mut client = Client {
+            connection,
+            server: Some(thread),
+            next_id: 0,
+            unread: Vec::new(),
+            server_requests: Vec::new(),
+        };
+        let workspace_folders: Vec<Value> = folders
+            .iter()
+            .map(|folder| json!({ "uri": uri(folder), "name": "folder" }))
+            .collect();
+        client.request(
+            "initialize",
+            json!({
+                "processId": null,
+                "rootUri": uri(folders[0]),
+                "workspaceFolders": workspace_folders,
+                "capabilities": {},
+                "initializationOptions": { "gradleExport": false },
             }),
         );
         client.notify("initialized", json!({}));
@@ -693,4 +746,193 @@ fn renaming_files_and_folders_edits_what_follows_them() {
     assert!(client.workspace_symbols("Order").is_empty());
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn positions_count_utf8_bytes_when_the_client_offers_them() {
+    let root = workspace("utf8");
+    let file = root.join("src/main/kotlin/app/Names.kt");
+    // `ёж` is 2 characters, 4 bytes.
+    let text = "package app\nval ёж = 1\nval copy = ёж\n";
+    std::fs::write(&file, text).unwrap();
+    let (mut client, initialized) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({ "general": { "positionEncodings": ["utf-8", "utf-16"] } }),
+    );
+    assert_eq!(initialized["capabilities"]["positionEncoding"], "utf-8");
+    client.wait_for_load(1);
+    client.open(&file, text);
+    // `ёж` of `copy = ёж` starts at byte 11 of its line.
+    let definition = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "position": { "line": 2, "character": 12 },
+        }),
+    );
+    let target = &definition.as_array().expect("a definition")[0];
+    assert_eq!(
+        target["range"]["start"],
+        json!({ "line": 1, "character": 4 })
+    );
+    assert_eq!(target["range"]["end"], json!({ "line": 1, "character": 8 }));
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn type_and_call_hierarchies_expand_from_the_items_they_send() {
+    let root = workspace("hierarchy");
+    let file = root.join("src/main/kotlin/app/Shapes.kt");
+    let text = "package app\ninterface Shape\nclass Square : Shape\nfun area(shape: Shape): Int = side()\nfun side(): Int = 1\nfun report() = area(Square())\n";
+    std::fs::write(&file, text).unwrap();
+    let (mut client, initialized) =
+        Client::start_offering(&root, json!({ "gradleExport": false }), json!({}));
+    assert_eq!(initialized["capabilities"]["typeHierarchyProvider"], true);
+    client.wait_for_load(1);
+    let at = |line: u32, character: u32| {
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "position": { "line": line, "character": character },
+        })
+    };
+    let names = |items: &Value, field: Option<&str>| -> Vec<String> {
+        let mut names: Vec<String> = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| field.map_or(item, |field| &item[field]))
+            .map(|item| item["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    let shape = client.request("textDocument/prepareTypeHierarchy", at(1, 11));
+    let shape = shape[0].clone();
+    assert_eq!(shape["name"], "Shape");
+    let subtypes = client.request("typeHierarchy/subtypes", json!({ "item": shape }));
+    assert_eq!(names(&subtypes, None), ["Square"]);
+    let square = subtypes[0].clone();
+    let supertypes = client.request("typeHierarchy/supertypes", json!({ "item": square }));
+    assert_eq!(names(&supertypes, None), ["Shape"]);
+
+    let area = client.request("textDocument/prepareCallHierarchy", at(3, 5));
+    let area = area[0].clone();
+    assert_eq!(area["name"], "area");
+    let incoming = client.request("callHierarchy/incomingCalls", json!({ "item": area }));
+    assert_eq!(names(&incoming, Some("from")), ["report"]);
+    assert_eq!(
+        incoming[0]["fromRanges"][0]["start"],
+        json!({ "line": 5, "character": 15 })
+    );
+    let outgoing = client.request("callHierarchy/outgoingCalls", json!({ "item": area }));
+    assert_eq!(names(&outgoing, Some("to")), ["side"]);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_client_that_pulls_diagnostics_is_answered_and_asked_to_pull_again() {
+    let root = workspace("pull");
+    let file = root.join("src/main/kotlin/app/Broken.kt");
+    let text = "package app\nfun broken( {\n";
+    std::fs::write(&file, text).unwrap();
+    let (mut client, initialized) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({
+            "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+            "workspace": { "diagnostics": { "refreshSupport": true } },
+        }),
+    );
+    assert_eq!(
+        initialized["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
+        true
+    );
+    client.wait_for_load(1);
+    client.open(&file, text);
+    let document = json!({ "textDocument": { "uri": uri(&file) } });
+    let first = client.request("textDocument/diagnostic", document.clone());
+    assert_eq!(first["kind"], "full");
+    assert!(!first["items"].as_array().unwrap().is_empty(), "{first}");
+    let id = first["resultId"].as_str().unwrap().to_owned();
+
+    // Asked again with nothing changed: unchanged.
+    let mut again = document.clone();
+    again["previousResultId"] = json!(id);
+    let unchanged = client.request("textDocument/diagnostic", again.clone());
+    assert_eq!(unchanged["kind"], "unchanged");
+
+    // An edit: the client is asked to pull again, and gets the new state.
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri(&file), "version": 2 },
+            "contentChanges": [{ "text": "package app\nfun fixed() {}\n" }],
+        }),
+    );
+    client.wait_for_server_request("workspace/diagnostic/refresh");
+    let fixed = client.request("textDocument/diagnostic", again);
+    assert_eq!(fixed["kind"], "full");
+    assert!(fixed["items"].as_array().unwrap().is_empty(), "{fixed}");
+
+    let workspace = client.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+    let reported: Vec<&str> = workspace["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["uri"].as_str())
+        .collect();
+    assert!(reported.contains(&uri(&file).as_str()), "{workspace}");
+    // No diagnostics were pushed to a client that pulls.
+    assert!(
+        !client
+            .unread
+            .iter()
+            .any(|notification| notification.method == "textDocument/publishDiagnostics")
+    );
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn several_workspace_folders_are_one_workspace_that_follows_their_changes() {
+    let billing = workspace("folder-billing");
+    let users = workspace("folder-users");
+    let reports = workspace("folder-reports");
+    std::fs::write(
+        billing.join("src/main/kotlin/app/Invoice.kt"),
+        "package app\nclass Invoice\n",
+    )
+    .unwrap();
+    std::fs::write(
+        users.join("src/main/kotlin/app/Customer.kt"),
+        "package app\nclass Customer\n",
+    )
+    .unwrap();
+    std::fs::write(
+        reports.join("src/main/kotlin/app/Report.kt"),
+        "package app\nclass Report\n",
+    )
+    .unwrap();
+    let mut client = Client::start_in_folders(&[&billing, &users]);
+    client.wait_for_load(1);
+    assert_eq!(client.workspace_symbols("Invoice"), vec!["Invoice"]);
+    assert_eq!(client.workspace_symbols("Customer"), vec!["Customer"]);
+
+    let folder = |path: &Path| json!({ "uri": uri(path), "name": "folder" });
+    client.notify(
+        "workspace/didChangeWorkspaceFolders",
+        json!({ "event": { "added": [folder(&reports)], "removed": [folder(&users)] } }),
+    );
+    client.wait_for_load(2);
+    assert_eq!(client.workspace_symbols("Report"), vec!["Report"]);
+    assert!(client.workspace_symbols("Customer").is_empty());
+    assert_eq!(client.workspace_symbols("Invoice"), vec!["Invoice"]);
+    client.shut_down();
+    for root in [billing, users, reports] {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

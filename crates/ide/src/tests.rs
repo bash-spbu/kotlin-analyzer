@@ -3128,6 +3128,52 @@ fn check_completions(fixture: &str, take: usize, expected: Expect) {
 }
 
 #[test]
+fn completion_items_show_the_rest_of_their_signature_and_where_they_are_declared() {
+    let details = |fixture: &str, labels: &[&str]| {
+        let fixture = Fixture::with_mini_stdlib(fixture);
+        let (file, offset) = fixture.cursor();
+        let completions = analysis(&fixture).completions(file, offset).unwrap();
+        labels
+            .iter()
+            .filter_map(|label| completions.items.iter().find(|item| item.label == *label))
+            .map(|item| {
+                format!(
+                    "{}{}  | {}",
+                    item.label,
+                    item.label_detail.as_deref().unwrap_or(""),
+                    item.label_description.as_deref().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    expect![[r#"
+        charge(amount: Long): Unit  | Account
+        owner: String  | Account"#]]
+    .assert_eq(&details(
+        r#"
+//- /app/b/Use.kt
+package b
+class Account(val owner: String) { fun charge(amount: Long): Unit {} }
+fun use(account: Account) { account.$0 }
+"#,
+        &["charge", "owner"],
+    ));
+    expect![[r#"
+        total: Int  | 
+        helper(): Int  | b"#]]
+    .assert_eq(&details(
+        r#"
+//- /app/b/Use.kt
+package b
+fun helper(): Int = 1
+fun use() { val total = 1; total + $0 }
+"#,
+        &["total", "helper"],
+    ));
+}
+
+#[test]
 fn completion_in_an_argument_offers_the_parameters_by_name_and_resolves_documentation() {
     // `name = ` first for each parameter not passed by name yet; then what
     // the scope has. Resolving an item gives its declaration's KDoc.
@@ -3441,6 +3487,116 @@ fun use() {
         > pay([amount: Long])
           pay(amount: Long, note: String, vararg tags: String)"#]],
     );
+}
+
+#[test]
+fn the_declaration_of_an_actual_is_its_expect_and_of_anything_else_its_definition() {
+    let fixture = r#"
+//- /shared/common/a/Store.kt module=:shared set=commonMain
+package a
+expect fun storeUrl(): String?
+fun plain(): Int = 1
+//- /shared/jvm/a/Store.jvm.kt module=:shared set=jvmMain deps=:shared/commonMain
+package a
+actual fun storeUrl(): String? = null
+fun use() = storeUrl() + plain()
+"#;
+    let declarations = |marker: &str, marked: &str| {
+        let fixture = Fixture::parse(&fixture.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        analysis(&fixture)
+            .goto_declaration(file, offset)
+            .unwrap()
+            .iter()
+            .map(|target| match target.file {
+                crate::NavigationFile::Workspace(file) => {
+                    let text = fixture.vfs.contents(file).unwrap();
+                    let line = text[..target.focus_range.start as usize]
+                        .matches('\n')
+                        .count()
+                        + 1;
+                    format!("{}:{line}", fixture.vfs.path(file).display())
+                }
+                crate::NavigationFile::Library { .. } => "library".to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // The `actual` declaration, and a call that resolves to it: its `expect`.
+    expect!["/shared/common/a/Store.kt:2"].assert_eq(&declarations(
+        "actual fun storeUrl",
+        "actual fun store$0Url",
+    ));
+    expect!["/shared/common/a/Store.kt:2"]
+        .assert_eq(&declarations("= storeUrl()", "= store$0Url()"));
+    // An ordinary function: its definition.
+    expect!["/shared/common/a/Store.kt:3"].assert_eq(&declarations("+ plain()", "+ pla$0in()"));
+}
+
+const HIERARCHY: &str = r#"
+//- /app/b/Shapes.kt
+package b
+interface Shape
+open class Polygon : Shape
+class Square : Polygon()
+class Circle : Shape
+fun area(shape: Shape): Int = when (shape) { is Square -> side(); else -> 0 }
+fun side(): Int = 1
+fun report() = area(Square()) + area(Circle())
+val total = area(Circle())
+"#;
+
+fn hierarchy_names(items: &[crate::HierarchyItem]) -> String {
+    let mut names: Vec<&str> = items.iter().map(|item| item.target.name.as_str()).collect();
+    names.sort();
+    names.join(", ")
+}
+
+#[test]
+fn the_type_hierarchy_has_direct_supertypes_and_workspace_subtypes() {
+    let at = |marker: &str, marked: &str| {
+        let fixture = Fixture::with_mini_stdlib(&HIERARCHY.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        let analysis = analysis(&fixture);
+        let prepared = analysis.prepare_type_hierarchy(file, offset).unwrap();
+        let [item] = &prepared[..] else {
+            panic!("one class: {prepared:?}");
+        };
+        let key = item.key.clone().unwrap();
+        format!(
+            "{}: supertypes [{}], subtypes [{}]",
+            item.target.name,
+            hierarchy_names(&analysis.supertypes(file, &key).unwrap()),
+            hierarchy_names(&analysis.subtypes(file, &key).unwrap()),
+        )
+    };
+    // A class's or an interface's implicit `Any` is one of its supertypes.
+    expect!["Polygon: supertypes [Any, Shape], subtypes [Square]"]
+        .assert_eq(&at("open class Polygon", "open class Poly$0gon"));
+    expect!["Shape: supertypes [Any], subtypes [Circle, Polygon]"]
+        .assert_eq(&at("interface Shape", "interface Sha$0pe"));
+}
+
+#[test]
+fn the_call_hierarchy_groups_calls_by_caller_and_by_callee() {
+    let fixture = Fixture::with_mini_stdlib(&HIERARCHY.replacen("fun area(", "fun ar$0ea(", 1));
+    let (file, offset) = fixture.cursor();
+    let analysis = analysis(&fixture);
+    let prepared = analysis.prepare_call_hierarchy(file, offset).unwrap();
+    let [area] = &prepared[..] else {
+        panic!("one function: {prepared:?}");
+    };
+    let key = area.key.clone().unwrap();
+    let render = |calls: Vec<crate::HierarchyCall>| {
+        let mut rendered: Vec<String> = calls
+            .iter()
+            .map(|call| format!("{} x{}", call.item.target.name, call.ranges.len()))
+            .collect();
+        rendered.sort();
+        rendered.join(", ")
+    };
+    expect!["report x2, total x1"].assert_eq(&render(analysis.incoming_calls(&key).unwrap()));
+    expect!["side x1"].assert_eq(&render(analysis.outgoing_calls(&key).unwrap()));
 }
 
 #[test]
@@ -3767,21 +3923,21 @@ class Account(val owner: String) {
         LIMIT Property declaration,readonly,static
         Account Class declaration
         owner Property declaration,readonly
-        String Class 
+        String Class defaultLibrary
         ZERO Property declaration,readonly,static
         balance Property declaration,mutable
-        Long Class 
+        Long Class defaultLibrary
         value Parameter declaration,readonly
         field Variable mutable
         value Parameter readonly
         twice Property declaration,readonly
-        Int Class 
-        Int Class 
+        Int Class defaultLibrary
+        Int Class defaultLibrary
         it Parameter readonly
         describe Method declaration
         prefix Parameter declaration,readonly
-        String Class 
-        String Class 
+        String Class defaultLibrary
+        String Class defaultLibrary
         label Variable declaration,readonly
         prefix Parameter readonly
         owner Property readonly
@@ -3818,7 +3974,7 @@ class Config(@param:Enable(Plain::class) val limit: Int) {
         Enable Decorator 
         Plain Interface 
         limit Property declaration,readonly
-        Int Class 
+        Int Class defaultLibrary
         Plain Decorator 
         run Method declaration
         Enable Interface "#]]

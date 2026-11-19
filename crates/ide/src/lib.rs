@@ -13,6 +13,7 @@ mod folding;
 mod goto_definition;
 mod goto_implementation;
 mod goto_type_definition;
+mod hierarchy;
 mod hover;
 mod inlay_hints;
 mod navigation_target;
@@ -33,6 +34,7 @@ pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stabi
 pub use document_symbols::DocumentSymbol;
 pub use file_rename::FileMove;
 pub use folding::{Fold, FoldKind};
+pub use hierarchy::{HierarchyCall, HierarchyItem, HierarchyKey};
 pub use hir::salsa::Cancelled;
 pub use hover::HoverResult;
 pub use inlay_hints::{HintTarget, InlayHint, InlayHintPart};
@@ -89,6 +91,7 @@ impl AnalysisHost {
 }
 
 /// A read-only snapshot of the database.
+#[derive(Clone)]
 pub struct Analysis {
     db: RootDatabase,
 }
@@ -96,6 +99,16 @@ pub struct Analysis {
 impl Analysis {
     fn with_db<T>(&self, query: impl FnOnce(&RootDatabase) -> T) -> Cancellable<T> {
         Cancelled::catch(AssertUnwindSafe(|| query(&self.db)))
+    }
+
+    /// Every file of the workspace's source sets.
+    pub fn workspace_files(&self) -> Cancellable<Vec<FileId>> {
+        self.with_db(|db| {
+            db.all_files()
+                .into_iter()
+                .map(|file| file.file_id(db))
+                .collect()
+        })
     }
 
     pub fn file_text(&self, file: FileId) -> Cancellable<Option<Arc<str>>> {
@@ -254,6 +267,54 @@ impl Analysis {
 
     /// What implements the declaration named at `offset`: a class's
     /// subclasses, a member's overrides, an `expect`'s `actual`s.
+    /// Where the name at `offset` is declared for every platform: an
+    /// `actual`'s `expect`, else its definition.
+    pub fn goto_declaration(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Vec<NavigationTarget>> {
+        self.with_db(|db| goto_definition::goto_declaration(db, file, offset))
+    }
+
+    /// The class at `offset`, to show the hierarchy of.
+    pub fn prepare_type_hierarchy(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Vec<HierarchyItem>> {
+        self.with_db(|db| hierarchy::prepare_type_hierarchy(db, file, offset))
+    }
+
+    /// A class's direct supertypes (`key` resolved from `from`).
+    pub fn supertypes(&self, from: FileId, key: &HierarchyKey) -> Cancellable<Vec<HierarchyItem>> {
+        self.with_db(|db| hierarchy::supertypes(db, from, key))
+    }
+
+    /// The workspace classes extending a class directly.
+    pub fn subtypes(&self, from: FileId, key: &HierarchyKey) -> Cancellable<Vec<HierarchyItem>> {
+        self.with_db(|db| hierarchy::subtypes(db, from, key))
+    }
+
+    /// The function at `offset`, to show the calls of.
+    pub fn prepare_call_hierarchy(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Cancellable<Vec<HierarchyItem>> {
+        self.with_db(|db| hierarchy::prepare_call_hierarchy(db, file, offset))
+    }
+
+    /// Who calls a function, grouped by caller.
+    pub fn incoming_calls(&self, key: &HierarchyKey) -> Cancellable<Vec<HierarchyCall>> {
+        self.with_db(|db| hierarchy::incoming_calls(db, key))
+    }
+
+    /// What a function calls, grouped by callee.
+    pub fn outgoing_calls(&self, key: &HierarchyKey) -> Cancellable<Vec<HierarchyCall>> {
+        self.with_db(|db| hierarchy::outgoing_calls(db, key))
+    }
+
     pub fn goto_implementation(
         &self,
         file: FileId,

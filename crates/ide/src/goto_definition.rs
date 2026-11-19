@@ -45,6 +45,51 @@ pub(crate) fn goto_definition(
     }
 }
 
+/// `textDocument/declaration`: where the name at `offset` is declared for
+/// every platform — an `actual` declaration's `expect`; anything else, as
+/// its definition.
+pub(crate) fn goto_declaration(
+    db: &RootDatabase,
+    file: FileId,
+    offset: usize,
+) -> Vec<NavigationTarget> {
+    let Some(name) = name_at(db, file, offset) else {
+        return Vec::new();
+    };
+    let declarations = match name.target {
+        NameTarget::Declarations(declarations) => declarations,
+        NameTarget::Local { file, local } => {
+            return vec![NavigationTarget::of_local(db, file, &local)];
+        }
+    };
+    let mut targets: Vec<hir::ItemLocation> = Vec::new();
+    for declaration in declarations {
+        let expected: Vec<hir::ItemLocation> = hir::expect_actual_family(db, declaration)
+            .into_iter()
+            .filter(|member| {
+                hir::item_tree(db, member.container)
+                    .item(member.item)
+                    .modifiers
+                    .contains(hir::Modifiers::EXPECT)
+            })
+            .collect();
+        let found = if expected.is_empty() {
+            vec![declaration]
+        } else {
+            expected
+        };
+        for location in found {
+            if !targets.contains(&location) {
+                targets.push(location);
+            }
+        }
+    }
+    targets
+        .into_iter()
+        .filter_map(|location| NavigationTarget::of(db, location))
+        .collect()
+}
+
 pub(crate) fn name_at(db: &RootDatabase, file: FileId, offset: usize) -> Option<NameAt> {
     let source = db.source_file(file)?;
     let parse = hir::parse(db, source);

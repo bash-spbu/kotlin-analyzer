@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use lsp_types::{Position, Range, Uri};
 use syntax::TextRange;
-use vfs::{LineColumn, LineIndex};
+use vfs::{ColumnUnit, LineColumn, LineIndex};
 
 /// The path of a `file:` URI.
 pub fn path_of(uri: &Uri) -> Option<PathBuf> {
@@ -48,8 +48,8 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-pub fn offset(text: &str, position: Position) -> usize {
-    LineIndex::new(text).offset(
+pub fn offset(text: &str, position: Position, unit: ColumnUnit) -> usize {
+    LineIndex::with_unit(text, unit).offset(
         text,
         LineColumn {
             line: position.line,
@@ -64,12 +64,13 @@ pub fn offset(text: &str, position: Position) -> usize {
 pub fn apply_changes(
     text: &str,
     changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+    unit: ColumnUnit,
 ) -> String {
     let mut text = text.to_owned();
     for change in changes {
         match change.range {
             Some(range) => {
-                let index = LineIndex::new(&text);
+                let index = LineIndex::with_unit(&text, unit);
                 let start = index.offset(&text, line_column(range.start));
                 let end = index.offset(&text, line_column(range.end)).max(start);
                 text.replace_range(start..end, &change.text);
@@ -132,6 +133,7 @@ mod tests {
                 // Across lines: the line break and `val`.
                 change((0, 13), (1, 3), ";"),
             ],
+            ColumnUnit::Utf16,
         );
         assert_eq!(changed, "val alpha = 1; 😀bee = \"yy\"\n");
     }
@@ -143,7 +145,10 @@ mod tests {
             range_length: None,
             text: "class B".to_owned(),
         };
-        assert_eq!(apply_changes("class A", vec![whole]), "class B");
+        assert_eq!(
+            apply_changes("class A", vec![whole], ColumnUnit::Utf16),
+            "class B"
+        );
     }
 
     #[test]

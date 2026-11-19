@@ -10,7 +10,9 @@ mod convert;
 mod editing;
 mod gradle_export;
 mod handlers;
+mod hierarchy;
 mod library_sources;
+mod pull_diagnostics;
 mod semantic_tokens;
 mod settings;
 #[cfg(test)]
@@ -71,9 +73,16 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     let (initialize_id, initialize_params) = connection
         .initialize_start()
         .map_err(|error| error.to_string())?;
+    // `workspace.diagnostics.refreshSupport` (LSP 3.17), which
+    // `lsp_types`' capabilities don't have.
+    let diagnostics_refresh =
+        initialize_params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"]
+            .as_bool()
+            .unwrap_or(false);
     let params: InitializeParams =
         serde_json::from_value(initialize_params).map_err(|error| error.to_string())?;
-    let root = workspace_root(&params);
+    let folders = workspace_folders(&params);
+    let root = folders[0].clone();
     let project_json = params
         .initialization_options
         .as_ref()
@@ -90,20 +99,35 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
     let log_level = settings::log_level(params.initialization_options.as_ref());
     crate::log::start_session(&root, log_level);
     log_session_start(&params, &root, &diagnostics_config, gradle_export);
+    let encoding = position_encoding(&params.capabilities);
     let result = InitializeResult {
-        capabilities: capabilities(),
+        capabilities: lsp_types::ServerCapabilities {
+            position_encoding: Some(match encoding {
+                vfs::ColumnUnit::Utf8 => lsp_types::PositionEncodingKind::UTF8,
+                vfs::ColumnUnit::Utf16 => lsp_types::PositionEncodingKind::UTF16,
+            }),
+            ..capabilities()
+        },
         server_info: Some(ServerInfo {
             name: "kotlin-analyzer".to_owned(),
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }),
     };
+    let mut result = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    // LSP 3.17's type hierarchy, which `lsp_types`' capabilities don't have.
+    result["capabilities"]["typeHierarchyProvider"] = serde_json::Value::Bool(true);
     connection
-        .initialize_finish(
-            initialize_id,
-            serde_json::to_value(result).map_err(|error| error.to_string())?,
-        )
+        .initialize_finish(initialize_id, result)
         .map_err(|error| error.to_string())?;
     let mut state = GlobalState::new(connection.sender.clone(), root, project_json);
+    state.folders = folders;
+    state.encoding = encoding;
+    state.pull_diagnostics = params
+        .capabilities
+        .text_document
+        .as_ref()
+        .is_some_and(|text_document| text_document.diagnostic.is_some());
+    state.diagnostics_refresh = diagnostics_refresh;
     state.refreshes = ClientRefreshes::of(&params.capabilities);
     if watches_files(&params.capabilities) {
         state.register_file_watchers();
@@ -180,6 +204,16 @@ fn capabilities() -> ServerCapabilities {
             TextDocumentSyncKind::INCREMENTAL,
         )),
         definition_provider: Some(OneOf::Left(true)),
+        declaration_provider: Some(lsp_types::DeclarationCapability::Simple(true)),
+        call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
+        diagnostic_provider: Some(lsp_types::DiagnosticServerCapabilities::Options(
+            lsp_types::DiagnosticOptions {
+                identifier: Some("kotlin-analyzer".to_owned()),
+                inter_file_dependencies: true,
+                workspace_diagnostics: true,
+                work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+            },
+        )),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
@@ -220,7 +254,10 @@ fn capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         workspace: Some(lsp_types::WorkspaceServerCapabilities {
-            workspace_folders: None,
+            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
             file_operations: Some(lsp_types::WorkspaceFileOperationsServerCapabilities {
                 will_rename: Some(kotlin_files_and_folders()),
                 did_rename: Some(kotlin_files_and_folders()),
@@ -232,6 +269,22 @@ fn capabilities() -> ServerCapabilities {
             ..lsp_types::ExecuteCommandOptions::default()
         }),
         ..ServerCapabilities::default()
+    }
+}
+
+/// UTF-8 columns when the client offers them — the text's own unit,
+/// nothing to count — else UTF-16, LSP's default.
+fn position_encoding(capabilities: &lsp_types::ClientCapabilities) -> vfs::ColumnUnit {
+    let offered = capabilities
+        .general
+        .as_ref()
+        .and_then(|general| general.position_encodings.as_ref());
+    let utf8 =
+        offered.is_some_and(|encodings| encodings.contains(&lsp_types::PositionEncodingKind::UTF8));
+    if utf8 {
+        vfs::ColumnUnit::Utf8
+    } else {
+        vfs::ColumnUnit::Utf16
     }
 }
 
@@ -251,6 +304,23 @@ fn kotlin_files_and_folders() -> lsp_types::FileOperationRegistrationOptions {
             filter("**/*.{kt,kts}", lsp_types::FileOperationPatternKind::File),
             filter("**/*", lsp_types::FileOperationPatternKind::Folder),
         ],
+    }
+}
+
+/// The workspace folders; without any, the (deprecated) root URI, else the
+/// current directory — the first is the primary one (the log's, a given
+/// model file's).
+fn workspace_folders(params: &InitializeParams) -> Vec<PathBuf> {
+    let folders: Vec<PathBuf> = params
+        .workspace_folders
+        .iter()
+        .flatten()
+        .filter_map(|folder| convert::path_of(&folder.uri))
+        .collect();
+    if folders.is_empty() {
+        vec![workspace_root(params)]
+    } else {
+        folders
     }
 }
 
@@ -278,9 +348,9 @@ enum Task {
         generation: u64,
         loaded: Result<LoadedFiles, LoadFailure>,
     },
-    /// The background Gradle export finished, after `took`.
+    /// The background Gradle exports (one per build) finished, after `took`.
     ModelExported {
-        export: gradle_export::Export,
+        exports: Vec<gradle_export::Export>,
         took: Duration,
     },
     Diagnostics {
@@ -329,7 +399,10 @@ impl ClientRefreshes {
 
 struct GlobalState {
     sender: Sender<Message>,
+    /// The primary workspace folder.
     root: PathBuf,
+    /// Every workspace folder, the primary first: read as one workspace.
+    folders: Vec<PathBuf>,
     /// Where the exported project model is, when not in the workspace.
     project_json: Option<PathBuf>,
     host: AnalysisHost,
@@ -363,6 +436,14 @@ struct GlobalState {
     in_flight: FxHashMap<RequestId, Arc<AtomicBool>>,
     /// The semantic tokens last sent per open file (see `semantic_tokens`).
     sent_tokens: Arc<semantic_tokens::SentTokens>,
+    /// What a position's column counts, as agreed with the client.
+    encoding: vfs::ColumnUnit,
+    /// How many times files, the model or the settings changed.
+    revision: u64,
+    /// The client asks for diagnostics (`textDocument/diagnostic`) rather
+    /// than being sent them; and whether it can be asked to ask again.
+    pull_diagnostics: bool,
+    diagnostics_refresh: bool,
 }
 
 impl GlobalState {
@@ -374,6 +455,7 @@ impl GlobalState {
         GlobalState {
             sender,
             model: Arc::new(ProjectModel::empty(root.clone())),
+            folders: vec![root.clone()],
             root,
             project_json,
             host: AnalysisHost::default(),
@@ -403,6 +485,10 @@ impl GlobalState {
             requests_received: 0,
             in_flight: FxHashMap::default(),
             sent_tokens: Arc::default(),
+            encoding: vfs::ColumnUnit::Utf16,
+            revision: 0,
+            pull_diagnostics: false,
+            diagnostics_refresh: false,
         }
     }
 
@@ -460,11 +546,16 @@ impl GlobalState {
                 percentage: None,
             }),
         );
-        let root = self.root.clone();
         let project_json = self.model_file();
+        let folders: Vec<(PathBuf, Option<PathBuf>)> = self
+            .folders
+            .iter()
+            .map(|folder| (folder.clone(), self.model_file_of(folder)))
+            .collect();
         Event::info("load-started")
             .count("generation", generation)
             .text("model", self.model_source(project_json.is_some()))
+            .count("folders", folders.len())
             .emit();
         let sender = self.task_sender.clone();
         std::thread::Builder::new()
@@ -475,10 +566,10 @@ impl GlobalState {
                 let loaded = crate::log::within(Context::Loading { generation }, || {
                     std::panic::catch_unwind(|| {
                         #[cfg(test)]
-                        if root.join("panic-while-loading").exists() {
+                        if folders[0].0.join("panic-while-loading").exists() {
                             panic!("a test panic while loading");
                         }
-                        load::read_workspace(&root, project_json.as_deref())
+                        load::read_workspaces(&folders)
                     })
                 });
                 let loaded = match loaded {
@@ -507,29 +598,45 @@ impl GlobalState {
     /// The model file to load: the one given, the workspace's own, or the
     /// one exported to the cache (when there is one).
     fn model_file(&self) -> Option<PathBuf> {
-        if self.project_json.is_some() || self.root.join(".kotlin-analyzer/project.json").is_file()
-        {
+        self.model_file_of(&self.root)
+    }
+
+    /// `folder`'s model file: the one given (for the primary folder), the
+    /// one exported to the cache (when there is one); `None` for a folder
+    /// with its own `.kotlin-analyzer/project.json` (read from where it
+    /// is) or none (its directories read by convention).
+    fn model_file_of(&self, folder: &std::path::Path) -> Option<PathBuf> {
+        let primary = folder == self.root;
+        if primary && self.project_json.is_some() {
             return self.project_json.clone();
         }
-        gradle_export::cached_model(&self.root).filter(|cached| cached.is_file())
+        if folder.join(".kotlin-analyzer/project.json").is_file() {
+            return None;
+        }
+        gradle_export::cached_model(folder).filter(|cached| cached.is_file())
     }
 
     /// Exports the Gradle model in the background when it would come from
     /// the cache and isn't current there (the build files are walked off
     /// the main thread); an export that changed it reloads.
     fn start_export(&mut self) {
-        let given = self.project_json.is_some()
-            || self.root.join(".kotlin-analyzer/project.json").is_file();
-        if given
-            || !self.gradle_export
-            || self.exporting
-            || !gradle_export::is_gradle_build(&self.root)
-        {
+        if !self.gradle_export || self.exporting {
             return;
         }
-        let Some(cached) = gradle_export::cached_model(&self.root) else {
+        // Each Gradle build among the folders whose model isn't given.
+        let builds: Vec<(PathBuf, PathBuf)> = self
+            .folders
+            .iter()
+            .filter(|folder| {
+                let given = (**folder == self.root && self.project_json.is_some())
+                    || folder.join(".kotlin-analyzer/project.json").is_file();
+                !given && gradle_export::is_gradle_build(folder)
+            })
+            .filter_map(|folder| Some((folder.clone(), gradle_export::cached_model(folder)?)))
+            .collect();
+        if builds.is_empty() {
             return;
-        };
+        }
         self.exporting = true;
         self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
             token: lsp_types::NumberOrString::String(EXPORT_TOKEN.to_owned()),
@@ -543,28 +650,35 @@ impl GlobalState {
                 percentage: None,
             }),
         );
-        let root = self.root.clone();
         let sender = self.task_sender.clone();
-        let tool = if root.join("gradlew").is_file() {
+        let tool = if self.root.join("gradlew").is_file() {
             "gradle-wrapper"
         } else {
             "gradle-on-path"
         };
         Event::info("gradle-export-started")
             .text("tool", tool)
+            .count("builds", builds.len())
             .emit();
         std::thread::Builder::new()
             .name("kotlin-analyzer-gradle".to_owned())
             .spawn(move || {
                 let started = Instant::now();
-                let export = crate::log::within(Context::GradleExport, || {
-                    std::panic::catch_unwind(|| gradle_export::export_if_stale(&root, &cached))
-                })
-                .unwrap_or_else(|_| {
-                    gradle_export::Export::Failed(gradle_export::ExportFailure::panicked())
-                });
+                let exports = builds
+                    .iter()
+                    .map(|(root, cached)| {
+                        crate::log::within(Context::GradleExport, || {
+                            std::panic::catch_unwind(|| {
+                                gradle_export::export_if_stale(root, cached)
+                            })
+                        })
+                        .unwrap_or_else(|_| {
+                            gradle_export::Export::Failed(gradle_export::ExportFailure::panicked())
+                        })
+                    })
+                    .collect();
                 let took = started.elapsed();
-                let _ = sender.send(Task::ModelExported { export, took });
+                let _ = sender.send(Task::ModelExported { exports, took });
             })
             .expect("a thread can be spawned");
     }
@@ -577,7 +691,7 @@ impl GlobalState {
                     self.respond(response);
                 }
             }
-            Task::ModelExported { export, took } => self.on_export(export, took),
+            Task::ModelExported { exports, took } => self.on_exports(exports, took),
             Task::Loaded { generation, loaded } => {
                 if generation != self.load_generation {
                     Event::info("load-superseded")
@@ -623,8 +737,22 @@ impl GlobalState {
         }
     }
 
-    fn on_export(&mut self, export: gradle_export::Export, took: Duration) {
+    /// Every build's export ended: one that exported a model reloads the
+    /// workspace (once); each failure is shown.
+    fn on_exports(&mut self, exports: Vec<gradle_export::Export>, took: Duration) {
         self.exporting = false;
+        let any_exported = exports
+            .iter()
+            .any(|export| matches!(export, gradle_export::Export::Exported));
+        for export in exports {
+            self.on_export(export, took);
+        }
+        if any_exported {
+            self.start_loading();
+        }
+    }
+
+    fn on_export(&mut self, export: gradle_export::Export, took: Duration) {
         let message = match &export {
             gradle_export::Export::UpToDate => "up to date",
             gradle_export::Export::Exported => "exported",
@@ -650,8 +778,7 @@ impl GlobalState {
             }),
         );
         match export {
-            gradle_export::Export::UpToDate => {}
-            gradle_export::Export::Exported => self.start_loading(),
+            gradle_export::Export::UpToDate | gradle_export::Export::Exported => {}
             gradle_export::Export::Failed(failure) => {
                 self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
                     typ: lsp_types::MessageType::WARNING,
@@ -705,6 +832,7 @@ impl GlobalState {
         );
         load::apply_libraries(&mut self.host, loaded.libraries);
         self.loaded = true;
+        self.revision += 1;
         self.refresh_paths();
         summary.emit(self.load_generation, started.elapsed());
         self.progress_on(
@@ -802,6 +930,35 @@ impl GlobalState {
         }
     }
 
+    /// Workspace folders added or removed: the workspace is read again from
+    /// the folders there are now (the first left is the primary one).
+    fn on_folders_changed(&mut self, event: lsp_types::WorkspaceFoldersChangeEvent) {
+        let removed: Vec<PathBuf> = event
+            .removed
+            .iter()
+            .filter_map(|folder| convert::path_of(&folder.uri))
+            .collect();
+        self.folders.retain(|folder| !removed.contains(folder));
+        for added in event
+            .added
+            .iter()
+            .filter_map(|folder| convert::path_of(&folder.uri))
+        {
+            if !self.folders.contains(&added) {
+                self.folders.push(added);
+            }
+        }
+        match self.folders.first() {
+            Some(first) => self.root = first.clone(),
+            None => self.folders.push(self.root.clone()),
+        }
+        Event::info("workspace-folders-changed")
+            .count("folders", self.folders.len())
+            .emit();
+        self.start_loading();
+        self.start_export();
+    }
+
     /// Files (or folders) renamed in the editor: what was at the old paths
     /// is gone, what's at the new ones read — sources open in the editor
     /// excepted, which it tells of itself.
@@ -851,8 +1008,11 @@ impl GlobalState {
     }
 
     fn is_model_file(&self, path: &std::path::Path) -> bool {
-        let workspace_model = self.root.join(".kotlin-analyzer/project.json");
-        path == workspace_model || self.project_json.as_deref() == Some(path)
+        let a_folders_model = self
+            .folders
+            .iter()
+            .any(|folder| path == folder.join(".kotlin-analyzer/project.json"));
+        a_folders_model || self.project_json.as_deref() == Some(path)
     }
 
     /// Tokens and hints the client asked for while loading were computed
@@ -911,6 +1071,8 @@ impl GlobalState {
             request_file,
             diagnostics_config: self.diagnostics_config.clone(),
             sent_tokens: self.sent_tokens.clone(),
+            encoding: self.encoding,
+            revision: self.revision,
         };
         let sender = self.task_sender.clone();
         let received = Instant::now();
@@ -1015,9 +1177,15 @@ impl GlobalState {
         moves
     }
 
-    /// A file as the log names it.
+    /// A file as the log names it: its path hashed relative to its folder.
     fn file_ref(&self, file: FileId) -> FileRef {
-        FileRef::new(file.index() as u32, self.vfs.path(file), &self.root)
+        let path = self.vfs.path(file);
+        let folder = self
+            .folders
+            .iter()
+            .find(|folder| path.starts_with(folder))
+            .unwrap_or(&self.root);
+        FileRef::new(file.index() as u32, path, folder)
     }
 
     /// `workspace/executeCommand`, on the main thread: the commands change
@@ -1043,13 +1211,24 @@ impl GlobalState {
     /// The file a request is about, resolved on the main thread where the
     /// file system view lives.
     fn request_file_of(&self, request: &Request) -> Option<FileId> {
-        // `completionItem/resolve` carries it in the item's `data`.
-        let document = request.params.get("textDocument").or_else(|| {
-            request
-                .params
-                .get("data")
-                .and_then(|data| data.get("textDocument"))
-        });
+        // `completionItem/resolve` carries it in the item's `data`, a
+        // hierarchy's expansion in its `item.data`.
+        let document = request
+            .params
+            .get("textDocument")
+            .or_else(|| {
+                request
+                    .params
+                    .get("data")
+                    .and_then(|data| data.get("textDocument"))
+            })
+            .or_else(|| {
+                request
+                    .params
+                    .get("item")
+                    .and_then(|item| item.get("data"))
+                    .and_then(|data| data.get("textDocument"))
+            });
         let uri: lsp_types::Uri = document
             .and_then(|document| document.get("uri"))
             .and_then(|uri| serde_json::from_value(uri.clone()).ok())?;
@@ -1100,7 +1279,8 @@ impl GlobalState {
                         .file_id(&path)
                         .and_then(|file| self.vfs.contents(file).cloned())
                         .unwrap_or_default();
-                    let text = convert::apply_changes(&current, params.content_changes);
+                    let text =
+                        convert::apply_changes(&current, params.content_changes, self.encoding);
                     let shape = TextShape::of(&text);
                     let file = self.vfs.set_contents(&path, Some(Arc::from(text)));
                     self.open_documents
@@ -1115,6 +1295,14 @@ impl GlobalState {
                     // An edit can change what other files' code means: all
                     // open files are checked again, the edited one first.
                     self.update_diagnostics(self.edited_first(file));
+                    return;
+                }
+                Err(notification) => notification,
+            };
+        let notification =
+            match cast_notification::<notification::DidChangeWorkspaceFolders>(notification) {
+                Ok(params) => {
+                    self.on_folders_changed(params.event);
                     return;
                 }
                 Err(notification) => notification,
@@ -1148,6 +1336,7 @@ impl GlobalState {
                             .texts("disabled-checks", disabled)
                             .emit();
                         self.diagnostics_config = Arc::new(config);
+                        self.revision += 1;
                         self.update_diagnostics(self.open_documents.keys().copied().collect());
                     }
                     return;
@@ -1182,6 +1371,7 @@ impl GlobalState {
         let changes = load::file_changes(&mut self.vfs, &self.model);
         if !changes.is_empty() {
             self.host.apply_change(changes);
+            self.revision += 1;
         }
         self.refresh_paths();
     }
@@ -1206,6 +1396,13 @@ impl GlobalState {
     }
 
     fn update_diagnostics(&mut self, files: Vec<FileId>) {
+        // A client that pulls is told to ask again instead.
+        if self.pull_diagnostics {
+            if self.diagnostics_refresh {
+                self.send_request::<request::WorkspaceDiagnosticRefresh>(());
+            }
+            return;
+        }
         for file in files {
             let Some(version) = self.open_documents.get(&file).copied() else {
                 continue;
@@ -1217,6 +1414,7 @@ impl GlobalState {
             let sender = self.task_sender.clone();
             let file_ref = self.file_ref(file);
             let syntax_only = !self.loaded;
+            let encoding = self.encoding;
             // Until the workspace is loaded only syntax is known for sure.
             let config = if self.loaded {
                 self.diagnostics_config.clone()
@@ -1235,7 +1433,7 @@ impl GlobalState {
                 };
                 let computed = crate::log::within(context, || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        handlers::diagnostics(&analysis, file, &config)
+                        handlers::diagnostics(&analysis, file, &config, encoding)
                     }))
                 });
                 let timing = Timing {
@@ -1333,8 +1531,16 @@ const KNOWN_METHODS: &[&str] = &[
     "textDocument/inlayHint",
     "inlayHint/resolve",
     "textDocument/codeAction",
+    "textDocument/diagnostic",
+    "workspace/diagnostic",
     "workspace/executeCommand",
     "workspace/willRenameFiles",
+    "textDocument/prepareTypeHierarchy",
+    "typeHierarchy/supertypes",
+    "typeHierarchy/subtypes",
+    "textDocument/prepareCallHierarchy",
+    "callHierarchy/incomingCalls",
+    "callHierarchy/outgoingCalls",
     "shutdown",
 ];
 

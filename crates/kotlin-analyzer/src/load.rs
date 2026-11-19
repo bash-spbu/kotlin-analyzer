@@ -38,8 +38,20 @@ pub fn read_workspace(
     root: &Path,
     project_json: Option<&Path>,
 ) -> Result<LoadedFiles, project_model::LoadError> {
+    read_workspaces(&[(root.to_path_buf(), project_json.map(Path::to_path_buf))])
+}
+
+/// Several workspace folders (each with its model file, when it has one)
+/// read as one workspace.
+pub fn read_workspaces(
+    folders: &[(PathBuf, Option<PathBuf>)],
+) -> Result<LoadedFiles, project_model::LoadError> {
     let started = Instant::now();
-    let model = ProjectModel::load(root, project_json)?;
+    let models = folders
+        .iter()
+        .map(|(root, project_json)| ProjectModel::load(root, project_json.as_deref()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let model = ProjectModel::combined(models);
     let model_time = started.elapsed();
 
     let started = Instant::now();

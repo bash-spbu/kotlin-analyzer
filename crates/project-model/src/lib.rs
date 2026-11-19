@@ -321,6 +321,48 @@ impl ProjectModel {
         }
     }
 
+    /// The models of several workspace folders as one: each one's modules
+    /// and source sets renumbered after the ones before. The first's root,
+    /// origin and JDK (else the first JDK given) are the whole's.
+    pub fn combined(models: Vec<ProjectModel>) -> ProjectModel {
+        let mut models = models.into_iter();
+        let Some(first) = models.next() else {
+            return ProjectModel::empty(PathBuf::new());
+        };
+        let root = first.root.clone();
+        let origin = first.origin;
+        let mut jdk = first.jdk.clone();
+        let mut modules = Vec::new();
+        let mut source_sets = Vec::new();
+        for model in std::iter::once(first).chain(models) {
+            let module_offset = modules.len() as u32;
+            let source_set_offset = source_sets.len() as u32;
+            let source_set_id = |id: SourceSetId| SourceSetId(id.0 + source_set_offset);
+            for module in model.modules {
+                modules.push(Module {
+                    source_sets: module.source_sets.into_iter().map(source_set_id).collect(),
+                    ..module
+                });
+            }
+            for source_set in model.source_sets {
+                source_sets.push(SourceSet {
+                    id: source_set_id(source_set.id),
+                    module: ModuleId(source_set.module.0 + module_offset),
+                    dependencies: source_set
+                        .dependencies
+                        .into_iter()
+                        .map(source_set_id)
+                        .collect(),
+                    ..source_set
+                });
+            }
+            if jdk.is_none() {
+                jdk = model.jdk;
+            }
+        }
+        ProjectModel::new(root, origin, modules, source_sets, jdk)
+    }
+
     /// A model of no modules: a workspace not loaded yet.
     pub fn empty(root: PathBuf) -> ProjectModel {
         ProjectModel::new(
@@ -410,5 +452,67 @@ mod platform_tests {
         ] {
             assert_eq!(Platform::of_name(other), Platform::NotJvm, "{other}");
         }
+    }
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// A model of one module (`:name`) under `root`, with `main` and a
+    /// `test` that depends on it.
+    fn model(root: &str, name: &str) -> ProjectModel {
+        let source_set = |id: u32, set: &str, dependencies: Vec<SourceSetId>| SourceSet {
+            id: SourceSetId(id),
+            module: ModuleId(0),
+            name: set.to_owned(),
+            kind: SourceSetKind::of_name(set),
+            platform: Platform::Jvm,
+            directories: vec![PathBuf::from(format!("{root}/src/{set}/kotlin"))],
+            dependencies,
+            libraries: Vec::new(),
+            classpath: Classpath::Complete,
+            compiler: CompilerOptions::default(),
+        };
+        ProjectModel::new(
+            PathBuf::from(root),
+            ModelOrigin::DirectoryConvention,
+            vec![Module {
+                gradle_path: format!(":{name}"),
+                directory: PathBuf::from(root),
+                source_sets: vec![SourceSetId(0), SourceSetId(1)],
+            }],
+            vec![
+                source_set(0, "main", Vec::new()),
+                source_set(1, "test", vec![SourceSetId(0)]),
+            ],
+            None,
+        )
+    }
+
+    #[test]
+    fn combined_models_renumber_the_later_ones_modules_and_source_sets() {
+        let combined = ProjectModel::combined(vec![model("/first", "a"), model("/second", "b")]);
+        assert_eq!(combined.root, PathBuf::from("/first"));
+        assert_eq!(combined.modules.len(), 2);
+        assert_eq!(
+            combined.modules[1].source_sets,
+            [SourceSetId(2), SourceSetId(3)]
+        );
+        let second_test = combined.source_set(SourceSetId(3));
+        assert_eq!(second_test.module, ModuleId(1));
+        assert_eq!(second_test.dependencies, [SourceSetId(2)]);
+        // A file of the second folder is in its source set, its package
+        // from its directory there.
+        let file = Path::new("/second/src/main/kotlin/b/B.kt");
+        assert_eq!(combined.source_set_of(file), Some(SourceSetId(2)));
+        assert_eq!(
+            combined
+                .directory_package(file)
+                .map(|package| package.to_string()),
+            Some("b".to_owned())
+        );
     }
 }

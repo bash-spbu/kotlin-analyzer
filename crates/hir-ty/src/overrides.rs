@@ -101,49 +101,70 @@ fn workspace_subclasses(db: &dyn SourceDatabase, classes: &[ItemLocation]) -> Ve
     let mut known: FxHashSet<ItemLocation> = classes.iter().copied().collect();
     let mut found = Vec::new();
     let mut frontier: Vec<ItemLocation> = classes.to_vec();
-    let files: Vec<SourceFile> = db
-        .workspace()
+    let files = workspace_files(db);
+    while !frontier.is_empty() {
+        let next = subclasses_among(db, &files, &frontier, &known);
+        known.extend(next.iter().copied());
+        found.extend(next.iter().copied());
+        frontier = next;
+    }
+    found
+}
+
+/// The workspace classes that name `class` among their supertypes.
+pub fn direct_subclasses(db: &dyn SourceDatabase, class: ItemLocation) -> Vec<ItemLocation> {
+    let known: FxHashSet<ItemLocation> = [class].into_iter().collect();
+    subclasses_among(db, &workspace_files(db), &[class], &known)
+}
+
+fn workspace_files(db: &dyn SourceDatabase) -> Vec<SourceFile> {
+    db.workspace()
         .source_sets(db)
         .iter()
         .flat_map(|source_set| source_set.files(db).iter().copied())
+        .collect()
+}
+
+/// The classes of `files`, not `known` yet, that name one of `classes`
+/// among their supertypes.
+fn subclasses_among(
+    db: &dyn SourceDatabase,
+    files: &[SourceFile],
+    classes: &[ItemLocation],
+    known: &FxHashSet<ItemLocation>,
+) -> Vec<ItemLocation> {
+    let names: FxHashSet<Name> = classes
+        .iter()
+        .map(|class| item_tree(db, class.container).item(class.item).name)
         .collect();
-    while !frontier.is_empty() {
-        let names: FxHashSet<Name> = frontier
-            .iter()
-            .map(|class| item_tree(db, class.container).item(class.item).name)
-            .collect();
-        let mut next = Vec::new();
-        for file in &files {
-            let tree = file_item_tree(db, *file);
-            for (index, item) in tree.indexed_items() {
-                let Signature::Class { supertypes, .. } = &item.signature else {
-                    continue;
-                };
-                let location = ItemLocation::in_file(*file, index);
-                if known.contains(&location) {
-                    continue;
-                }
-                // Only a supertype spelled with one of the names is resolved.
-                let extends_one = supertypes
-                    .iter()
-                    .filter(|supertype| {
-                        supertype
-                            .path()
-                            .and_then(|path| path.last())
-                            .is_some_and(|last| names.contains(&last))
-                    })
-                    .any(|supertype| {
-                        lower_supertype(db, *file, location, supertype)
-                            .is_some_and(|resolved| frontier.contains(&resolved.class))
-                    });
-                if extends_one {
-                    known.insert(location);
-                    next.push(location);
-                }
+    let mut found = Vec::new();
+    for file in files {
+        let tree = file_item_tree(db, *file);
+        for (index, item) in tree.indexed_items() {
+            let Signature::Class { supertypes, .. } = &item.signature else {
+                continue;
+            };
+            let location = ItemLocation::in_file(*file, index);
+            if known.contains(&location) || found.contains(&location) {
+                continue;
+            }
+            // Only a supertype spelled with one of the names is resolved.
+            let extends_one = supertypes
+                .iter()
+                .filter(|supertype| {
+                    supertype
+                        .path()
+                        .and_then(|path| path.last())
+                        .is_some_and(|last| names.contains(&last))
+                })
+                .any(|supertype| {
+                    lower_supertype(db, *file, location, supertype)
+                        .is_some_and(|resolved| classes.contains(&resolved.class))
+                });
+            if extends_one {
+                found.push(location);
             }
         }
-        found.extend(next.iter().copied());
-        frontier = next;
     }
     found
 }

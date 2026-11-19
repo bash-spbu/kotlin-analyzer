@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-pub use line_index::{LineColumn, LineIndex};
+pub use line_index::{ColumnUnit, LineColumn, LineIndex};
 
 /// A file the server knows, by an index into the [`Vfs`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

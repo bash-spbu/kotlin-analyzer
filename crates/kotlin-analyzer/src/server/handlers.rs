@@ -6,9 +6,9 @@ use std::sync::Arc;
 use ide::{Analysis, Cancellable, NavigationFile, NavigationTarget, SymbolKind};
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
-    CodeActionRequest, DocumentSymbolRequest, GotoDefinition, GotoImplementation,
-    GotoTypeDefinition, HoverRequest, InlayHintRequest, InlayHintResolveRequest, Request as _,
-    WorkspaceSymbolRequest,
+    CodeActionRequest, DocumentDiagnosticRequest, DocumentSymbolRequest, GotoDeclaration,
+    GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest,
+    InlayHintResolveRequest, Request as _, WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -28,8 +28,29 @@ pub(super) struct Snapshot {
     /// The file the request is about, when it names one the server knows.
     pub(super) request_file: Option<FileId>,
     pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
+    /// What a position's column counts, as agreed with the client.
+    pub(super) encoding: vfs::ColumnUnit,
+    /// How many times the workspace has changed: a pull diagnostics
+    /// report's id.
+    pub(super) revision: u64,
     /// The semantic tokens last sent per file, for deltas.
     pub(super) sent_tokens: Arc<super::semantic_tokens::SentTokens>,
+}
+
+impl Snapshot {
+    /// The same snapshot for another thread.
+    pub(super) fn with_analysis_clone(&self) -> Snapshot {
+        Snapshot {
+            analysis: self.analysis.clone(),
+            paths: self.paths.clone(),
+            loaded: self.loaded,
+            request_file: self.request_file,
+            diagnostics_config: self.diagnostics_config.clone(),
+            sent_tokens: self.sent_tokens.clone(),
+            encoding: self.encoding,
+            revision: self.revision,
+        }
+    }
 }
 
 /// How many results `workspace/symbol` returns at most.
@@ -53,6 +74,9 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             }
             GotoImplementation::METHOD => params::<GotoImplementation>(request)
                 .map(|params| implementation(&snapshot, params)),
+            GotoDeclaration::METHOD => {
+                params::<GotoDeclaration>(request).map(|params| declaration(&snapshot, params))
+            }
             GotoTypeDefinition::METHOD => params::<GotoTypeDefinition>(request)
                 .map(|params| type_definition(&snapshot, params)),
             HoverRequest::METHOD => {
@@ -72,6 +96,13 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             WorkspaceSymbolRequest::METHOD => params::<WorkspaceSymbolRequest>(request)
                 .map(|params| workspace_symbols(&snapshot, &params.query)),
             method if editing::handles(method) => editing::handle(&snapshot, request),
+            DocumentDiagnosticRequest::METHOD => params::<DocumentDiagnosticRequest>(request)
+                .map(|params| super::pull_diagnostics::document(&snapshot, params)),
+            WorkspaceDiagnosticRequest::METHOD => params::<WorkspaceDiagnosticRequest>(request)
+                .map(|params| super::pull_diagnostics::workspace(&snapshot, params)),
+            method if super::hierarchy::METHODS.contains(&method) => {
+                Ok(super::hierarchy::handle(&snapshot, method, &request.params))
+            }
             method => {
                 return Response::new_err(
                     id,
@@ -103,6 +134,17 @@ fn definition(
         snapshot,
         params.text_document_position_params.position,
         |file, offset| snapshot.analysis.goto_definition(file, offset),
+    )
+}
+
+fn declaration(
+    snapshot: &Snapshot,
+    params: lsp_types::request::GotoDeclarationParams,
+) -> Cancellable<serde_json::Value> {
+    navigation(
+        snapshot,
+        params.text_document_position_params.position,
+        |file, offset| snapshot.analysis.goto_declaration(file, offset),
     )
 }
 
@@ -140,7 +182,7 @@ fn navigation(
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, position);
+    let offset = convert::offset(&text, position, snapshot.encoding);
     let targets = targets_at(file, offset)?;
     let mut locations = Vec::new();
     for target in &targets {
@@ -158,11 +200,15 @@ fn hover(snapshot: &Snapshot, params: lsp_types::HoverParams) -> Cancellable<ser
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(serde_json::Value::Null);
     };
-    let offset = convert::offset(&text, params.text_document_position_params.position);
+    let offset = convert::offset(
+        &text,
+        params.text_document_position_params.position,
+        snapshot.encoding,
+    );
     let Some(result) = snapshot.analysis.hover(file, offset)? else {
         return Ok(serde_json::Value::Null);
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     let hover = lsp_types::Hover {
         contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
             kind: lsp_types::MarkupKind::Markdown,
@@ -184,10 +230,10 @@ fn inlay_hints(
         return Ok(serde_json::Value::Null);
     };
     let range = syntax::TextRange::new(
-        convert::offset(&text, params.range.start),
-        convert::offset(&text, params.range.end),
+        convert::offset(&text, params.range.start, snapshot.encoding),
+        convert::offset(&text, params.range.end, snapshot.encoding),
     );
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     let uri = snapshot
         .paths
         .get(file.index())
@@ -294,6 +340,25 @@ fn resolve_inlay_hint(
 }
 
 fn location_of(snapshot: &Snapshot, target: &NavigationTarget) -> Cancellable<Option<Location>> {
+    Ok(target_ranges(snapshot, target)?.map(|ranges| Location {
+        uri: ranges.uri,
+        range: ranges.focus,
+    }))
+}
+
+/// Where a navigation target is, as LSP has it.
+pub(super) struct TargetRanges {
+    pub(super) uri: lsp_types::Uri,
+    /// The whole declaration.
+    pub(super) full: lsp_types::Range,
+    /// Its name.
+    pub(super) focus: lsp_types::Range,
+}
+
+pub(super) fn target_ranges(
+    snapshot: &Snapshot,
+    target: &NavigationTarget,
+) -> Cancellable<Option<TargetRanges>> {
     let (path, text) = match &target.file {
         NavigationFile::Workspace(file) => {
             let Some(text) = snapshot.analysis.file_text(*file)? else {
@@ -318,10 +383,11 @@ fn location_of(snapshot: &Snapshot, target: &NavigationTarget) -> Cancellable<Op
     let Some(uri) = convert::uri_of(&path) else {
         return Ok(None);
     };
-    let index = LineIndex::new(&text);
-    Ok(Some(Location {
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
+    Ok(Some(TargetRanges {
         uri,
-        range: convert::range(&index, &text, target.focus_range),
+        full: convert::range(&index, &text, target.full_range),
+        focus: convert::range(&index, &text, target.focus_range),
     }))
 }
 
@@ -332,7 +398,7 @@ fn document_symbols(snapshot: &Snapshot) -> Cancellable<serde_json::Value> {
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(serde_json::Value::Null);
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     let symbols = snapshot.analysis.document_symbols(file)?;
     #[allow(deprecated)]
     fn convert_symbol(
@@ -395,11 +461,12 @@ pub(super) fn diagnostics(
     analysis: &Analysis,
     file: FileId,
     config: &ide::DiagnosticsConfig,
+    unit: vfs::ColumnUnit,
 ) -> Cancellable<Vec<Diagnostic>> {
     let Some(text) = analysis.file_text(file)? else {
         return Ok(Vec::new());
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, unit);
     Ok(analysis
         .diagnostics(file, config)?
         .into_iter()
@@ -440,9 +507,9 @@ fn code_actions(
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(serde_json::Value::Null);
     };
-    let index = LineIndex::new(&text);
-    let start = convert::offset(&text, params.range.start) as u32;
-    let end = convert::offset(&text, params.range.end) as u32;
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
+    let start = convert::offset(&text, params.range.start, snapshot.encoding) as u32;
+    let end = convert::offset(&text, params.range.end, snapshot.encoding) as u32;
     let mut actions = Vec::new();
     for diagnostic in snapshot
         .analysis
@@ -490,7 +557,7 @@ fn code_actions(
     Ok(serde_json::to_value(actions).unwrap_or_default())
 }
 
-fn symbol_kind(kind: SymbolKind) -> lsp_types::SymbolKind {
+pub(super) fn symbol_kind(kind: SymbolKind) -> lsp_types::SymbolKind {
     match kind {
         SymbolKind::Class => lsp_types::SymbolKind::CLASS,
         SymbolKind::Interface | SymbolKind::Annotation => lsp_types::SymbolKind::INTERFACE,

@@ -113,11 +113,11 @@ fn tokens(
     let Some(text) = snapshot.analysis.file_text(file)? else {
         return Ok(None);
     };
-    let index = LineIndex::new(&text);
+    let index = LineIndex::with_unit(&text, snapshot.encoding);
     let wanted = range.map(|range| {
         TextRange::new(
-            convert::offset(&text, range.start),
-            convert::offset(&text, range.end),
+            convert::offset(&text, range.start, snapshot.encoding),
+            convert::offset(&text, range.end, snapshot.encoding),
         )
     });
     let mut data = Vec::new();

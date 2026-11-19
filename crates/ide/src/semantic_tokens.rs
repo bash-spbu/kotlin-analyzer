@@ -55,9 +55,17 @@ impl TokenModifiers {
     /// A `var`: reassignable (not a standard LSP modifier; editors may style
     /// it, as IntelliJ underlines them).
     pub const MUTABLE: TokenModifiers = TokenModifiers(1 << 4);
+    /// Declared by Kotlin's standard library or the JDK.
+    pub const DEFAULT_LIBRARY: TokenModifiers = TokenModifiers(1 << 5);
     /// The legend's names, by bit.
-    pub const NAMES: [&'static str; 5] =
-        ["declaration", "readonly", "static", "deprecated", "mutable"];
+    pub const NAMES: [&'static str; 6] = [
+        "declaration",
+        "readonly",
+        "static",
+        "deprecated",
+        "mutable",
+        "defaultLibrary",
+    ];
 
     fn with(self, other: TokenModifiers) -> TokenModifiers {
         TokenModifiers(self.0 | other.0)
@@ -255,7 +263,17 @@ fn declaration_token(
     if item.modifiers.contains(Modifiers::DEPRECATED) {
         modifiers = modifiers.with(TokenModifiers::DEPRECATED);
     }
+    if is_default_library(&tree.package) {
+        modifiers = modifiers.with(TokenModifiers::DEFAULT_LIBRARY);
+    }
     Some((kind, modifiers))
+}
+
+/// Packages of Kotlin's standard library and of the JDK: what a Kotlin
+/// program has whatever its dependencies.
+fn is_default_library(package: &intern::Path) -> bool {
+    let first = package.segments().first().map(|segment| segment.as_str());
+    matches!(first, Some("kotlin" | "java" | "javax"))
 }
 
 fn local_kind(kind: LocalKind) -> TokenKind {
