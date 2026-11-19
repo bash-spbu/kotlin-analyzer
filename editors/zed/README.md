@@ -47,9 +47,7 @@ Test functions (`@Test`, `@ParameterizedTest`, `@RepeatedTest`,
 classes holding them, top-level or nested one level
 (`languages/kotlin/runnables.scm`). It runs `gradle test --tests <filter>
 --rerun` in the file's project — `app.OrderTest.creates an order`,
-`app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py zed-tests`, which
-reads the test's names from the environment Zed gives the task (they never
-pass through the shell; the script itself goes in base64).
+`app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py zed-tests`.
 
 The server's code lenses are off in Zed (`codeLens` defaults to
 `{ "references": false, "tests": false }`): Zed doesn't run their commands,
@@ -75,7 +73,9 @@ To test a group of projects, run the test task from the parent's
 the `PATH`. `python3` must be on the `PATH`; the tasks are run by
 `editors/gradle/gradle_task.py`.
 Zed tasks can't reach a file inside an extension, so
-`languages/kotlin/tasks.json` embeds the script. `editors/gradle/zed_tasks.py`
+`languages/kotlin/tasks.json` embeds the script, in base64. Each task is
+one `/bin/sh -c` command quoted by `zed_tasks.py`, with no `args`: Zed puts
+arguments into the shell's command line unquoted. `editors/gradle/zed_tasks.py`
 writes that file, and `editors/gradle/test_gradle_task.py` checks it.
 
 ## Settings

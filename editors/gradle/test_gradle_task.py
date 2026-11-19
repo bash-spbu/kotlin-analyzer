@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -167,16 +169,32 @@ class GradleTaskTest(BuildFixture):
         self.assertFalse(self.call_file.exists())
 
 
+def zed_expanded(template: str, variables: dict[str, str]) -> str:
+    """`template` as Zed expands its variables: `$NAME`, `${NAME}`, and
+    `${NAME:default}` (the default when Zed has no such variable)."""
+
+    def value(match: re.Match) -> str:
+        name = match.group(1) or match.group(3)
+        default = match.group(2)
+        if name in variables:
+            return variables[name]
+        if default is not None:
+            return default[1:]
+        raise KeyError(f"Zed has no {name}: it offers no such task")
+
+    return re.sub(r"\$\{(ZED_\w+)(:[^}]*)?\}|\$(ZED_\w+)", value, template)
+
+
 class ZedTestFilterTest(unittest.TestCase):
-    def test_a_runnable_outside_a_package_or_without_its_captures(self) -> None:
+    def test_a_runnable_without_a_package_an_outer_class_or_a_method(self) -> None:
         sys.path.insert(0, str(HERE))
         import gradle_task
 
+        self.assertEqual(gradle_task.zed_test_filter("", "", "Loose", ""), "Loose")
         self.assertEqual(
-            gradle_task.zed_test_filter({"ZED_CUSTOM_kotlin_class_name": "Loose"}), "Loose"
+            gradle_task.zed_test_filter("app", "Outer", "Nested", "`works fine`"),
+            "app.Outer$Nested.works fine",
         )
-        with self.assertRaises(gradle_task.NotABuild):
-            gradle_task.zed_test_filter({})
 
 
 class ZedTasksTest(unittest.TestCase):
@@ -187,19 +205,28 @@ class ZedTasksTest(unittest.TestCase):
             "tasks.json is stale: run python3 editors/gradle/zed_tasks.py",
         )
 
-    def test_zed_and_the_shell_find_nothing_to_read_in_the_arguments_but_the_file(self) -> None:
-        # Zed expands variables in a task's arguments and gives them to the
-        # user's shell (`zsh -i -c`): no quote, backtick, `$` or line break
-        # may reach either, whatever the script holds.
+    def test_each_task_is_one_shell_command_whose_words_zed_cannot_split(self) -> None:
+        # Zed puts a task's `args` into the shell's command line unquoted;
+        # a lone command is shell code as written.
+        tricky = {
+            "ZED_FILE": "/work/My Project/src/$HOME/Pay;Test.kt",
+            "ZED_CUSTOM_kotlin_package_name": "pay",
+            "ZED_CUSTOM_kotlin_class_name": "PayTest",
+            "ZED_CUSTOM_kotlin_method_name": "`charges (in full); twice`",
+        }
         for task in json.loads(zed_tasks.TASKS_FILE.read_text()):
-            for argument in task["args"]:
-                if argument != "$ZED_FILE":
-                    self.assertRegex(argument, r"^[A-Za-z0-9+/=.,;() _-]*$", task["label"])
+            self.assertNotIn("args", task)
+            self.assertEqual(task["shell"], {"with_arguments": {"program": "/bin/sh", "args": ["-c"]}})
+            command = zed_expanded(task["command"], tricky)
+            self.assertNotIn("\n", command)
+            words = shlex.split(command)
+            self.assertEqual(words[:4], ["python3", "-I", "-c", zed_tasks.BOOTSTRAP], task["label"])
+            self.assertIn(tricky["ZED_FILE"], words, task["label"])
 
 
 class ZedTaskRunTest(BuildFixture):
-    # What a runnable in `pay.PayTest.Refunds` captured, by tag, as Zed puts
-    # it in the task's environment.
+    # What Zed knows when it runs each task: the file, and what a runnable
+    # in `pay.PayTest.Refunds` captured, by tag.
     CAPTURES = {
         "kotlin-test-method": {"class": "Refunds", "method": "`refunds in full`"},
         "kotlin-test-nested-method": {
@@ -211,18 +238,12 @@ class ZedTaskRunTest(BuildFixture):
         "kotlin-test-nested-class": {"outer_class": "PayTest", "class": "Refunds"},
     }
 
-    def captured(self, key: str) -> dict[str, str]:
-        captures = {"package": "pay", **self.CAPTURES.get(key, {})}
-        if key not in self.CAPTURES:
-            return {}
-        return {f"ZED_CUSTOM_kotlin_{name}_name": value for name, value in captures.items()}
-
-    def run_command(self, command: list[str], answer: str = "", path: str | None = None,
-                    extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-        environment = {"GRADLE_CALL": str(self.call_file), "PATH": path or os.defpath, **(extra or {})}
-        return subprocess.run(
-            command, input=answer, capture_output=True, text=True, env=environment, timeout=30
-        )
+    def variables(self, key: str) -> dict[str, str]:
+        variables = {"ZED_FILE": str(self.source)}
+        if key in self.CAPTURES:
+            captures = {"package": "pay", **self.CAPTURES[key]}
+            variables.update({f"ZED_CUSTOM_kotlin_{name}_name": value for name, value in captures.items()})
+        return variables
 
     def test_each_zed_task_runs_like_the_script(self) -> None:
         tasks = json.loads(zed_tasks.TASKS_FILE.read_text())
@@ -237,15 +258,15 @@ class ZedTaskRunTest(BuildFixture):
             "kotlin-test-class": [*payments, "pay.Refunds", "--rerun"],
             "kotlin-test-nested-class": [*payments, "pay.PayTest$Refunds", "--rerun"],
         }
-        keys = [task.get("tags", [task["args"][4]])[0] for task in tasks]
+        keys = [task.get("tags", [shlex.split(task["command"])[5]])[0] for task in tasks]
         self.assertEqual(keys, list(expected))
         for task, key in zip(tasks, keys):
-            arguments = [argument.replace("$ZED_FILE", str(self.source)) for argument in task["args"]]
-            command = [sys.executable if task["command"] == "python3" else task["command"], *arguments]
-            result = self.run_command(command, answer="2\n", extra=self.captured(key))
+            command = zed_expanded(task["command"], self.variables(key))
+            # The python3 Zed's shell finds is this test's.
+            command = command.replace("'python3'", shlex.quote(sys.executable), 1)
+            result = self.run_command(["/bin/sh", "-c", command], answer="2\n")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.gradle_call(), (self.root, expected[key]), task["label"])
-
 
 if __name__ == "__main__":
     unittest.main()

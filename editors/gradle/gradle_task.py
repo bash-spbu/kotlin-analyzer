@@ -15,11 +15,10 @@ in its tasks.json (see zed_tasks.py).
                                     the project holding <path>: a test class
                                     (`app.OrderTest`, `app.Outer$Nested`) or
                                     function (`app.OrderTest.creates order`)
-    gradle_task.py zed-tests <path> the same, for the test Zed's runnable
-                                    names in the environment
-                                    (ZED_CUSTOM_kotlin_package_name,
-                                    …_outer_class_name, …_class_name,
-                                    …_method_name)
+    gradle_task.py zed-tests <path> <package> <outer class> <class> <method>
+                                    the same, for the test a Zed runnable
+                                    names: the outer class, the method or
+                                    the package may be empty
     gradle_task.py projects <path>  prints those projects, nearest first, as
                                     JSON: [{"path": ":app", "directory": …}]
 
@@ -84,19 +83,10 @@ def gradle_test_filter(written: str) -> str:
     return ".".join(segments)
 
 
-def zed_test_filter(environment: dict[str, str]) -> str:
-    """The filter for the test a Zed runnable (runnables.scm) captured: Zed
-    puts its captures in the task's environment, where no shell parses them."""
-    class_name = environment.get("ZED_CUSTOM_kotlin_class_name")
-    if not class_name:
-        raise NotABuild("run this task from the gutter next to a test")
-    outer = environment.get("ZED_CUSTOM_kotlin_outer_class_name")
-    classes = f"{outer}${class_name}" if outer else class_name
-    method = environment.get("ZED_CUSTOM_kotlin_method_name")
-    parts = [environment.get("ZED_CUSTOM_kotlin_package_name", ""), classes]
-    if method:
-        parts.append(method)
-    return gradle_test_filter(".".join(parts))
+def zed_test_filter(package: str, outer_class: str, class_name: str, method: str) -> str:
+    """The filter for the test a Zed runnable (runnables.scm) captured."""
+    classes = f"{outer_class}${class_name}" if outer_class else class_name
+    return gradle_test_filter(".".join([package, classes, method]))
 
 
 def has_any(directory: Path, names: tuple[str, ...]) -> bool:
@@ -149,7 +139,7 @@ def chosen_project(build: Build) -> Path:
 
 def main(arguments: list[str]) -> int:
     task = arguments[0] if arguments else ""
-    expected_count = 3 if task == "tests" else 2
+    expected_count = {"tests": 3, "zed-tests": 6}.get(task, 2)
     if len(arguments) != expected_count or task not in TASKS:
         print(
             "usage: gradle_task.py " + "|".join(TASKS) + " <file or directory> [<test filter>]",
@@ -175,7 +165,7 @@ def main(arguments: list[str]) -> int:
             if task == "tests":
                 test_filter = gradle_test_filter(arguments[2])
             else:
-                test_filter = zed_test_filter(dict(os.environ))
+                test_filter = zed_test_filter(*arguments[2:])
             print(f"Testing {test_filter} in {build.gradle_path(project)}")
             run(build, build.filtered_test_arguments(project, test_filter))
         else:
