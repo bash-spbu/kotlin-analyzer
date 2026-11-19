@@ -9,6 +9,9 @@
 //!   task in the project holding the file, with `--tests <filter>`;
 //! - `kotlin-analyzer.showReferences` with the declaration's URI, the
 //!   position of its name and the references' locations.
+//!
+//! A library file rendered from class files gets one more, over its first
+//! line, with no command: a banner saying where it comes from and why.
 
 use ide::{Cancellable, CodeLensKind, TestTarget};
 use serde_json::{Value, json};
@@ -42,6 +45,11 @@ impl Default for CodeLensConfig {
 }
 
 pub(super) fn handle(snapshot: &Snapshot, method: &str, params: &Value) -> Cancellable<Value> {
+    if method == CODE_LENS
+        && let Some(banner) = decompiled_banner(params)
+    {
+        return Ok(json!([banner]));
+    }
     let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
         return Ok(Value::Null);
     };
@@ -88,6 +96,18 @@ pub(super) fn handle(snapshot: &Snapshot, method: &str, params: &Value) -> Cance
         }
     }
     Ok(Value::Array(lenses))
+}
+
+/// The banner lens of a file rendered from class files: its notice, over
+/// the first line, with a command that does nothing.
+fn decompiled_banner(params: &Value) -> Option<Value> {
+    let uri: lsp_types::Uri = params["textDocument"]["uri"].as_str()?.parse().ok()?;
+    let path = convert::path_of(&uri)?;
+    let notice = super::library_sources::decompiled_notice(&path)?;
+    Some(json!({
+        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+        "command": { "title": notice, "command": "" },
+    }))
 }
 
 /// A reference lens with its count and the command showing them.

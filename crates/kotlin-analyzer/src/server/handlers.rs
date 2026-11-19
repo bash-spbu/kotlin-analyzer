@@ -435,6 +435,7 @@ pub(super) fn target_ranges(
             archive,
             entry,
             text,
+            ..
         } => {
             let Some(path) = library_sources::materialize(archive, entry, text) else {
                 return Ok(None);

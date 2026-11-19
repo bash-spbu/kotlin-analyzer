@@ -357,7 +357,7 @@ fn java_parameters(parameters: &[Parameter], names: Option<&[String]>) -> String
 
 /// A type as Java writes it, by its simple name: `Map<String, ? extends
 /// Number>`, `Map.Entry<K, V>`, `long[]`.
-fn java_type(type_ref: &TypeRef) -> String {
+pub(crate) fn java_type(type_ref: &TypeRef) -> String {
     let arguments_text = |arguments: &[TypeArgument]| -> String {
         if arguments.is_empty() {
             return String::new();

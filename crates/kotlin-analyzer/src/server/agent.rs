@@ -235,8 +235,15 @@ impl Answers<'_> {
                 .as_deref()
                 .map(|container| format!(" in {container}"))
                 .unwrap_or_default();
+            let decompiled = match &target.file {
+                NavigationFile::Library {
+                    origin: hir::SourceOrigin::Decompiled(_),
+                    ..
+                } => " (no sources: declarations rendered from the class files)",
+                _ => "",
+            };
             lines.push(format!(
-                "{}:{}:{} — {} {}{container}\n    {}",
+                "{}:{}:{} — {} {}{container}{decompiled}\n    {}",
                 self.shown(&path),
                 place.line,
                 place.column,
@@ -262,6 +269,7 @@ impl Answers<'_> {
                 archive,
                 entry,
                 text,
+                ..
             } => {
                 library_sources::materialize(archive, entry, text).map(|path| (path, text.clone()))
             }

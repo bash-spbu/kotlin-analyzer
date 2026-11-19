@@ -55,6 +55,8 @@ pub enum NavigationFile {
         archive: PathBuf,
         entry: String,
         text: Arc<str>,
+        /// Its sources, or its declarations rendered from class files.
+        origin: hir::SourceOrigin,
     },
 }
 
@@ -98,6 +100,7 @@ impl NavigationTarget {
                         archive: source.archive,
                         entry: source.entry,
                         text: source.text,
+                        origin: source.origin,
                     },
                     source.full_range,
                     source.name_range,

@@ -594,20 +594,33 @@ pub fn release_letter(version: u32) -> Option<char> {
     }
 }
 
-/// A library declaration found in its library's sources archive.
+/// A library declaration's text: found in its library's sources archive,
+/// or rendered from its class files.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LibrarySourceLocation {
+    /// The sources archive — or, for a rendered file, the compiled one.
     pub archive: std::path::PathBuf,
-    /// The entry's path inside the archive (`java.base/java/util/List.java`).
+    /// The entry's path inside the archive (`java.base/java/util/List.java`);
+    /// a rendered file's under `decompiled/`.
     pub entry: String,
     pub text: Arc<str>,
     pub name_range: TextRange,
     pub full_range: TextRange,
+    pub origin: SourceOrigin,
 }
 
-/// Where a library declaration is written in its sources archive, by the
-/// file it was compiled from (or, without that, by searching its package's
-/// directory), then by its chain of names.
+/// Where a library declaration's text comes from.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SourceOrigin {
+    /// Its sources: written by its authors, documentation included.
+    Archive,
+    /// Rendered from its class files — declarations only — for want of
+    /// sources.
+    Decompiled(crate::decompiled::MissingSources),
+}
+
+/// Where a library declaration is written — in its sources archive, else
+/// in the declarations its class files record, rendered as source.
 pub fn library_declaration_source(
     db: &dyn SourceDatabase,
     location: crate::ItemLocation,
@@ -615,12 +628,30 @@ pub fn library_declaration_source(
     let crate::ItemContainer::Library(package) = location.container else {
         return None;
     };
-    let tree = library_package_tree(db, package);
-    let library = package.library(db);
-    let source = library.source(db).clone();
-    let sources = source.sources.as_ref()?;
-    let chain = name_chain(&tree, location.item);
-    let top_level = *chain.first()?;
+    let source = package.library(db).source(db).clone();
+    let missing = match &source.sources {
+        None => crate::decompiled::MissingSources::NoArchive,
+        Some(sources) => {
+            if let Some(found) = archive_declaration_source(db, location) {
+                return Some(found);
+            }
+            crate::decompiled::MissingSources::NotInArchive {
+                archive_name: file_name_of(sources),
+            }
+        }
+    };
+    decompiled_declaration_source(db, location, package, &source.archive, missing)
+}
+
+fn file_name_of(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The archive directory of a library package's files:
+/// `<module>/<package dirs>/`, `""` for the root package.
+fn package_directory(db: &dyn SourceDatabase, package: LibraryPackage) -> String {
     let mut directory = package
         .package(db)
         .segments()
@@ -635,11 +666,126 @@ pub fn library_declaration_source(
             format!("{module}/{directory}")
         };
     }
-    let prefix = if directory.is_empty() {
-        String::new()
+    if directory.is_empty() {
+        directory
     } else {
         format!("{directory}/")
+    }
+}
+
+/// The declaration in a file rendered from its class files: its top-level
+/// class's — with the other declarations compiled from the same source
+/// file (a Kotlin file's top-level functions) — under
+/// `decompiled/<package>/<source file>`.
+fn decompiled_declaration_source(
+    db: &dyn SourceDatabase,
+    location: crate::ItemLocation,
+    package: LibraryPackage,
+    compiled: &std::path::Path,
+    missing: crate::decompiled::MissingSources,
+) -> Option<LibrarySourceLocation> {
+    use crate::decompiled::StubLanguage;
+    let tree = library_package_tree(db, package);
+    let chain = name_chain(&tree, location.item);
+    let top_level = *chain.first()?;
+    let language = StubLanguage::of(tree.item(top_level));
+    let recorded_file = tree
+        .source_files
+        .iter()
+        .find(|(index, _)| *index == top_level)
+        .map(|(_, file)| file.to_string());
+    let items: Vec<ItemId> = match &recorded_file {
+        Some(file) => {
+            let from_file: Vec<ItemId> = tree
+                .source_files
+                .iter()
+                .filter(|(_, recorded)| **recorded == **file)
+                .map(|(index, _)| *index)
+                .collect();
+            tree.top_level
+                .iter()
+                .copied()
+                .filter(|item| from_file.contains(item))
+                .filter(|item| StubLanguage::of(tree.item(*item)) == language)
+                .collect()
+        }
+        None => vec![top_level],
     };
+    let extension = language.extension();
+    let file_name = recorded_file
+        .filter(|file| file.ends_with(&format!(".{extension}")))
+        .unwrap_or_else(|| format!("{}.{extension}", tree.item(top_level).name));
+    let text: Arc<str> = Arc::from(crate::decompiled::render(
+        &tree,
+        &items,
+        language,
+        &file_name_of(compiled),
+        &missing,
+    ));
+    let entry = format!("decompiled/{}{file_name}", package_directory(db, package));
+    let names = chain_names(&tree, &chain);
+    let ranges = locate_in_text(&text, std::path::Path::new(&entry), &names, None)?;
+    Some(LibrarySourceLocation {
+        archive: compiled.to_path_buf(),
+        entry,
+        text,
+        name_range: ranges.name_range,
+        full_range: ranges.range,
+        origin: SourceOrigin::Decompiled(missing),
+    })
+}
+
+/// Each item of a chain's name, and whether it is a classifier.
+fn chain_names(tree: &ItemTree, chain: &[ItemId]) -> Vec<(Name, bool)> {
+    chain
+        .iter()
+        .map(|index| {
+            (
+                tree.item(*index).name,
+                tree.item(*index).kind.is_classifier(),
+            )
+        })
+        .collect()
+}
+
+/// Where in a source file's `text` the item `names` leads to is (in
+/// `package`, when given).
+fn locate_in_text(
+    text: &Arc<str>,
+    path: &std::path::Path,
+    names: &[(Name, bool)],
+    package: Option<&intern::Path>,
+) -> Option<crate::ItemRanges> {
+    let language = syntax::Language::of_path(path)?;
+    let parse = syntax::parse(text.clone(), language);
+    let (source_tree, source_map) = match language {
+        syntax::Language::Kotlin => crate::item_tree::lower_kotlin(&parse),
+        syntax::Language::Java => crate::item_tree::lower_java(&parse),
+    };
+    if package.is_some_and(|package| source_tree.package != *package) {
+        return None;
+    }
+    let found = find_by_names(&source_tree, names)?;
+    Some(source_map.ranges(found))
+}
+
+/// Where a library declaration is written in its sources archive, by the
+/// file it was compiled from (or, without that, by searching its package's
+/// directory), then by its chain of names.
+fn archive_declaration_source(
+    db: &dyn SourceDatabase,
+    location: crate::ItemLocation,
+) -> Option<LibrarySourceLocation> {
+    let crate::ItemContainer::Library(package) = location.container else {
+        return None;
+    };
+    let tree = library_package_tree(db, package);
+    let library = package.library(db);
+    let source = library.source(db).clone();
+    let sources = source.sources.as_ref()?;
+    let chain = name_chain(&tree, location.item);
+    let top_level = *chain.first()?;
+    let prefix = package_directory(db, package);
     let mut archive = classfile::Archive::open(sources).ok()?;
     let recorded_file = tree
         .source_files
@@ -684,15 +830,7 @@ pub fn library_declaration_source(
         (*not_under_package, !name.starts_with("jvm"), name.clone())
     });
     candidates.extend(elsewhere.into_iter().map(|(_, name)| name));
-    let names: Vec<(Name, bool)> = chain
-        .iter()
-        .map(|index| {
-            (
-                tree.item(*index).name,
-                tree.item(*index).kind.is_classifier(),
-            )
-        })
-        .collect();
+    let names = chain_names(&tree, &chain);
     if let Some(found) = find_in_entries(&mut archive, sources, candidates, &names, None) {
         return Some(found);
     }
@@ -746,25 +884,15 @@ fn find_in_entries(
             continue;
         };
         let text: Arc<str> = Arc::from(String::from_utf8_lossy(&bytes).as_ref());
-        let Some(language) = syntax::Language::of_path(std::path::Path::new(&entry)) else {
-            continue;
-        };
-        let parse = syntax::parse(text.clone(), language);
-        let (source_tree, source_map) = match language {
-            syntax::Language::Kotlin => crate::item_tree::lower_kotlin(&parse),
-            syntax::Language::Java => crate::item_tree::lower_java(&parse),
-        };
-        if package.is_some_and(|package| source_tree.package != *package) {
-            continue;
-        }
-        if let Some(found) = find_by_names(&source_tree, names) {
-            let ranges = source_map.ranges(found);
+        let path = std::path::Path::new(&entry);
+        if let Some(ranges) = locate_in_text(&text, path, names, package) {
             return Some(LibrarySourceLocation {
                 archive: sources.to_path_buf(),
                 entry,
                 name_range: ranges.name_range,
                 full_range: ranges.range,
                 text,
+                origin: SourceOrigin::Archive,
             });
         }
     }

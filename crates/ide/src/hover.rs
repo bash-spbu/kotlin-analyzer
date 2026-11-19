@@ -380,7 +380,8 @@ pub(crate) fn documentation(db: &RootDatabase, location: ItemLocation) -> Option
 }
 
 /// `read` of the declaration's syntax node: in its workspace file, or in
-/// its library's sources (none for a compiled library without them).
+/// its library's sources — not in a file rendered from class files, which
+/// says nothing they don't.
 fn with_declaration_node<T>(
     db: &RootDatabase,
     location: ItemLocation,
@@ -394,7 +395,8 @@ fn with_declaration_node<T>(
             (hir::parse(db, file), range)
         }
         ItemContainer::Library(_) => {
-            let source = hir::library_declaration_source(db, location)?;
+            let source = hir::library_declaration_source(db, location)
+                .filter(|source| source.origin == hir::SourceOrigin::Archive)?;
             let language = Language::of_path(std::path::Path::new(&source.entry))?;
             let parse = syntax::parse(source.text.clone(), language);
             (std::sync::Arc::new(parse), source.full_range)

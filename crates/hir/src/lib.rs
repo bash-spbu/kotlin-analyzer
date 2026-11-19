@@ -6,6 +6,7 @@ pub use base_db::{
     Language, LibrarySource, ProjectModel, RootDatabase, SourceDatabase, SourceFile, SourceSetId,
     WarningLevel, parse, salsa,
 };
+pub use hir_def::decompiled::MissingSources;
 pub use hir_def::def_map::{
     classpath_complete, importable_names, package_exists, package_names, package_prefix_exists,
     packages_declaring, sees, visible_top_level,
@@ -20,7 +21,7 @@ pub use hir_def::item_tree::{
 };
 pub use hir_def::item_tree::{Deprecation, DeprecationLevel};
 pub use hir_def::library::{
-    LibrarySourceLocation, index_library, library_declaration_source, release_letter,
+    LibrarySourceLocation, SourceOrigin, index_library, library_declaration_source, release_letter,
 };
 pub use hir_def::resolver::{
     DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, default_imports_visible,

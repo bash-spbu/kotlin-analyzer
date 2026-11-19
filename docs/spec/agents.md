@@ -8,7 +8,9 @@ gets: tools `symbols`, `definition`, `references`, `hover`,
 and the symbol's name on it (a whole word), or a column from 1 in
 characters. Answers are text: `path:line:column` — relative to the
 project's root inside it — with the line, a declaration's kind and
-container; hover is markdown; a failure is a tool error saying why (a name
+container — a library's without sources marked `(no sources: declarations
+rendered from the class files)`, its path the rendered file's (libraries.md,
+Without sources); hover is markdown; a failure is a tool error saying why (a name
 not on the line, a file outside any project, the project still loading).
 
 ## Hosts

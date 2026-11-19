@@ -938,3 +938,119 @@ fn a_packages_names_come_in_spelling_order_whatever_was_interned_first() {
         .collect();
     assert_eq!(names, [earlier, later]);
 }
+
+#[test]
+fn a_library_without_sources_opens_as_its_declarations_rendered() {
+    let Some((stdlib, _)) = cached_jar_with_sources("org.jetbrains.kotlin", "kotlin-stdlib") else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let Some((slf4j, slf4j_sources)) = cached_jar_with_sources("org.slf4j", "slf4j-api") else {
+        eprintln!("skipped: no slf4j-api in the Gradle cache");
+        return;
+    };
+    let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
+    let library = |archive: std::path::PathBuf, sources: Option<std::path::PathBuf>| {
+        let source = base_db::LibrarySource {
+            archive,
+            kind: base_db::ArchiveKind::Jar,
+            sources,
+        };
+        let indexed = crate::library::index_library(&source).expect("indexes");
+        (source, indexed)
+    };
+    // slf4j without its sources; the standard library with a sources JAR
+    // that isn't its own — slf4j's, which declares nothing of it.
+    parsed.database.set_libraries(
+        vec![library(stdlib, Some(slf4j_sources)), library(slf4j, None)],
+        vec![vec![0, 1]],
+        None,
+    );
+    let db = &parsed.database;
+    let file = db.all_files()[0];
+    let source_of = |package: &str, name: &str| {
+        let declaration = crate::def_map::visible_top_level(
+            db,
+            file,
+            &Path::parse(package),
+            intern::Name::new(name),
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{package}.{name} is declared"));
+        let found = crate::library::library_declaration_source(db, declaration)
+            .unwrap_or_else(|| panic!("{package}.{name} has a text"));
+        let named = &found.text[found.name_range.start as usize..found.name_range.end as usize];
+        assert_eq!(named, name, "where the cursor lands");
+        found
+    };
+
+    // Kotlin, from `@Metadata`: the source file's declarations together.
+    let pair = source_of("kotlin", "Pair");
+    assert_eq!(pair.entry, "decompiled/kotlin/Tuples.kt");
+    assert!(matches!(
+        &pair.origin,
+        crate::library::SourceOrigin::Decompiled(crate::decompiled::MissingSources::NotInArchive { archive_name })
+            if archive_name.starts_with("slf4j-api")
+    ));
+    for expected in [
+        "// Decompiled by kotlin-analyzer from kotlin-stdlib-",
+        "its sources (slf4j-api-",
+        "under the library's own license",
+        "package kotlin\n",
+        "import java.io.Serializable\n",
+        "data class Pair<out A, out B> : Serializable {\n    constructor(first: A, second: B)\n    val first: A\n",
+        "    fun copy(first: A /* = … */, second: B /* = … */): Pair<A, B> { /* compiled code */ }\n",
+        "infix fun <A, B> A.to(that: B): Pair<A, B> { /* compiled code */ }\n",
+    ] {
+        assert!(
+            pair.text.contains(expected),
+            "{expected:?} in\n{}",
+            pair.text
+        );
+    }
+    // A top-level function lands in its file's text too.
+    assert_eq!(
+        source_of("kotlin", "to").entry,
+        "decompiled/kotlin/Tuples.kt"
+    );
+
+    // Java, from the class file.
+    let logger = source_of("org.slf4j", "Logger");
+    assert_eq!(logger.entry, "decompiled/org/slf4j/Logger.java");
+    assert!(matches!(
+        logger.origin,
+        crate::library::SourceOrigin::Decompiled(crate::decompiled::MissingSources::NoArchive)
+    ));
+    for expected in [
+        "it comes without a sources jar.\n// Only the declarations are shown, as the class files record them;\n// bodies are left out.\n",
+        "package org.slf4j;\n",
+        "import org.slf4j.event.Level;\n",
+        "public interface Logger {\n",
+        "    void info(String p0);\n",
+        "    default LoggingEventBuilder atLevel(Level p0) { /* compiled code */ }\n",
+        "    void info(String p0, Object... p1);\n",
+    ] {
+        assert!(
+            logger.text.contains(expected),
+            "{expected:?} in\n{}",
+            logger.text
+        );
+    }
+    let level = source_of("org.slf4j.event", "Level");
+    assert!(
+        level
+            .text
+            .contains("public enum Level {\n    ERROR, WARN, INFO, DEBUG, TRACE;\n"),
+        "{}",
+        level.text
+    );
+    let factory = source_of("org.slf4j", "LoggerFactory");
+    assert!(
+        factory
+            .text
+            .contains("    public static Logger getLogger(String p0) { /* compiled code */ }\n"),
+        "{}",
+        factory.text
+    );
+}

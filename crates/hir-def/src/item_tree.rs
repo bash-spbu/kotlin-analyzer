@@ -7,7 +7,7 @@
 
 mod lower_java;
 mod lower_kotlin;
-mod pretty;
+pub(crate) mod pretty;
 mod written_annotations;
 mod written_contract;
 

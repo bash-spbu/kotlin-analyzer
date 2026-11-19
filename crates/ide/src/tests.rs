@@ -1147,12 +1147,68 @@ fn a_library_class_in_an_inlay_hint_is_linked_when_resolved() {
         .map(|part| part.text.as_str())
         .collect();
     assert_eq!(library_parts, ["List", "String"]);
-    // Without a sources archive there's nothing to open: resolving gives
-    // no target, and nothing fails.
+    // Without a sources archive, the declarations rendered from the class
+    // files are the targets.
     let resolved = analysis(&fixture)
         .resolve_inlay_hint(file, hint.offset)
         .unwrap();
     assert_eq!(resolved.len(), hint.label.len());
+}
+
+#[test]
+fn definition_into_a_library_without_sources_opens_its_declarations_rendered() {
+    let Some(jar) = newest_cached_stdlib() else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let text = "package b\nfun use() = Pair(1, \"one\").first\n";
+    let mut fixture = Fixture::parse(&format!("\n//- /app/b/Use.kt\n{text}"));
+    let source = base_db::LibrarySource {
+        archive: jar,
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = hir::index_library(&source).unwrap();
+    fixture
+        .database
+        .set_libraries(vec![(source, indexed)], vec![vec![0]], None);
+    let file = fixture.file("/app/b/Use.kt");
+    let analysis = analysis(&fixture);
+    let target_at = |needle: &str| {
+        let offset = text.find(needle).unwrap() + 1;
+        let targets = analysis.goto_definition(file, offset).unwrap();
+        let [target] = &targets[..] else {
+            panic!("one target for {needle}: {targets:?}");
+        };
+        target.clone()
+    };
+    // A call lands on the constructor called: the class files don't say
+    // which is primary, so it's a `constructor` of its own.
+    for (needle, name) in [("Pair(", "constructor"), ("first", "first")] {
+        let target = target_at(needle);
+        let crate::NavigationFile::Library {
+            entry,
+            text: rendered,
+            origin,
+            ..
+        } = &target.file
+        else {
+            panic!("a library target: {target:?}");
+        };
+        assert_eq!(entry, "decompiled/kotlin/Tuples.kt");
+        assert_eq!(
+            *origin,
+            hir::SourceOrigin::Decompiled(hir::MissingSources::NoArchive)
+        );
+        let focused = &rendered[target.focus_range.start as usize..target.focus_range.end as usize];
+        assert_eq!(focused, name);
+    }
+    // Hover reads nothing from the rendered text: no documentation to find.
+    let hover = analysis
+        .hover(file, text.find("Pair(").unwrap() + 1)
+        .unwrap()
+        .unwrap();
+    assert!(!hover.markdown.contains("Decompiled"), "{}", hover.markdown);
 }
 
 /// The newest `kotlin-stdlib` JAR in the Gradle cache.
