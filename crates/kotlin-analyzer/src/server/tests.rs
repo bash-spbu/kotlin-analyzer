@@ -1274,3 +1274,50 @@ fn loading_reports_each_step_in_the_status_bar() {
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn once_loading_and_checking_are_over_the_status_bar_says_all_is_set_for_a_moment() {
+    let root = workspace("all-set");
+    std::fs::write(
+        root.join("src/main/kotlin/app/Order.kt"),
+        "package app\nclass Order\n",
+    )
+    .unwrap();
+    let (mut client, _) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({ "textDocument": { "diagnostic": {} } }),
+    );
+    client.wait_for_load(1);
+    // The workspace check the client asks for right after the load comes
+    // before "All set".
+    client.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+    let token = "kotlin-analyzer/ready/1";
+    let begin = client.wait_for(|notification| {
+        notification.method == "$/progress" && notification.params["token"] == token
+    });
+    assert_eq!(begin.params["value"]["kind"], "begin");
+    assert_eq!(begin.params["value"]["title"], "All set");
+    assert_eq!(
+        begin.params["value"]["message"],
+        "1 files, nothing left to wait for"
+    );
+    let end = client.wait_for(|notification| {
+        notification.method == "$/progress" && notification.params["token"] == token
+    });
+    assert_eq!(end.params["value"]["kind"], "end");
+    // Once per load: another check doesn't say it again.
+    client.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+    std::thread::sleep(Duration::from_millis(100));
+    client.request("workspace/symbol", json!({ "query": "Order" }));
+    assert!(
+        !client.unread.iter().any(|notification| {
+            notification.params["token"]
+                .as_str()
+                .is_some_and(|token| token.starts_with("kotlin-analyzer/ready/"))
+        }),
+        "said twice"
+    );
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

@@ -20,7 +20,11 @@ reports under `kotlin-analyzer/gradle`. `workspace/diagnostic` runs on a pool
 of half the worker threads, so requests the user waits for (hover,
 completion) never queue behind it; one that runs longer than 0.5 s shows
 `Checking files` with how many of how many under
-`kotlin-analyzer/checking/<n>`. Requests that need the workspace answer
+`kotlin-analyzer/checking/<n>`. Once a load has applied, the Gradle export
+is done and no workspace check runs — for 0.3 s, as a client asks for the
+workspace's diagnostics just after a load — `All set` (`N files, nothing
+left to wait for`) shows for 3 s under `kotlin-analyzer/ready/<n>`, once
+per load. Requests that need the workspace answer
 empty until it has loaded; once it has, the client is asked to refresh
 semantic tokens and inlay hints (when it supports `refresh`).
 

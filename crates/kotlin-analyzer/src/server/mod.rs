@@ -379,6 +379,9 @@ enum Task {
         exports: Vec<gradle_export::Export>,
         took: Duration,
     },
+    /// A request on the background pool is done (answered, cancelled or
+    /// failed).
+    BackgroundFinished,
     /// Progress of work off the main thread, to send (see `progress`).
     Progress {
         token: String,
@@ -461,6 +464,10 @@ struct GlobalState {
     background_pool: rayon::ThreadPool,
     /// Numbers the progress of each workspace check.
     next_check: u64,
+    /// How many requests run on the background pool.
+    background_running: usize,
+    /// When to tell the user everything is ready.
+    readiness: Readiness,
     task_sender: Sender<Task>,
     task_receiver: Receiver<Task>,
     /// Paths by file id, shared with request threads.
@@ -535,6 +542,8 @@ impl GlobalState {
                 .build()
                 .expect("a thread pool of a few threads can be built"),
             next_check: 0,
+            background_running: 0,
+            readiness: Readiness::default(),
             task_sender,
             task_receiver,
             paths: Arc::default(),
@@ -563,7 +572,26 @@ impl GlobalState {
 
     fn main_loop(&mut self, receiver: &Receiver<Message>) -> Result<Ending, String> {
         loop {
+            let settled = self
+                .readiness
+                .settle
+                .clone()
+                .unwrap_or_else(crossbeam_channel::never);
+            let shown = self
+                .readiness
+                .shown
+                .as_ref()
+                .map_or_else(crossbeam_channel::never, |(timer, _)| timer.clone());
             select! {
+                recv(settled) -> _ => {
+                    self.readiness.settle = None;
+                    self.on_settled();
+                }
+                recv(shown) -> _ => {
+                    if let Some((_, token)) = self.readiness.shown.take() {
+                        self.progress_on(&token, WorkDoneProgress::End(WorkDoneProgressEnd { message: None }));
+                    }
+                }
                 recv(receiver) -> message => {
                     let Ok(message) = message else { return Ok(Ending::WithoutShutdown) };
                     match message {
@@ -775,7 +803,14 @@ impl GlobalState {
                     self.respond(response);
                 }
             }
-            Task::ModelExported { exports, took } => self.on_exports(exports, took),
+            Task::ModelExported { exports, took } => {
+                self.on_exports(exports, took);
+                self.work_stopped();
+            }
+            Task::BackgroundFinished => {
+                self.background_running = self.background_running.saturating_sub(1);
+                self.work_stopped();
+            }
             Task::Progress {
                 token,
                 create,
@@ -951,6 +986,50 @@ impl GlobalState {
         for (request, replier) in std::mem::take(&mut self.pending_agent_requests) {
             self.answer_agent(request, replier);
         }
+        self.readiness.loaded_generation = self.load_generation;
+        self.readiness.files = files;
+        self.work_stopped();
+    }
+
+    /// Something the user may be waiting for has stopped: in a moment,
+    /// unless more starts, the user is told everything is ready.
+    fn work_stopped(&mut self) {
+        let unannounced = self.readiness.announced < self.readiness.loaded_generation;
+        if unannounced {
+            self.readiness.settle = Some(crossbeam_channel::after(READY_SETTLE));
+        }
+    }
+
+    /// Shows "All set" for a moment once the latest load has applied, the
+    /// Gradle export is done and no workspace check runs — once per load.
+    fn on_settled(&mut self) {
+        let latest_load_applied = self.readiness.loaded_generation == self.load_generation;
+        let idle = !self.exporting && self.background_running == 0;
+        let unannounced = self.readiness.announced < self.readiness.loaded_generation;
+        if !(latest_load_applied && idle && unannounced) {
+            return;
+        }
+        self.readiness.announced = self.load_generation;
+        let token = format!("kotlin-analyzer/ready/{}", self.load_generation);
+        self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+            token: lsp_types::NumberOrString::String(token.clone()),
+        });
+        self.progress_on(
+            &token,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "All set".to_owned(),
+                cancellable: Some(false),
+                message: Some(format!(
+                    "{} files, nothing left to wait for",
+                    self.readiness.files
+                )),
+                percentage: None,
+            }),
+        );
+        Event::info("ready")
+            .count("generation", self.load_generation)
+            .emit();
+        self.readiness.shown = Some((crossbeam_channel::after(READY_SHOWN), token));
     }
 
     /// Asks the client to report changes to sources, build files and the
@@ -1210,11 +1289,19 @@ impl GlobalState {
         let received = Instant::now();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.in_flight.insert(request.id.clone(), cancelled.clone());
+        let finished = match pool {
+            PoolKind::Interactive => None,
+            PoolKind::Background => {
+                self.background_running += 1;
+                Some(BackgroundGuard(self.task_sender.clone()))
+            }
+        };
         let pool = match pool {
             PoolKind::Interactive => &self.pool,
             PoolKind::Background => &self.background_pool,
         };
         pool.spawn(move || {
+            let _finished = finished;
             // Cancelled while it waited for a worker: nothing to compute.
             if cancelled.load(Ordering::SeqCst) {
                 return;
@@ -1714,6 +1801,43 @@ impl GlobalState {
             token: lsp_types::NumberOrString::String(token.to_owned()),
             value: lsp_types::ProgressParamsValue::WorkDone(progress),
         });
+    }
+}
+
+/// When the user is told everything is ready: after a load, once the work
+/// it set off has stopped.
+#[derive(Default)]
+struct Readiness {
+    /// The load generation last applied, and its files.
+    loaded_generation: u64,
+    files: usize,
+    /// The load generation announced last.
+    announced: u64,
+    /// Fires once work has stopped for `READY_SETTLE`.
+    settle: Option<Receiver<Instant>>,
+    /// Ends the shown "All set", with its progress token.
+    shown: Option<(Receiver<Instant>, String)>,
+}
+
+/// How long nothing must start before "All set": a client asks for the
+/// workspace's diagnostics just after a load ends.
+#[cfg(not(test))]
+const READY_SETTLE: Duration = Duration::from_millis(300);
+#[cfg(test)]
+const READY_SETTLE: Duration = Duration::from_millis(20);
+
+/// How long "All set" stays in the status bar.
+#[cfg(not(test))]
+const READY_SHOWN: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const READY_SHOWN: Duration = Duration::from_millis(50);
+
+/// Tells the main loop a background request is done, however it ends.
+struct BackgroundGuard(Sender<Task>);
+
+impl Drop for BackgroundGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(Task::BackgroundFinished);
     }
 }
 
