@@ -918,3 +918,23 @@ package x
     assert!(crate::def_map::package_exists(db, jvm, &java_lang));
     assert!(!crate::def_map::package_exists(db, js, &java_lang));
 }
+
+#[test]
+fn a_packages_names_come_in_spelling_order_whatever_was_interned_first() {
+    // Interned in the reverse of their spelling order (unique names, so no
+    // other test interned them before).
+    let later = format!("ZzzOrderCheck{}", std::process::id());
+    let earlier = format!("AaaOrderCheck{}", std::process::id());
+    intern::Name::new(&later);
+    intern::Name::new(&earlier);
+    let fixture = Fixture::parse(&format!(
+        "//- /app/order/Names.kt\npackage order\nclass {later}\nclass {earlier}\n"
+    ));
+    let db = &fixture.database;
+    let file = db.source_file(fixture.file("/app/order/Names.kt")).unwrap();
+    let names: Vec<String> = crate::def_map::package_names(db, file, &Path::parse("order"))
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(names, [earlier, later]);
+}

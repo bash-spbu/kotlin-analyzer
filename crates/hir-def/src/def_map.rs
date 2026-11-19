@@ -273,7 +273,9 @@ pub fn package_names(db: &dyn SourceDatabase, from: SourceFile, package: &Path) 
     for library_package in classpath_packages(db, from, package) {
         names.extend(library_package.names(db).iter().copied());
     }
-    names.sort();
+    // By spelling, not by `Name` (the order names were first interned in,
+    // which depends on what else the process read first).
+    names.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     names.dedup();
     names
 }
