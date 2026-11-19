@@ -26,7 +26,12 @@ a dependency module's `implementation` libraries aren't on it.
 
 The declaration's source is found in the sources archive by the file its
 class was compiled from (the `SourceFile` attribute), or else by searching
-its package's directory, then by its chain of names (class, nested class,
-member). The entry is written to
+its package's directory (under any source set's root, `commonMain/`,
+`jvmMain/`, a JVM one first), then by its chain of names (class, nested
+class, member). Kotlin's built-in classes, which no class file declares,
+are declared in files named otherwise (`kotlin.Int` in `Primitives.kt`),
+some outside their package's directory (`kotlin.collections.List` in
+`kotlin/Collections.kt`): last, the files of the package's directory and
+of the ones enclosing it that declare the package are searched. The entry is written to
 `$XDG_CACHE_HOME/kotlin-analyzer/library-sources/<archive>-<hash>/<entry>`
 for the editor to open.

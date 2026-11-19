@@ -565,6 +565,40 @@ val thread: Thread? = null
     );
 }
 
+/// The newest cached compiled JAR of `group:artifact` whose sources JAR is
+/// cached too (Gradle keeps each file under its own hash directory), with
+/// that sources JAR.
+fn cached_jar_with_sources(
+    group: &str,
+    artifact: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let home = std::env::var_os("HOME")?;
+    let root = std::path::Path::new(&home)
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|version| version.path())
+        .collect();
+    versions.sort();
+    versions.into_iter().rev().find_map(|version| {
+        let number = version.file_name()?.to_string_lossy().into_owned();
+        let in_version = |file: &str| {
+            std::fs::read_dir(&version)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|hash| hash.path().join(file))
+                .find(|candidate| candidate.is_file())
+        };
+        let jar = in_version(&format!("{artifact}-{number}.jar"))?;
+        let sources = in_version(&format!("{artifact}-{number}-sources.jar"))?;
+        Some((jar, sources))
+    })
+}
+
 /// The newest cached compiled JAR of `group:artifact` in the Gradle cache.
 fn cached_jar(group: &str, artifact: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -646,24 +680,9 @@ val entry: Map.Entry<String, Int>? = null
 
 #[test]
 fn library_sources_are_found_in_archives_laid_out_by_source_set() {
-    let Some(jar) = cached_jar("org.jetbrains.kotlin", "kotlin-stdlib") else {
-        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
-        return;
-    };
-    let sources = jar.with_file_name(
-        jar.file_name()
-            .unwrap()
-            .to_string_lossy()
-            .replace(".jar", "-sources.jar"),
-    );
-    let sources = std::fs::read_dir(jar.parent().unwrap().parent().unwrap())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|hash| hash.path().join(sources.file_name().unwrap()))
-        .find(|candidate| candidate.is_file());
-    let Some(sources) = sources else {
-        eprintln!("skipped: no kotlin-stdlib sources JAR in the Gradle cache");
+    let Some((jar, sources)) = cached_jar_with_sources("org.jetbrains.kotlin", "kotlin-stdlib")
+    else {
+        eprintln!("skipped: no kotlin-stdlib with its sources JAR in the Gradle cache");
         return;
     };
     let mut parsed = Fixture::parse("//- /app/x/Use.kt\npackage x\n");
@@ -699,6 +718,24 @@ fn library_sources_are_found_in_archives_laid_out_by_source_set() {
     let text = &map_not_null.text
         [map_not_null.name_range.start as usize..map_not_null.name_range.end as usize];
     assert_eq!(text, "mapNotNull");
+    // The built-in classes: declared in files named otherwise, some outside
+    // their package's directory (a JVM `actual` first, where there is one).
+    for (package, name, file) in [
+        ("kotlin.collections", "List", "/kotlin/Collections.kt"),
+        ("kotlin.collections", "Map", "/kotlin/Collections.kt"),
+        ("kotlin", "Int", "/kotlin/Primitives.kt"),
+        ("kotlin", "String", "/kotlin/String.kt"),
+    ] {
+        let found = crate::library::library_declaration_source(db, declaration(package, name))
+            .unwrap_or_else(|| panic!("{package}.{name}'s source is found"));
+        assert!(
+            found.entry.ends_with(file),
+            "{package}.{name}: {}",
+            found.entry
+        );
+        let text = &found.text[found.name_range.start as usize..found.name_range.end as usize];
+        assert_eq!(text, name);
+    }
 }
 
 #[test]

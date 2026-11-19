@@ -693,7 +693,52 @@ pub fn library_declaration_source(
             )
         })
         .collect();
-    for entry in candidates {
+    if let Some(found) = find_in_entries(&mut archive, sources, candidates, &names, None) {
+        return Some(found);
+    }
+    // The built-in classes are declared in files named otherwise
+    // (`kotlin.Int` in `Primitives.kt`), some outside their package's
+    // directory (`kotlin.collections.List` in `commonMain/kotlin/
+    // Collections.kt`). Last, the files of the package's directory and of
+    // the ones enclosing it, under any source set's root — those that
+    // declare the package.
+    let package_path = package.package(db);
+    let package_directories = package_path
+        .segments()
+        .iter()
+        .map(|segment| segment.to_string())
+        .collect::<Vec<_>>();
+    let mut enclosing: Vec<String> = Vec::new();
+    for depth in (1..=package_directories.len()).rev() {
+        let ancestor = format!("{}/", package_directories[..depth].join("/"));
+        for index in 0..archive.len() {
+            let Some(name) = archive.name(index) else {
+                continue;
+            };
+            let Some((directory, file)) = name.rsplit_once('/') else {
+                continue;
+            };
+            let directory = format!("{directory}/");
+            let in_ancestor = directory == ancestor || directory.ends_with(&format!("/{ancestor}"));
+            let is_source = file.ends_with(".kt") || file.ends_with(".java");
+            if in_ancestor && is_source && !enclosing.iter().any(|known| known == name) {
+                enclosing.push(name.to_owned());
+            }
+        }
+    }
+    find_in_entries(&mut archive, sources, enclosing, &names, Some(package_path))
+}
+
+/// The first of `entries` that declares the item `names` leads to (in
+/// `package`, when given), with where.
+fn find_in_entries(
+    archive: &mut classfile::Archive,
+    sources: &std::path::Path,
+    entries: Vec<String>,
+    names: &[(Name, bool)],
+    package: Option<&intern::Path>,
+) -> Option<LibrarySourceLocation> {
+    for entry in entries {
         let Some(index) = archive.index_of(&entry) else {
             continue;
         };
@@ -709,10 +754,13 @@ pub fn library_declaration_source(
             syntax::Language::Kotlin => crate::item_tree::lower_kotlin(&parse),
             syntax::Language::Java => crate::item_tree::lower_java(&parse),
         };
-        if let Some(found) = find_by_names(&source_tree, &names) {
+        if package.is_some_and(|package| source_tree.package != *package) {
+            continue;
+        }
+        if let Some(found) = find_by_names(&source_tree, names) {
             let ranges = source_map.ranges(found);
             return Some(LibrarySourceLocation {
-                archive: sources.clone(),
+                archive: sources.to_path_buf(),
                 entry,
                 name_range: ranges.name_range,
                 full_range: ranges.range,
