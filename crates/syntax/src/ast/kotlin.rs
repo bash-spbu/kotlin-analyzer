@@ -380,9 +380,26 @@ impl<'tree> PropertyDeclaration<'tree> {
         is_var_binding(self.0)
     }
 
-    /// Whether it writes a getter (`val x get() = …`).
+    /// Its `get()` and `set()`: on the declaration's line its children,
+    /// on the lines after it its siblings (as the grammar parses them).
+    pub fn accessors(self) -> Vec<SyntaxNode<'tree>> {
+        let is_accessor = |node: &SyntaxNode<'_>| matches!(node.kind(), "getter" | "setter");
+        let mut found: Vec<SyntaxNode<'tree>> =
+            named_children(self.0).filter(is_accessor).collect();
+        let mut next = crate::next_named_sibling(self.0);
+        while let Some(sibling) = next.filter(is_accessor) {
+            found.push(sibling);
+            next = crate::next_named_sibling(sibling);
+        }
+        found
+    }
+
+    /// Whether it writes a getter (`val x get() = …`), on its line or the
+    /// next.
     pub fn has_getter(self) -> bool {
-        named_children(self.0).any(|child| child.kind() == "getter")
+        self.accessors()
+            .iter()
+            .any(|accessor| accessor.kind() == "getter")
     }
 
     /// Whether it's delegated (`val x by lazy { … }`).
@@ -539,6 +556,11 @@ impl<'tree> TypeParameter<'tree> {
 }
 
 impl<'tree> DelegationSpecifier<'tree> {
+    /// `Iface by delegate`.
+    pub fn is_delegated(self) -> bool {
+        named_children(self.0).any(|child| child.kind() == "explicit_delegation")
+    }
+
     /// The supertype: `Base` of `Base(1)`, `Iface`, `Iface by delegate`.
     pub fn type_node(self) -> Option<SyntaxNode<'tree>> {
         for child in named_children(self.0) {

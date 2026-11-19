@@ -3,6 +3,7 @@
 //! Kotlin types that map to Java ones; inference of every expression in a body,
 //! including overload resolution, lambdas and smart casts.
 
+pub mod declaration_checks;
 pub mod deprecation;
 pub mod display;
 pub mod infer;

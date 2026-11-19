@@ -39,6 +39,11 @@ pub enum Check {
     DuplicateBranchCondition,
     ReturnTypeMismatch,
     TypeMismatch,
+    ValReassignment,
+    MissingReturn,
+    NothingToOverride,
+    MissingOverride,
+    AbstractMemberNotImplemented,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,7 +68,7 @@ pub enum Stability {
 }
 
 impl Check {
-    pub const ALL: [Check; 26] = [
+    pub const ALL: [Check; 31] = [
         Check::Syntax,
         Check::UnresolvedReference,
         Check::MissingImport,
@@ -90,6 +95,11 @@ impl Check {
         Check::DuplicateBranchCondition,
         Check::ReturnTypeMismatch,
         Check::TypeMismatch,
+        Check::ValReassignment,
+        Check::MissingReturn,
+        Check::NothingToOverride,
+        Check::MissingOverride,
+        Check::AbstractMemberNotImplemented,
     ];
 
     pub fn name(self) -> &'static str {
@@ -120,6 +130,11 @@ impl Check {
             Check::DuplicateBranchCondition => "duplicate-branch-condition",
             Check::ReturnTypeMismatch => "return-type-mismatch",
             Check::TypeMismatch => "type-mismatch",
+            Check::ValReassignment => "val-reassignment",
+            Check::MissingReturn => "missing-return",
+            Check::NothingToOverride => "nothing-to-override",
+            Check::MissingOverride => "missing-override",
+            Check::AbstractMemberNotImplemented => "abstract-member-not-implemented",
         }
     }
 
@@ -137,7 +152,12 @@ impl Check {
             | Check::DeprecationError
             | Check::OptInUsageError
             | Check::ReturnTypeMismatch
-            | Check::TypeMismatch => Severity::Error,
+            | Check::TypeMismatch
+            | Check::ValReassignment
+            | Check::MissingReturn
+            | Check::NothingToOverride
+            | Check::MissingOverride
+            | Check::AbstractMemberNotImplemented => Severity::Error,
             Check::MissingImport | Check::MissingPackage => Severity::Warning,
             Check::UnnecessaryNotNullAssertion
             | Check::UnnecessarySafeCall
@@ -191,7 +211,12 @@ impl Check {
             | Check::UnsafeCall
             | Check::NonExhaustiveWhen
             | Check::ReturnTypeMismatch
-            | Check::TypeMismatch => &[],
+            | Check::TypeMismatch
+            | Check::ValReassignment
+            | Check::MissingReturn
+            | Check::NothingToOverride
+            | Check::MissingOverride
+            | Check::AbstractMemberNotImplemented => &[],
         }
     }
 

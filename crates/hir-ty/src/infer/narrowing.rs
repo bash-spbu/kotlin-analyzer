@@ -386,18 +386,24 @@ impl Inferrer<'_> {
     /// what follows sees its condition hold.
     /// What a call's contract says holds once it returned: `x` after
     /// `requireNotNull(x)` or `require(x is T)`.
-    pub(super) fn narrow_after_contract(&mut self, value: SyntaxNode<'_>) {
+    pub(super) fn narrow_after_contract(&mut self, value: SyntaxNode<'_>) -> CallEnd {
         let Some(called) = self.called_contract(value) else {
-            return;
+            return CallEnd::Returns;
         };
         let mut narrowings =
             self.contract_narrowings(&called, |returns| returns == Returns::Normally);
+        let mut end = CallEnd::Returns;
         for lambda in called.lambdas_surely_run() {
-            if let Some(end) = self.lambda_ends.get(&(lambda.start_byte() as u32)) {
-                narrowings.extend(end.iter().cloned());
+            let start = lambda.start_byte() as u32;
+            if let Some(narrowed) = self.lambda_ends.get(&start) {
+                narrowings.extend(narrowed.iter().cloned());
+            }
+            if self.lambdas_never_ending.contains(&start) {
+                end = CallEnd::Never;
             }
         }
         self.narrow(&narrowings);
+        end
     }
 
     /// What a condition known to hold says, read without inferring it again
@@ -510,6 +516,14 @@ impl Inferrer<'_> {
             .map(|narrowed| (narrowed, self.narrowed_type(narrowed).non_null()))
             .collect()
     }
+}
+
+/// Whether a call returns: not when a lambda it surely runs in place
+/// always leaves the function around (`apply { return x }`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum CallEnd {
+    Returns,
+    Never,
 }
 
 /// How whether a value may be null where it's used is known.

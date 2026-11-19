@@ -207,7 +207,8 @@ impl Analysis {
         self.with_db(|db| goto_definition::goto_definition(db, file, offset))
     }
 
-    /// The `actual`s of the `expect` declaration named at `offset`.
+    /// What implements the declaration named at `offset`: a class's
+    /// subclasses, a member's overrides, an `expect`'s `actual`s.
     pub fn goto_implementation(
         &self,
         file: FileId,

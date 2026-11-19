@@ -32,6 +32,11 @@ whenever something it would need is `Unknown`, it stays silent.
 | `return-type-mismatch` | error | a returned value (`return x`, an expression body) whose class can't be the one the function declares (Kotlin's `RETURN_TYPE_MISMATCH`) — see "Type mismatches" below |
 | `type-mismatch` | error | the same for a declared property's or local's initializer, a parameter's default value, an assignment to a `var` that writes its type, and an argument of the only function a call can mean (`INITIALIZER_TYPE_MISMATCH`, `ASSIGNMENT_TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`) |
 | `duplicate-branch-condition` | lint | a `when` condition an earlier branch already checks: the same literal, enum entry or object, or `is`/`!is` of the same type; branches with a guard don't count (`DUPLICATE_BRANCH_CONDITION_IN_WHEN`) |
+| `val-reassignment` | error | `x = …`, `x++`, `x--` where `x` is a local `val` that already has a value (a `val` declared without one may get its first), a parameter, a loop's or a lambda's variable (`VAL_REASSIGNMENT`); `x += …` isn't judged (`plusAssign` may take it) |
+| `missing-return` | error | the closing brace of a block-bodied function whose result type isn't `Unit` when its end is reached: no statement jumps (`return`, `throw`, a call returning `Nothing`, `while (true)` without `break`, an in-place lambda that always does — `apply { return x }`) and every statement's type is known (`NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`) |
+| `nothing-to-override` | error | `override` on a member no supertype has one of the same name, kind and JVM signature (`NOTHING_TO_OVERRIDE`) — see "Overrides" below |
+| `missing-override` | error | a member with an inherited, non-private member's name, kind and JVM signature that doesn't say `override` (`VIRTUAL_MEMBER_HIDDEN`) |
+| `abstract-member-not-implemented` | error | a class or object, not abstract or sealed, that implements nowhere in its hierarchy an abstract member it inherits (`ABSTRACT_MEMBER_NOT_IMPLEMENTED`, `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED`); reported on the class's name, with the first such member |
 
 A value *can't be null* when its type is a class or function type without
 `?`: after smart casts for a value that can't change (a `val`, a
@@ -50,6 +55,29 @@ and `SENSELESS_COMPARISON` come from the compiler (and fail an
 `CAN_BE_VAL` only from K2's extended checks, which IntelliJ runs and a
 build doesn't. Where we're not sure we report less than Kotlin does, never
 more.
+
+### Overrides
+
+`nothing-to-override`, `missing-override` and
+`abstract-member-not-implemented` compare members as the JVM does: by
+name, kind (function or property) and erased parameter types — a class
+by its qualified name (two jars may hold one class), a non-null `Int`
+as the primitive and a nullable one, a Java `Integer` or a type argument
+as the boxed class, `MutableList` as `List`, a type parameter as
+substituted from the class checked. They run only on JVM code with the
+whole classpath, for a class whose whole hierarchy resolves and has no
+`expect` or `actual` class in it (the `expect` may lack what the
+`actual` declares), and a member whose types all resolve. Silent: an
+`override` that may override a supertype's member whose types don't all
+resolve, or a Java accessor (`override val size` of a class extending
+`java.util.AbstractMap`, whose `size()` Kotlin reads as the property),
+or a member of a JDK class a Kotlin built-in in the hierarchy maps to
+(`forEach(Consumer)` of `java.lang.Iterable`); a class implementing a
+supertype `by` a delegate; an abstract member of a built-in collection
+(a Java collection class implements `MutableMap.remove(K)` as
+`remove(Object)`). An abstract Java method without parameters counts as
+implemented by a property of its name or its getter's, and an abstract
+property by a Java getter (`getSavedStateRegistry()`).
 
 ### Compiler options
 

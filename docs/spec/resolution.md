@@ -96,7 +96,9 @@ infers rather than writes. A contract's `callsInPlace(block, EXACTLY_ONCE)`
 the lambda passed as `block` narrowed where its body ends hold after the
 call (`run { requireNotNull(x) }; x.f()`); not after a safe call (`y?.let
 { … }` may not run it), nor when the lambda can leave early (`return@run`),
-nor for overloads chosen among several.
+nor for overloads chosen among several. Such a lambda that always ends by
+jumping (`apply { …; return x }`) makes the call's type `Nothing`: what
+follows isn't reached.
 
 Smart casts follow the data flow within a body:
 - a loop (`while`, `do`-`while`, `for`) forgets on entering what was known
@@ -160,7 +162,9 @@ bounds allow it); an extension's receiver counts as a parameter. Ties go to a
 non-`vararg`, then to the one using fewer defaults, then to a non-generic one,
 then — for Java's `f(int)` against `f(Integer)` — to non-null parameters.
 A nearer class's member hides a farther one of the same JVM signature
-only: a non-null `Long` is the JVM's `long`, a nullable one, a Java
+only — classes compared by qualified name, a mutable collection as its
+read-only one, an `expect` class not compared: a non-null `Long` is the
+JVM's `long`, a nullable one, a Java
 `Long` or a Java class's type argument a boxed `Long`, so AssertJ's
 `isGreaterThan(long)` doesn't hide the inherited `isGreaterThan(ACTUAL)`
 of `ACTUAL` = `Long`. A

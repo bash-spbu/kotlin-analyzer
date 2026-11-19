@@ -118,6 +118,11 @@ pub(crate) struct Inferrer<'db> {
         (super::property_paths::PathRoot, ItemLocation),
         super::narrowing::PropertyPathId,
     >,
+    /// The lambdas (by their start) that always end by leaving the function
+    /// around them (`return`, `throw`).
+    pub(super) lambdas_never_ending: FxHashSet<u32>,
+    /// `val x: T` declared without a value: its first assignment gives it.
+    pub(super) values_without_initializer: FxHashSet<LocalId>,
     /// What each lambda (by its start) had narrowed where its body ends: what
     /// holds after a call that surely runs it in place (`run { x!! }`).
     pub(super) lambda_ends: FxHashMap<u32, Vec<(Narrowed, Ty)>>,
@@ -180,6 +185,8 @@ impl<'db> Inferrer<'db> {
             path_ids: FxHashMap::default(),
             property_reads: FxHashMap::default(),
             lambda_ends: FxHashMap::default(),
+            values_without_initializer: FxHashSet::default(),
+            lambdas_never_ending: FxHashSet::default(),
             last_condition: None,
             condition_aliases: FxHashMap::default(),
         }
@@ -343,6 +350,36 @@ impl<'db> Inferrer<'db> {
                 })
                 .unwrap_or_else(|| inferred.clone()),
             _ => inferred.clone(),
+        }
+    }
+
+    /// `x = …`, `x++`: records it when `x` is a local that can't be
+    /// assigned again — a `val` that has a value (one declared without
+    /// may get its first), a parameter, a loop's or a lambda's variable.
+    pub(super) fn check_reassigned(&mut self, target: SyntaxNode<'_>) {
+        let name = match target.kind() {
+            "directly_assignable_expression" => {
+                let mut parts = named_children(target);
+                match (parts.next(), parts.next()) {
+                    (Some(only), None) if only.kind() == "simple_identifier" => only,
+                    _ => return,
+                }
+            }
+            "simple_identifier" => target,
+            _ => return,
+        };
+        let Some(Reference::Local(local)) =
+            self.recorded_at(name).map(|resolved| resolved.reference)
+        else {
+            return;
+        };
+        let has_value = match self.local_kind(local) {
+            LocalKind::Value => !self.values_without_initializer.contains(&local),
+            LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::ImplicitIt => true,
+            _ => false,
+        };
+        if has_value {
+            self.result.val_reassignments.push(TextRange::of(name));
         }
     }
 
@@ -1231,8 +1268,15 @@ impl<'db> Inferrer<'db> {
         let is_block = has_token(body, "{");
         let content = named_children(body).next();
         if is_block {
-            if let Some(statements) = content {
-                self.block(statements);
+            let end = match content {
+                Some(statements) => self.block_end(statements),
+                None => BlockEnd::Reachable,
+            };
+            let returns_value = expected.is_some_and(|ty| !self.is_unit(ty) && !ty.is_unknown());
+            if let (BlockEnd::Reachable, true, Some(brace)) =
+                (end, returns_value, syntax::token(body, "}"))
+            {
+                self.result.missing_returns.push(TextRange::of(brace));
             }
             return self.types.builtin("Unit");
         }
@@ -1247,6 +1291,31 @@ impl<'db> Inferrer<'db> {
             },
             None => Ty::Unknown,
         }
+    }
+
+    /// A block, and whether its end is reached: not when a statement jumps
+    /// (its type is `Nothing`), not known when one's type isn't (an
+    /// unresolved call may be one that never returns).
+    fn block_end(&mut self, statements: SyntaxNode<'_>) -> BlockEnd {
+        self.push_scope();
+        let mut end = BlockEnd::Reachable;
+        let each: Vec<SyntaxNode<'_>> = if statements.kind() == "statements" {
+            named_children(statements).collect()
+        } else {
+            vec![statements]
+        };
+        for statement in each {
+            let ty = self.statement(statement);
+            end = match (end, &ty) {
+                (BlockEnd::Unreachable, _) | (_, Ty::Nothing { nullable: false }) => {
+                    BlockEnd::Unreachable
+                }
+                (_, Ty::Unknown) => BlockEnd::Unknown,
+                (known, _) => known,
+            };
+        }
+        self.pop_scope();
+        end
     }
 
     /// A property declared in a class or file: its type, written or
@@ -1445,6 +1514,11 @@ impl<'db> Inferrer<'db> {
                         if certain {
                             self.mark_certain_if_known(local, &value_type);
                         }
+                        let delegated =
+                            named_children(node).any(|part| part.kind() == "property_delegate");
+                        if initializer_of(node).is_none() && !delegated {
+                            self.values_without_initializer.insert(local);
+                        }
                         let initializer = initializer_of(node).filter(|_| kind == LocalKind::Value);
                         if let Some(initializer) = initializer {
                             self.remember_not_null_implication(local, initializer);
@@ -1594,14 +1668,7 @@ fn class_parameter_kind(parameter: SyntaxNode<'_>) -> LocalKind {
 /// line after the declaration, as its sibling; on the declaration's line,
 /// as its child.
 fn accessors(property: SyntaxNode<'_>) -> Vec<SyntaxNode<'_>> {
-    let is_accessor = |node: &SyntaxNode<'_>| matches!(node.kind(), "getter" | "setter");
-    let mut found: Vec<SyntaxNode<'_>> = named_children(property).filter(is_accessor).collect();
-    let mut next = syntax::next_named_sibling(property);
-    while let Some(sibling) = next.filter(is_accessor) {
-        found.push(sibling);
-        next = syntax::next_named_sibling(sibling);
-    }
-    found
+    syntax::ast::kotlin::PropertyDeclaration::new_unchecked(property).accessors()
 }
 
 /// What a function's result type comes from.
@@ -1645,4 +1712,14 @@ fn initializer_of(property: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
         }
     }
     None
+}
+
+/// How a block's end is reached, as far as its statements' types tell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockEnd {
+    Reachable,
+    /// A statement jumps: `return`, `throw`, a call that never returns.
+    Unreachable,
+    /// A statement's type isn't known.
+    Unknown,
 }

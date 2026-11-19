@@ -9,7 +9,7 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
-use super::narrowing::Narrowed;
+use super::narrowing::{CallEnd, Narrowed};
 use super::property_paths::{PathRoot, ReceiverRoot};
 use super::reassociation::{self, Operation};
 use super::{LocalKind, NameSite, NullCheckKind, Reference};
@@ -126,8 +126,10 @@ impl Inferrer<'_> {
                 let ty = self.call(node, expected);
                 // `requireNotNull(x)` anywhere — an argument, a receiver,
                 // an initializer: `x` isn't null once it returned.
-                self.narrow_after_contract(node);
-                ty
+                match self.narrow_after_contract(node) {
+                    CallEnd::Returns => ty,
+                    CallEnd::Never => Ty::Nothing { nullable: false },
+                }
             }
             "integer_literal" | "hex_literal" | "bin_literal" => self.types.builtin("Int"),
             "long_literal" => self.types.builtin("Long"),
@@ -199,10 +201,7 @@ impl Inferrer<'_> {
                 self.for_statement(node);
                 self.types.builtin("Unit")
             }
-            "while_statement" | "do_while_statement" => {
-                self.while_statement(node);
-                self.types.builtin("Unit")
-            }
+            "while_statement" | "do_while_statement" => self.while_statement(node),
             "spread_expression" | "annotated_expression" | "labeled_expression" => {
                 match named_children(node).last() {
                     Some(inner) => self.expression(inner, expected),
@@ -766,6 +765,9 @@ impl Inferrer<'_> {
             return self.types.builtin("Boolean");
         }
         let operand_type = self.expression(operand, expected);
+        if has_token(node, "++") || has_token(node, "--") {
+            self.check_reassigned(operand);
+        }
         if has_token(node, "-") {
             return self
                 .operator_result(&operand_type, "unaryMinus", Vec::new())
@@ -779,6 +781,9 @@ impl Inferrer<'_> {
             return Ty::Unknown;
         };
         let operand_type = self.expression(operand, None);
+        if has_token(node, "++") || has_token(node, "--") {
+            self.check_reassigned(operand);
+        }
         if let Some(assertion) = syntax::token(node, "!!") {
             self.check_null_check(
                 operand,
@@ -932,6 +937,7 @@ impl Inferrer<'_> {
             None => self.expression(value, expected),
         };
         if is_plain {
+            self.check_reassigned(target);
             self.narrow_assigned(target, &ty);
         }
     }
@@ -1598,7 +1604,7 @@ impl Inferrer<'_> {
     /// does, what was known of a `var` the loop assigns is forgotten as it
     /// enters (a later iteration may come with another value); where the
     /// loop ends without `break`, its condition is false.
-    fn while_statement(&mut self, node: SyntaxNode<'_>) {
+    fn while_statement(&mut self, node: SyntaxNode<'_>) -> Ty {
         let children: Vec<SyntaxNode<'_>> = named_children(node).collect();
         let body = children
             .iter()
@@ -1611,9 +1617,20 @@ impl Inferrer<'_> {
         let reassigned = self.reassigned_in(node);
         self.forget_reassigned(&reassigned);
         let ends_by_condition = !body.is_some_and(|body| self.breaks_out(body));
+        // `while (true)` without `break` never ends: what follows it isn't
+        // reached.
+        let endless = ends_by_condition
+            && condition.is_some_and(|condition| {
+                condition.kind() == "boolean_literal" && self.text(condition) == "true"
+            });
+        let ty = if endless {
+            Ty::Nothing { nullable: false }
+        } else {
+            self.types.builtin("Unit")
+        };
         if node.kind() == "do_while_statement" {
             self.do_while(body, condition, ends_by_condition);
-            return;
+            return ty;
         }
         let narrowing = condition.map(|condition| self.condition(condition));
         if let Some(body) = body {
@@ -1627,6 +1644,7 @@ impl Inferrer<'_> {
         if let (true, Some(narrowing)) = (ends_by_condition, narrowing) {
             self.narrow(&narrowing.when_false);
         }
+        ty
     }
 
     /// `do body while (c)`: the body runs once at least, and the condition
@@ -1782,6 +1800,7 @@ impl Inferrer<'_> {
             None => self.types.builtin("Unit"),
         };
         self.return_targets.pop();
+        let body_jumps = matches!(body_type, Ty::Nothing { nullable: false });
         let returns_unit = expected_result
             .as_ref()
             .is_some_and(|result| self.is_unit(result));
@@ -1805,6 +1824,11 @@ impl Inferrer<'_> {
         });
         if !leaves_early {
             self.lambda_ends.insert(node.start_byte() as u32, end);
+            // `apply { …; return x }`: a `return` or `throw` it always
+            // ends with leaves the function around.
+            if body_jumps {
+                self.lambdas_never_ending.insert(node.start_byte() as u32);
+            }
         }
         Ty::Function(Box::new(FunctionType {
             receiver,
@@ -1855,7 +1879,7 @@ impl Inferrer<'_> {
         }
     }
 
-    fn is_unit(&self, ty: &Ty) -> bool {
+    pub(super) fn is_unit(&self, ty: &Ty) -> bool {
         matches!((ty, self.types.builtin("Unit")), (Ty::Class(class), Ty::Class(unit)) if class.class == unit.class)
     }
 

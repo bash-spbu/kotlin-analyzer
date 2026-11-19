@@ -31,6 +31,7 @@ pub use hir_def::{
     ItemContainer, ItemLocation, file_item_source_map, file_item_tree, item_source_map, item_tree,
     source_set_def_map,
 };
+pub use hir_ty::declaration_checks::{DeclarationFinding, declaration_findings};
 pub use hir_ty::deprecation::{DeprecatedUse, deprecated_uses};
 pub use hir_ty::infer::{
     ArgumentMismatch, Certainty, InferenceResult, Local, LocalId, LocalKind, MismatchSite,
@@ -42,7 +43,7 @@ pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scop
 pub use hir_ty::infer::{LocalFinding, local_findings};
 pub use hir_ty::members::{Member, Types};
 pub use hir_ty::opt_in::{OptInUse, opt_in_uses};
-pub use hir_ty::overrides::override_family;
+pub use hir_ty::overrides::{implementations, override_family};
 pub use hir_ty::{Nullability, Ty, display as display_type};
 pub use intern::{Name, Path};
 

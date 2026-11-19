@@ -4,8 +4,9 @@
 //! `val`s.
 
 use hir::{
-    DeprecationLevel, KotlinVersion, LocalFinding, MismatchSite, NonExhaustiveWhen, NullCheckKind,
-    OptInLevel, RootDatabase, SourceFile, TypeOperationKind, WhenFinding,
+    DeclarationFinding, DeprecationLevel, KotlinVersion, LocalFinding, MismatchSite,
+    NonExhaustiveWhen, NullCheckKind, OptInLevel, RootDatabase, SourceFile, TypeOperationKind,
+    WhenFinding,
 };
 use syntax::{Parse, TextRange, has_token};
 
@@ -18,6 +19,8 @@ pub(super) fn diagnostics(
 ) -> Vec<Diagnostic> {
     let inference = hir::infer_file(db, file);
     let mut found = Vec::new();
+    found.extend(body_errors(&inference, config));
+    found.extend(declaration_errors(db, file, config));
     if config.runs(Check::ArgumentMismatch) {
         for mismatch in inference.argument_mismatches() {
             let name = file.text(db)[mismatch.range.start as usize..mismatch.range.end as usize]
@@ -439,4 +442,89 @@ fn fill_when(parse: &Parse, when: &NonExhaustiveWhen) -> Option<Fix> {
         label: "Add the missing branches".to_owned(),
         edits: vec![edit],
     })
+}
+
+/// A `val` assigned again, a function returning a value whose end is
+/// reached: what inference found in bodies.
+fn body_errors(inference: &hir::InferenceResult, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+    let reassignments = inference.val_reassignments().iter().map(|range| {
+        (
+            Check::ValReassignment,
+            *range,
+            "`val` cannot be reassigned".to_owned(),
+        )
+    });
+    let returns = inference.missing_returns().iter().map(|range| {
+        (
+            Check::MissingReturn,
+            *range,
+            "Missing `return` statement".to_owned(),
+        )
+    });
+    reassignments
+        .chain(returns)
+        .filter(|(check, _, _)| config.runs(*check))
+        .map(|(check, range, message)| Diagnostic {
+            check,
+            severity: check.severity(),
+            range,
+            message,
+            fixes: Vec::new(),
+        })
+        .collect()
+}
+
+/// How the file's classes override and implement what they inherit.
+fn declaration_errors(
+    db: &RootDatabase,
+    file: SourceFile,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let wanted = [
+        Check::NothingToOverride,
+        Check::MissingOverride,
+        Check::AbstractMemberNotImplemented,
+    ];
+    if !wanted.iter().any(|check| config.runs(*check)) {
+        return Vec::new();
+    }
+    hir::declaration_findings(db, file)
+        .into_iter()
+        .map(|finding| match finding {
+            DeclarationFinding::NothingToOverride { name, member } => (
+                Check::NothingToOverride,
+                name,
+                format!("`{member}` overrides nothing"),
+            ),
+            DeclarationFinding::HiddenMember {
+                name,
+                member,
+                owner,
+            } => (
+                Check::MissingOverride,
+                name,
+                format!("`{member}` hides a member of supertype `{owner}` and needs `override`"),
+            ),
+            DeclarationFinding::NotImplemented {
+                name,
+                class,
+                member,
+                owner,
+            } => (
+                Check::AbstractMemberNotImplemented,
+                name,
+                format!(
+                    "Class `{class}` isn't abstract and doesn't implement abstract member `{member}` of `{owner}`"
+                ),
+            ),
+        })
+        .filter(|(check, _, _)| config.runs(*check))
+        .map(|(check, range, message)| Diagnostic {
+            check,
+            severity: check.severity(),
+            range,
+            message,
+            fixes: Vec::new(),
+        })
+        .collect()
 }

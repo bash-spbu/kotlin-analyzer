@@ -2235,6 +2235,237 @@ fun fromTest(holder: Holder) {
 }
 
 #[test]
+fn implementations_are_subclasses_and_overrides() {
+    // A class's or interface's subclasses at any depth, Java ones too; a
+    // member's overrides in them — not a namesake in an unrelated class
+    // nor an overload taking other parameters.
+    let fixture = r#"
+//- /app/a/Shapes.kt
+package a
+interface Shape { fun area(): Double; val name: String }
+abstract class Polygon : Shape { override val name: String get() = "polygon" }
+class Square(val side: Double) : Polygon() { override fun area(): Double = side * side }
+open class Circle(val radius: Double) : Shape {
+    override fun area(): Double = radius
+    override val name: String = "circle"
+    fun area(scale: Double): Double = radius * scale
+}
+class Ring(radius: Double) : Circle(radius) {
+    override fun area(): Double = 0.0
+}
+class Unrelated { fun area(): Double = 0.0 }
+//- /app/a/JavaShape.java
+package a;
+public class JavaShape implements Shape {
+    public double area() { return 0; }
+    public String getName() { return ""; }
+}
+//- /app/b/Use.kt
+package b
+import a.Shape
+fun first(shape: Shape) = shape.area() + shape.name.length
+"#;
+    let implementations = |marker: &str, marked: &str| {
+        let fixture = Fixture::parse(&fixture.replace(marker, marked));
+        let (file, offset) = fixture.cursor();
+        let mut lines: Vec<String> = analysis(&fixture)
+            .goto_implementation(file, offset)
+            .unwrap()
+            .iter()
+            .filter_map(|target| match target.file {
+                crate::NavigationFile::Workspace(file) => {
+                    let text = fixture.vfs.contents(file).unwrap();
+                    let line = text[..target.focus_range.start as usize]
+                        .matches('\n')
+                        .count()
+                        + 1;
+                    Some(format!("{}:{line}", fixture.vfs.path(file).display()))
+                }
+                crate::NavigationFile::Library { .. } => None,
+            })
+            .collect();
+        lines.sort();
+        lines.join("\n")
+    };
+    expect![[r#"
+        /app/a/JavaShape.java:2
+        /app/a/Shapes.kt:10
+        /app/a/Shapes.kt:3
+        /app/a/Shapes.kt:4
+        /app/a/Shapes.kt:5"#]]
+    .assert_eq(&implementations("import a.Shape", "import a.Sha$0pe"));
+    expect![[r#"
+        /app/a/JavaShape.java:3
+        /app/a/Shapes.kt:11
+        /app/a/Shapes.kt:4
+        /app/a/Shapes.kt:6"#]]
+    .assert_eq(&implementations("shape.area()", "shape.ar$0ea()"));
+    expect![[r#"
+        /app/a/Shapes.kt:3
+        /app/a/Shapes.kt:7"#]]
+    .assert_eq(&implementations("shape.name", "shape.na$0me"));
+}
+
+#[test]
+fn classes_override_and_implement_what_they_inherit() {
+    // NOTHING_TO_OVERRIDE, VIRTUAL_MEMBER_HIDDEN and
+    // ABSTRACT_MEMBER_NOT_IMPLEMENTED, beside what must stay silent: an
+    // overload, `Any`'s members, a private member, a delegate, a getter on
+    // the line after its property, a generic interface's member.
+    check_diagnostics(
+        r#"
+//- /app/a/Listener.java
+package a;
+public interface Listener {
+    void onEvent(String event);
+}
+//- /app/b/Use.kt
+package b
+import a.Listener
+interface Shape {
+    fun area(): Double
+    val name: String
+    fun describe(): String = name
+}
+abstract class Base : Shape {
+    abstract fun scale(by: Double): Base
+}
+class Square(val side: Double) : Base() {
+    override fun area(): Double = side * side
+    override val name: String = "square"
+    override fun scale(by: Double): Base = Square(side * by)
+}
+class Incomplete : Shape {
+    override val name = "incomplete"
+}
+abstract class StillAbstract : Shape
+class Wrong : Shape {
+    override fun area(): Double = 0.0
+    override val name = "wrong"
+    override fun perimeter(): Double = 0.0
+    fun describe(): String = "wrong"
+    override fun toString(): String = "wrong"
+    fun area(scale: Double): Double = scale
+}
+class Delegating(shape: Shape) : Shape by shape
+interface Ordered {
+    val order: Int
+        get() = 0
+}
+class Plain : Ordered
+object Single : Shape {
+    override fun area() = 1.0
+    override val name = "single"
+}
+interface Box<T> {
+    fun put(value: T)
+}
+class IntBox : Box<Int> {
+    override fun put(value: Int) {}
+}
+class StringBox : Box<String> {
+    override fun put(value: Int) {}
+}
+open class Secretive {
+    private fun secret() {}
+}
+class Peeker : Secretive() {
+    fun secret() {}
+}
+class JavaImplemented : Listener {
+    override fun onEvent(event: String) {}
+}
+class JavaMissing : Listener
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![
+                crate::Check::NothingToOverride,
+                crate::Check::MissingOverride,
+                crate::Check::AbstractMemberNotImplemented,
+            ],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [abstract-member-not-implemented] 16: Class `Incomplete` isn't abstract and doesn't implement abstract member `area` of `Shape`
+            [nothing-to-override] 23: `perimeter` overrides nothing
+            [missing-override] 24: `describe` hides a member of supertype `Shape` and needs `override`
+            [abstract-member-not-implemented] 44: Class `StringBox` isn't abstract and doesn't implement abstract member `put` of `Box`
+            [nothing-to-override] 45: `put` overrides nothing
+            [abstract-member-not-implemented] 56: Class `JavaMissing` isn't abstract and doesn't implement abstract member `onEvent` of `Listener`"#]],
+    );
+}
+
+#[test]
+fn values_are_assigned_once_and_functions_return() {
+    // VAL_REASSIGNMENT and NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY, beside
+    // what must stay silent: a `val`'s first value, a `var`, every way
+    // jumping, an endless loop, a lambda run in place that returns, a call
+    // not resolved (it may never return).
+    check_diagnostics(
+        r#"
+//- /app/b/Use.kt
+package b
+fun reassign(parameter: Int, items: List<Int>) {
+    val fixed = 1
+    fixed = 2
+    val later: Int
+    later = 3
+    var free = 1
+    free = 2
+    parameter = 4
+    for (item in items) {
+        item = 0
+    }
+    items.forEach { it = 1 }
+    fixed++
+}
+fun noReturn(flag: Boolean): Int {
+    if (flag) return 1
+}
+fun everyWay(flag: Boolean): Int {
+    if (flag) return 1 else return 2
+}
+fun throws(): Int {
+    throw IllegalStateException()
+}
+fun endless(): Int {
+    while (true) {
+        println(1)
+    }
+}
+fun endlessUntilBroken(): Int {
+    while (true) {
+        break
+    }
+}
+fun unitResult() {
+}
+fun inPlace(): Int {
+    run { return 1 }
+}
+fun unresolved(): Int {
+    missing()
+}
+fun empty(): Int {
+}
+"#,
+        crate::DiagnosticsConfig {
+            only: vec![crate::Check::ValReassignment, crate::Check::MissingReturn],
+            ..crate::DiagnosticsConfig::default()
+        },
+        expect![[r#"
+            [val-reassignment] 4: `val` cannot be reassigned
+            [val-reassignment] 9: `val` cannot be reassigned
+            [val-reassignment] 11: `val` cannot be reassigned
+            [val-reassignment] 13: `val` cannot be reassigned
+            [val-reassignment] 14: `val` cannot be reassigned
+            [missing-return] 18: Missing `return` statement
+            [missing-return] 34: Missing `return` statement
+            [missing-return] 44: Missing `return` statement"#]],
+    );
+}
+
+#[test]
 fn diagnostics_for_calls_nullability_and_when() {
     check_diagnostics(
         r#"

@@ -280,6 +280,12 @@ pub struct InferenceResult {
     unsafe_calls: Vec<UnsafeCall>,
     non_exhaustive_whens: Vec<NonExhaustiveWhen>,
     redundant_null_checks: Vec<RedundantNullCheck>,
+    /// The names of `val`s, parameters and loop variables assigned again
+    /// (`VAL_REASSIGNMENT`).
+    val_reassignments: Vec<TextRange>,
+    /// The closing braces of block-bodied functions returning a value whose
+    /// end is reachable (`NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`).
+    missing_returns: Vec<TextRange>,
     /// By the start of the cast's `as` or the check; `None` once examined
     /// and found fine (a lambda inferred again overwrites it).
     type_operations: FxHashMap<u32, Option<TypeOperationFinding>>,
@@ -334,6 +340,14 @@ impl InferenceResult {
 
     pub fn redundant_null_checks(&self) -> &[RedundantNullCheck] {
         &self.redundant_null_checks
+    }
+
+    pub fn val_reassignments(&self) -> &[TextRange] {
+        &self.val_reassignments
+    }
+
+    pub fn missing_returns(&self) -> &[TextRange] {
+        &self.missing_returns
     }
 
     /// Values whose class can't be the one required where they go, in

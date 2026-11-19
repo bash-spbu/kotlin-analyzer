@@ -274,6 +274,9 @@ impl Modifiers {
     /// A property delegated `by` another object. Not a modifier Kotlin
     /// writes.
     pub const DELEGATED: Modifiers = Modifiers(1 << 22);
+    /// A class implementing a supertype `by` a delegate (`: Foo by foo`):
+    /// the delegate implements its members. Not a modifier Kotlin writes.
+    pub const DELEGATES: Modifiers = Modifiers(1 << 23);
 
     const NAMES: [(Modifiers, &'static str); 20] = [
         (Modifiers::DATA, "data"),

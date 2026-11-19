@@ -253,6 +253,9 @@ impl<'parse> Lowering<'parse> {
                 .words()
                 .any(|word| word.kind() == "class_modifier" && has_token(word, "annotation"))
         });
+        if class.supertypes().any(|specifier| specifier.is_delegated()) {
+            modifiers.insert(Modifiers::DELEGATES);
+        }
         let kind = match class.keyword() {
             ClassKeyword::Interface => ClassKind::Interface,
             ClassKeyword::FunInterface => {
@@ -340,7 +343,13 @@ impl<'parse> Lowering<'parse> {
         } else {
             Container::File
         };
-        let (visibility, modifiers) = self.modifiers(object.modifiers(), container);
+        let (visibility, mut modifiers) = self.modifiers(object.modifiers(), container);
+        if object
+            .supertypes()
+            .any(|specifier| specifier.is_delegated())
+        {
+            modifiers.insert(Modifiers::DELEGATES);
+        }
         let item = NewItem {
             name: self.name(name_node),
             kind: ItemKind::Class(ClassKind::Object),
@@ -442,6 +451,11 @@ impl<'parse> Lowering<'parse> {
         }
         if property.is_delegated() {
             modifiers.insert(Modifiers::DELEGATED);
+        }
+        // An interface's property without a getter is abstract (an
+        // interface's property can't be initialized).
+        if container == Container::Interface && !property.has_getter() {
+            modifiers.insert(Modifiers::ABSTRACT);
         }
         let item = NewItem {
             name: self.name(name_node),

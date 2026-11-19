@@ -371,6 +371,13 @@ pub fn classpath_complete(db: &dyn SourceDatabase, from: SourceFile) -> bool {
     })
 }
 
+/// Whether `from` compiles against the JDK (outside any source set: as
+/// JVM code).
+pub fn sees_jdk_from(db: &dyn SourceDatabase, from: SourceFile) -> bool {
+    from.source_set(db)
+        .is_none_or(|source_set| sees_jdk(db, source_set))
+}
+
 /// Whether a source set compiles against the JDK: JVM and Android code
 /// does, Kotlin/JS, Wasm and Native code doesn't.
 fn sees_jdk(db: &dyn SourceDatabase, source_set: SourceSetId) -> bool {

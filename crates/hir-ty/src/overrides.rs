@@ -1,8 +1,9 @@
 //! Which members are one member as far as renaming goes: a function or
-//! property, what it overrides, and what overrides those in the workspace.
+//! property, what it overrides, and what overrides those in the workspace;
+//! and what implements a class or member there (`textDocument/implementation`).
 
 use base_db::{SourceDatabase, SourceFile};
-use hir_def::item_tree::Signature;
+use hir_def::item_tree::{ItemKind, Signature};
 use hir_def::{ItemContainer, ItemLocation, file_item_tree, item_tree};
 use intern::Name;
 use rustc_hash::FxHashSet;
@@ -52,6 +53,47 @@ pub fn override_family(db: &dyn SourceDatabase, member: ItemLocation) -> Vec<Ite
         }
     }
     family
+}
+
+/// What implements `declaration` in the workspace: a class's or an
+/// interface's subclasses, directly or not; a function's or property's
+/// overrides in those, at any depth. Nothing for anything else.
+pub fn implementations(db: &dyn SourceDatabase, declaration: ItemLocation) -> Vec<ItemLocation> {
+    let tree = item_tree(db, declaration.container);
+    let item = tree.item(declaration.item);
+    match item.kind {
+        ItemKind::Class(_) => workspace_subclasses(db, &[declaration]),
+        ItemKind::Function | ItemKind::Property { .. } => overrides_of(db, declaration),
+        _ => Vec::new(),
+    }
+}
+
+/// The workspace members that override `member`, directly or not.
+fn overrides_of(db: &dyn SourceDatabase, member: ItemLocation) -> Vec<ItemLocation> {
+    let tree = item_tree(db, member.container);
+    let item = tree.item(member.item);
+    let Some(parent) = item.parent else {
+        return Vec::new();
+    };
+    let class = ItemLocation {
+        container: member.container,
+        item: parent,
+    };
+    let mut found = Vec::new();
+    for subclass in workspace_subclasses(db, &[class]) {
+        let ItemContainer::File(subclass_file) = subclass.container else {
+            continue;
+        };
+        let types = Types::new(db, subclass_file);
+        let subclass_tree = file_item_tree(db, subclass_file);
+        for candidate in subclass_tree.named(Some(subclass.item), item.name) {
+            let candidate = ItemLocation::in_file(subclass_file, *candidate);
+            if types.overridden(candidate).contains(&member) && !found.contains(&candidate) {
+                found.push(candidate);
+            }
+        }
+    }
+    found
 }
 
 /// The workspace classes that extend any of `classes`, directly or not.
