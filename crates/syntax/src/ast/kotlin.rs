@@ -380,6 +380,16 @@ impl<'tree> PropertyDeclaration<'tree> {
         is_var_binding(self.0)
     }
 
+    /// Whether it writes a getter (`val x get() = …`).
+    pub fn has_getter(self) -> bool {
+        named_children(self.0).any(|child| child.kind() == "getter")
+    }
+
+    /// Whether it's delegated (`val x by lazy { … }`).
+    pub fn is_delegated(self) -> bool {
+        named_children(self.0).any(|child| child.kind() == "property_delegate")
+    }
+
     /// The declared variable; `None` for a destructuring declaration.
     pub fn variable(self) -> Option<VariableDeclaration<'tree>> {
         child(self.0)

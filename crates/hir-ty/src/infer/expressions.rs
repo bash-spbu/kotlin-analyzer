@@ -9,25 +9,28 @@ use syntax::ast::kotlin::TypeTest;
 use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::{Inferrer, SuperOf};
+use super::narrowing::Narrowed;
+use super::property_paths::{PathRoot, ReceiverRoot};
 use super::reassociation::{self, Operation};
-use super::{LocalId, LocalKind, NameSite, NullCheckKind, Reference};
+use super::{LocalKind, NameSite, NullCheckKind, Reference};
 use crate::signature::Callable;
 use crate::ty::{FunctionType, Nullability, Ty};
 
 /// What a `when` branch's conditions test.
 #[derive(Clone, Copy)]
 struct WhenSubject<'subject> {
-    /// The local the subject is (`when (x)`), to smart-cast.
-    local: Option<super::LocalId>,
+    /// The local or stable property the subject is (`when (x)`), to
+    /// smart-cast.
+    local: Option<Narrowed>,
     ty: Option<&'subject Ty>,
     /// `when (this)`: an `is T` branch sees `this` as a `T`.
     is_this: bool,
     /// Whether the subject's type is the one the compiler gives it (see
     /// `examinable`).
     examinable: bool,
-    /// What a branch matching a value that can't be null makes the
-    /// subject's root local (`existedOrder` of `when (existedOrder?.status)`).
-    not_null_when_matched: Option<&'subject (super::LocalId, Ty)>,
+    /// What a branch matching a value that can't be null says isn't null
+    /// (`existedOrder` of `when (existedOrder?.status)`).
+    not_null_when_matched: &'subject [(Narrowed, Ty)],
 }
 
 /// What an expression denotes: a value, or — as the qualifier before a
@@ -256,6 +259,8 @@ impl Inferrer<'_> {
         for index in (0..self.receivers.len()).rev() {
             let receiver = self.receivers[index].ty.clone();
             if let Some((location, ty)) = self.property_of(&receiver, name) {
+                let root = Self::implicit_root(index);
+                let ty = self.read_property(node, root, location, ty);
                 self.record(node, Reference::Declaration(location), ty.clone());
                 return Typed::Value(ty);
             }
@@ -269,6 +274,8 @@ impl Inferrer<'_> {
             return Typed::Value(entries);
         }
         if let Some((location, ty)) = self.top_level_property(name) {
+            let root = ReceiverRoot::Stable(PathRoot::Static);
+            let ty = self.read_property(node, root, location, ty);
             self.record(node, Reference::Declaration(location), ty.clone());
             return Typed::Value(ty);
         }
@@ -485,6 +492,8 @@ impl Inferrer<'_> {
                                 location,
                             );
                         }
+                        let root = self.receiver_root(receiver_node);
+                        let ty = self.read_property(name_node, root, location, ty);
                         let ty = if safe { ty.nullable() } else { ty };
                         self.record(name_node, Reference::Declaration(location), ty.clone());
                         Typed::Value(ty)
@@ -778,9 +787,8 @@ impl Inferrer<'_> {
                 TextRange::of(assertion),
             );
             // `x!!` throws on null: from here on `x` isn't null.
-            if let Some(narrowing) = self.asserted_not_null(operand) {
-                self.narrow(&[narrowing]);
-            }
+            let not_null = self.not_null_chain(operand);
+            self.narrow(&not_null);
             return operand_type.non_null();
         }
         operand_type
@@ -798,12 +806,9 @@ impl Inferrer<'_> {
             return target_type.nullable();
         }
         // `x as T` throws unless `x` is a `T`: from here on it is one.
-        let local = (operand.kind() == "simple_identifier")
-            .then(|| self.lookup_value_local(self.name(operand)))
-            .flatten();
-        if let Some(local) = local {
-            let narrowed = self.smart_cast(&self.local_type(local), target_type.clone());
-            self.narrow(&[(local, narrowed)]);
+        if let Some(subject) = self.narrowable(operand) {
+            let narrowed = self.smart_cast(&self.narrowed_type(subject), target_type.clone());
+            self.narrow(&[(subject, narrowed)]);
         }
         target_type
     }
@@ -860,8 +865,9 @@ impl Inferrer<'_> {
         }
         let right_jumps = matches!(right_type, Ty::Nothing { nullable: false });
         // `x ?: return`, `x?.y ?: return`: from here on `x` isn't null.
-        if let (true, Some(narrowing)) = (right_jumps, self.asserted_not_null(left)) {
-            self.narrow(&[narrowing]);
+        if right_jumps {
+            let not_null = self.not_null_chain(left);
+            self.narrow(&not_null);
         }
         self.types.common_type(&[left_type.non_null(), right_type])
     }
@@ -952,7 +958,7 @@ impl Inferrer<'_> {
             && !matches!(assigned, Ty::Nothing { .. })
             && self.types.fits(assigned, &declared) == super::Fit::Yes;
         let now = if fits { assigned.clone() } else { declared };
-        self.narrow(&[(local, now)]);
+        self.narrow(&[(Narrowed::Local(local), now)]);
     }
 
     /// The type an assignment's target writes: a local or property
@@ -1148,17 +1154,17 @@ impl Inferrer<'_> {
     /// wider of the two types (one must fit the other).
     pub(super) fn joined(
         &self,
-        first: &[(super::LocalId, Ty)],
-        second: &[(super::LocalId, Ty)],
-    ) -> Vec<(super::LocalId, Ty)> {
-        let latest = |narrowings: &[(super::LocalId, Ty)], local: super::LocalId| {
+        first: &[(Narrowed, Ty)],
+        second: &[(Narrowed, Ty)],
+    ) -> Vec<(Narrowed, Ty)> {
+        let latest = |narrowings: &[(Narrowed, Ty)], local: Narrowed| {
             narrowings
                 .iter()
                 .rev()
                 .find(|(narrowed, _)| *narrowed == local)
                 .map(|(_, ty)| ty.clone())
         };
-        let mut joined: Vec<(super::LocalId, Ty)> = Vec::new();
+        let mut joined: Vec<(Narrowed, Ty)> = Vec::new();
         for (local, _) in first {
             if joined.iter().any(|(known, _)| known == local) {
                 continue;
@@ -1198,7 +1204,7 @@ impl Inferrer<'_> {
         let subject_is_this =
             subject_value.is_some_and(|subject| subject.kind() == "this_expression");
         let mut subject_examinable = false;
-        let mut not_null_when_matched = None;
+        let mut not_null_when_matched = Vec::new();
         let mut branches = Vec::new();
         let mut branch_ends = Vec::new();
         let mut has_else = false;
@@ -1210,8 +1216,9 @@ impl Inferrer<'_> {
                     subject_type = Some(ty);
                     subject_examinable =
                         subject_value.is_some_and(|subject| self.examinable(subject));
-                    not_null_when_matched =
-                        subject_value.and_then(|subject| self.asserted_not_null(subject));
+                    not_null_when_matched = subject_value
+                        .map(|subject| self.not_null_chain(subject))
+                        .unwrap_or_default();
                 }
                 "when_entry" => {
                     let subject = WhenSubject {
@@ -1219,7 +1226,7 @@ impl Inferrer<'_> {
                         ty: subject_type.as_ref(),
                         is_this: subject_is_this,
                         examinable: subject_examinable,
-                        not_null_when_matched: not_null_when_matched.as_ref(),
+                        not_null_when_matched: &not_null_when_matched,
                     };
                     let before = self.scope_narrowings();
                     let (ty, is_else, mut entry_end) =
@@ -1268,7 +1275,7 @@ impl Inferrer<'_> {
 
     /// `when (x)` or `when (val y = …)`: the local the subject is (to
     /// smart-cast in branches), and its type.
-    fn when_subject(&mut self, node: SyntaxNode<'_>) -> (Option<super::LocalId>, Ty) {
+    fn when_subject(&mut self, node: SyntaxNode<'_>) -> (Option<Narrowed>, Ty) {
         let children: Vec<SyntaxNode<'_>> = named_children(node).collect();
         if let Some(variable) = children
             .iter()
@@ -1287,19 +1294,14 @@ impl Inferrer<'_> {
             let ty = written.unwrap_or(ty);
             let local = named_children(*variable)
                 .find(|part| part.kind() == "simple_identifier")
-                .map(|name| self.declare_node(name, ty.clone(), LocalKind::Value));
+                .map(|name| Narrowed::Local(self.declare_node(name, ty.clone(), LocalKind::Value)));
             return (local, ty);
         }
         let Some(subject) = children.last() else {
             return (None, Ty::Unknown);
         };
         let ty = self.expression(*subject, None);
-        let local = if subject.kind() == "simple_identifier" {
-            self.lookup_value_local(self.name(*subject))
-        } else {
-            None
-        };
-        (local, ty)
+        (self.narrowable(*subject), ty)
     }
 
     /// One `when` branch: its conditions (with the smart casts they give
@@ -1311,7 +1313,7 @@ impl Inferrer<'_> {
         subject: WhenSubject<'_>,
         expected: Option<&Ty>,
         requirement: Option<super::type_mismatches::Requirement>,
-    ) -> (Ty, bool, Vec<(LocalId, Ty)>) {
+    ) -> (Ty, bool, Vec<(Narrowed, Ty)>) {
         let mut each_condition = Vec::new();
         let mut receivers = Vec::new();
         let mut body = None;
@@ -1359,7 +1361,7 @@ impl Inferrer<'_> {
         &self,
         entry: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
-    ) -> Vec<(LocalId, Ty)> {
+    ) -> Vec<(Narrowed, Ty)> {
         let conditions: Vec<SyntaxNode<'_>> = named_children(entry)
             .filter(|child| child.kind() == "when_condition")
             .collect();
@@ -1373,10 +1375,10 @@ impl Inferrer<'_> {
         if names_null && !syntax::ast::kotlin::has_guard(entry) {
             let subject_local = subject
                 .local
-                .map(|local| (local, self.local_type(local).non_null()));
+                .map(|local| (local, self.narrowed_type(local).non_null()));
             return subject_local
                 .into_iter()
-                .chain(subject.not_null_when_matched.cloned())
+                .chain(subject.not_null_when_matched.iter().cloned())
                 .collect();
         }
         let [condition] = conditions[..] else {
@@ -1391,7 +1393,7 @@ impl Inferrer<'_> {
             return Vec::new();
         };
         let target = self.written_type(target);
-        vec![(local, self.smart_cast(&self.local_type(local), target))]
+        vec![(local, self.smart_cast(&self.narrowed_type(local), target))]
     }
 
     /// `is T` as a branch's condition on the subject. The last branch of
@@ -1404,7 +1406,7 @@ impl Inferrer<'_> {
         negated: bool,
     ) {
         let subject_type = match (subject.local, subject.ty) {
-            (Some(local), _) => self.local_type(local),
+            (Some(local), _) => self.narrowed_type(local),
             (None, Some(ty)) => ty.clone(),
             (None, None) => Ty::Unknown,
         };
@@ -1418,7 +1420,7 @@ impl Inferrer<'_> {
         node: SyntaxNode<'_>,
         subject: WhenSubject<'_>,
         receivers: &mut Vec<Ty>,
-    ) -> Vec<(super::LocalId, Ty)> {
+    ) -> Vec<(Narrowed, Ty)> {
         let subject_type = subject.ty;
         let mut narrowings = Vec::new();
         for child in named_children(node) {
@@ -1434,7 +1436,7 @@ impl Inferrer<'_> {
                         continue;
                     }
                     if let Some(local) = subject.local {
-                        let narrowed = self.smart_cast(&self.local_type(local), target_type);
+                        let narrowed = self.smart_cast(&self.narrowed_type(local), target_type);
                         narrowings.push((local, narrowed));
                     } else if subject.is_this {
                         receivers.push(target_type);
@@ -1448,10 +1450,8 @@ impl Inferrer<'_> {
                 _ => {
                     if subject_type.is_some() {
                         let matched = self.expression(child, subject_type);
-                        if let (true, Some(not_null)) =
-                            (self.excludes_null(&matched), subject.not_null_when_matched)
-                        {
-                            narrowings.push(not_null.clone());
+                        if self.excludes_null(&matched) {
+                            narrowings.extend(subject.not_null_when_matched.iter().cloned());
                         }
                     } else {
                         // Without a subject a branch is a condition: the
@@ -1879,7 +1879,7 @@ impl Inferrer<'_> {
 
 /// A branch's conditions are alternatives (`is A, is B ->`): a local is
 /// narrowed in the branch only to what every one of them narrows it to.
-fn narrowed_by_every(mut each_condition: Vec<Vec<(LocalId, Ty)>>) -> Vec<(LocalId, Ty)> {
+fn narrowed_by_every(mut each_condition: Vec<Vec<(Narrowed, Ty)>>) -> Vec<(Narrowed, Ty)> {
     let Some(first) = each_condition.pop() else {
         return Vec::new();
     };

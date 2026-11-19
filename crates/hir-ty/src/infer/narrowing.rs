@@ -9,6 +9,7 @@ use syntax::{SyntaxNode, TextRange, has_token, named_children};
 
 use super::declarations::Inferrer;
 use super::member_scope::data_flow_scope;
+use super::property_paths::{PropertyRead, property_name};
 use super::{LocalId, NullCheckKind, UnsafeCall};
 use crate::ty::{ClassType, Nullability, Ty, TypeParameterId};
 
@@ -54,11 +55,24 @@ impl StablePath {
     }
 }
 
+/// What a smart cast narrows: a local, or a stable property read from a
+/// stable value (`order.status`, the `status` of `this`), which the
+/// compiler smart-casts as it does a local.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum Narrowed {
+    Local(LocalId),
+    Property(PropertyPathId),
+}
+
+/// A stable property read from a stable value, numbered per body.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) struct PropertyPathId(pub(super) u32);
+
 /// The locals a condition narrows, and to what.
 #[derive(Clone, Default)]
 pub(super) struct Narrowing {
-    pub(super) when_true: Vec<(LocalId, Ty)>,
-    pub(super) when_false: Vec<(LocalId, Ty)>,
+    pub(super) when_true: Vec<(Narrowed, Ty)>,
+    pub(super) when_false: Vec<(Narrowed, Ty)>,
     /// What `this is T` makes the innermost receiver when the condition
     /// holds.
     pub(super) receiver_when_true: Option<Ty>,
@@ -201,31 +215,26 @@ impl Inferrer<'_> {
             _ => {
                 let compared_with_value =
                     match (self.excludes_null(&types[0]), self.excludes_null(&types[1])) {
-                        (_, true) => self.asserted_not_null(left),
-                        (true, false) => self.asserted_not_null(right),
-                        (false, false) => None,
+                        (_, true) => self.not_null_chain(left),
+                        (true, false) => self.not_null_chain(right),
+                        (false, false) => Vec::new(),
                     };
-                let Some(not_null) = compared_with_value else {
-                    return Narrowing::default();
-                };
+                let not_null = compared_with_value;
                 let equal = has_token(node, "==") || has_token(node, "===");
                 return if equal && !is_not_equal {
                     Narrowing {
-                        when_true: vec![not_null],
+                        when_true: not_null,
                         ..Narrowing::default()
                     }
                 } else {
                     Narrowing {
-                        when_false: vec![not_null],
+                        when_false: not_null,
                         ..Narrowing::default()
                     }
                 };
             }
         };
-        let Some(not_null) = self.asserted_not_null(checked) else {
-            return Narrowing::default();
-        };
-        let not_null = vec![not_null];
+        let not_null = self.not_null_chain(checked);
         if is_not_equal {
             Narrowing {
                 when_true: not_null,
@@ -269,15 +278,13 @@ impl Inferrer<'_> {
                 ..Narrowing::default()
             };
         }
-        let local = if operand.kind() == "simple_identifier" {
-            self.lookup_value_local(self.name(operand))
-        } else {
-            None
-        };
-        let Some(local) = local else {
+        let Some(subject) = self.narrowable(operand) else {
             return Narrowing::default();
         };
-        let narrowed = vec![(local, self.smart_cast(&self.local_type(local), target_type))];
+        let narrowed = vec![(
+            subject,
+            self.smart_cast(&self.narrowed_type(subject), target_type),
+        )];
         if test == TypeTest::IsNot {
             Narrowing {
                 when_false: narrowed,
@@ -390,7 +397,7 @@ impl Inferrer<'_> {
     /// What a condition known to hold says, read without inferring it again
     /// (it already was, as an argument): `x != null`, `x is T`, joined by
     /// `&&`.
-    pub(super) fn asserted(&self, condition: SyntaxNode<'_>) -> Vec<(LocalId, Ty)> {
+    pub(super) fn asserted(&self, condition: SyntaxNode<'_>) -> Vec<(Narrowed, Ty)> {
         match condition.kind() {
             "parenthesized_expression" => named_children(condition)
                 .next()
@@ -422,7 +429,7 @@ impl Inferrer<'_> {
                 let operands: Vec<SyntaxNode<'_>> = named_children(condition).collect();
                 match operands[..] {
                     [checked, other] | [other, checked] if other.kind() == "null_literal" => {
-                        self.asserted_not_null(checked).into_iter().collect()
+                        self.not_null_chain(checked)
                     }
                     _ => Vec::new(),
                 }
@@ -433,13 +440,13 @@ impl Inferrer<'_> {
                     return Vec::new();
                 };
                 let target = children.find(|child| syntax::ast::kotlin::is_type(*child));
-                let local = (operand.kind() == "simple_identifier")
-                    .then(|| self.lookup_value_local(self.name(operand)))
-                    .flatten();
-                match (local, target) {
-                    (Some(local), Some(target)) => {
+                match (self.narrowable(operand), target) {
+                    (Some(subject), Some(target)) => {
                         let target = self.written_type(target);
-                        vec![(local, self.smart_cast(&self.local_type(local), target))]
+                        vec![(
+                            subject,
+                            self.smart_cast(&self.narrowed_type(subject), target),
+                        )]
                     }
                     _ => Vec::new(),
                 }
@@ -448,25 +455,66 @@ impl Inferrer<'_> {
         }
     }
 
-    /// `x` known not to be null — `x` itself, or the root of a chain with a
-    /// safe call (`x?.y` isn't null only when `x` isn't).
-    pub(super) fn asserted_not_null(&self, node: SyntaxNode<'_>) -> Option<(LocalId, Ty)> {
-        let name = match node.kind() {
-            "simple_identifier" => node,
-            _ => safe_chain_root(node)?,
-        };
-        let local = self.lookup_value_local(self.name(name))?;
-        Some((local, self.local_type(local).non_null()))
+    /// What `node` not being null says isn't null: `node` itself, when a
+    /// smart cast can narrow it, and each value of its chain a safe call
+    /// was made on (`x?.y` isn't null only when `x` isn't), up to the name
+    /// the chain starts from.
+    pub(super) fn not_null_chain(&self, node: SyntaxNode<'_>) -> Vec<(Narrowed, Ty)> {
+        let mut found: Vec<Narrowed> = self.narrowable(node).into_iter().collect();
+        let mut current = node;
+        let mut safe = false;
+        loop {
+            match current.kind() {
+                "parenthesized_expression" | "call_expression" => {
+                    let Some(inner) = named_children(current).next() else {
+                        break;
+                    };
+                    current = inner;
+                }
+                "navigation_expression" => {
+                    let (Some(receiver), Some(suffix)) = (
+                        named_children(current).next(),
+                        named_children(current).last(),
+                    ) else {
+                        break;
+                    };
+                    if has_token(suffix, "?.") {
+                        safe = true;
+                        found.extend(self.narrowable(receiver));
+                    }
+                    current = receiver;
+                }
+                "simple_identifier" => {
+                    if safe {
+                        found.extend(self.narrowable(current));
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let mut unique: Vec<Narrowed> = Vec::new();
+        for narrowed in found {
+            if !unique.contains(&narrowed) {
+                unique.push(narrowed);
+            }
+        }
+        unique
+            .into_iter()
+            .map(|narrowed| (narrowed, self.narrowed_type(narrowed).non_null()))
+            .collect()
     }
 }
 
 /// How whether a value may be null where it's used is known.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum NullKnowledge {
-    /// Its type says it: a local after the data flow's smart casts, a call.
+    /// Its type says it: a local or a stable property after the data
+    /// flow's smart casts, a call, a property never smart-cast.
     Followed,
-    /// Smart casts that would apply to it aren't modelled (a property's),
-    /// or the classpath is partial: only a check nowhere around tells.
+    /// Smart casts that would apply to it aren't followed (an `open`
+    /// property's, one read from a `var`), or the classpath is partial:
+    /// only a check nowhere around tells.
     Unfollowed,
 }
 
@@ -524,9 +572,10 @@ impl Inferrer<'_> {
     }
 
     /// Whether `value`'s type here says for certain whether it may be null:
-    /// a local's, after the smart casts the data flow gives it, or a
-    /// call's, which nothing smart-casts — with the whole classpath (a
-    /// missing library's contract would have narrowed a local).
+    /// a local's or a stable property's, after the smart casts the data
+    /// flow gives it; a call's, or a property's the compiler never
+    /// smart-casts, as it is — with the whole classpath (a missing
+    /// library's contract would have narrowed a local).
     pub(super) fn null_knowledge(&self, value: SyntaxNode<'_>) -> NullKnowledge {
         let is_local = value.kind() == "simple_identifier"
             && matches!(
@@ -534,7 +583,17 @@ impl Inferrer<'_> {
                 Some(super::Reference::Local(_))
             );
         let is_call = value.kind() == "call_expression";
-        let followed = (is_local || is_call)
+        let property_name = match value.kind() {
+            "simple_identifier" => Some(value),
+            "navigation_expression" => property_name(value),
+            _ => None,
+        };
+        // A stable property is narrowed as a local; one the compiler never
+        // smart-casts keeps its declared type.
+        let is_judged_property = property_name
+            .and_then(|name| self.property_read_at(name))
+            .is_some_and(|read| matches!(read, PropertyRead::Stable(_) | PropertyRead::Unstable));
+        let followed = (is_local || is_call || is_judged_property)
             && hir_def::def_map::classpath_complete(self.db, self.file)
             && self.examinable(value);
         if followed {
@@ -614,25 +673,6 @@ impl Inferrer<'_> {
                     .is_some_and(|name| StablePath::of(self.text(name)) == *path)
             }
             _ => false,
-        }
-    }
-}
-
-/// The name a chain of calls and properties starts from, when one of its
-/// steps is a safe call: `x` of `x?.y`, `x.y?.z()`.
-fn safe_chain_root(node: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
-    let mut current = node;
-    let mut safe = false;
-    loop {
-        match current.kind() {
-            "navigation_expression" => {
-                let suffix = named_children(current).last()?;
-                safe |= has_token(suffix, "?.");
-                current = named_children(current).next()?;
-            }
-            "call_expression" => current = named_children(current).next()?,
-            "simple_identifier" => return safe.then_some(current),
-            _ => return None,
         }
     }
 }

@@ -1413,7 +1413,7 @@ fn facts_follow_this_paths_and_contracts_before_a_when() {
 //- /app/Use.kt
 package app
 enum class Side { BUY, SELL }
-class Order(var note: String?, var side: Side?) {
+class Order(val note: String?, var side: Side?) {
     fun noteLength(): Int {
         if (this.note == null) return 0
         return note.length

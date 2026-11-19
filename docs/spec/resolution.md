@@ -119,6 +119,20 @@ Smart casts follow the data flow within a body:
   isn't null only when the chain's root (a `val` or parameter) isn't:
   narrowing the one narrows the other.
 
+A stable property read from a stable value is narrowed as a local is
+(`order.status` after `order.status != null`; `status` and `this.status`
+are one), as the compiler's rules for stability say: a `val` with the
+default getter, not delegated, `lateinit`, an extension or `expect`;
+`private`, or final (not `open`, `abstract`, an interface's, or an
+`override` in a class that can be extended) and of the same Gradle
+module (whose `main` and `test` are friends). The value it's read from
+is a `val`, a parameter, `this`, an object or such a property. A
+property the compiler never smart-casts (a `var`, a getter, another
+module's) keeps its declared type; an `open` one, or one read from a
+`var`, is left as not followed. A library's member isn't trusted for
+nullability: a Java class may override a Kotlin property's getter
+(`getMessage()` of a Java exception for `Throwable.message`).
+
 ## Types in bodies
 
 Every expression gets a type, or `Unknown`. A call's type parameters are
@@ -186,8 +200,9 @@ its class file's directory (`kotlin/time/jdk8/…` declares `kotlin.time`).
 
 ### Not modelled yet (stays `Unknown`, never reported)
 
-- smart casts of properties (`a.b` after `a.b != null`), to `Nothing?`
-  after `== null`, a `var` captured by a lambda that changes it, and
+- smart casts of `open` properties on a value of a final type, of
+  properties read from a `var`, to `Nothing?` after `== null`, a `var`
+  captured by a lambda that changes it, and
   `callsInPlace` (a lambda's smart casts don't outlive it);
 - members of anonymous objects (`object { val x = 1 }`);
 - declarations compiler plugins generate (`serializer()` of

@@ -11,8 +11,9 @@ use hir_def::item_tree::{
 };
 use syntax::{SyntaxNode, has_token, named_children};
 
+use super::Reference;
 use super::declarations::Inferrer;
-use super::{LocalId, Reference};
+use super::narrowing::Narrowed;
 use crate::lower::{TypeScope, lower_type};
 use crate::ty::{Substitution, Ty, TypeParameterId};
 
@@ -129,7 +130,7 @@ impl Inferrer<'_> {
         &self,
         called: &CalledContract<'_>,
         holds: impl Fn(Returns) -> bool,
-    ) -> Vec<(LocalId, Ty)> {
+    ) -> Vec<(Narrowed, Ty)> {
         called
             .conditions(holds)
             .into_iter()
@@ -141,24 +142,23 @@ impl Inferrer<'_> {
         &self,
         called: &CalledContract<'_>,
         condition: &ContractCondition<TypeRef>,
-    ) -> Vec<(LocalId, Ty)> {
+    ) -> Vec<(Narrowed, Ty)> {
         match condition {
             ContractCondition::IsNull {
                 subject,
                 negated: true,
             } => called
                 .subject(*subject)
-                .and_then(|node| self.asserted_not_null(node))
-                .into_iter()
-                .collect(),
+                .map(|node| self.not_null_chain(node))
+                .unwrap_or_default(),
             ContractCondition::IsInstance {
                 subject,
                 ty,
                 negated: false,
             } => {
-                let Some(local) = called
+                let Some(narrowed) = called
                     .subject(*subject)
-                    .and_then(|node| self.local_named_by(node))
+                    .and_then(|node| self.narrowable(node))
                 else {
                     return Vec::new();
                 };
@@ -170,7 +170,10 @@ impl Inferrer<'_> {
                 if generic {
                     return Vec::new();
                 }
-                vec![(local, self.smart_cast(&self.local_type(local), target))]
+                vec![(
+                    narrowed,
+                    self.smart_cast(&self.narrowed_type(narrowed), target),
+                )]
             }
             // `require(x != null && y is T)`: the argument is the condition.
             ContractCondition::Holds {
@@ -190,13 +193,6 @@ impl Inferrer<'_> {
             | ContractCondition::Holds { .. }
             | ContractCondition::Any(_) => Vec::new(),
         }
-    }
-
-    /// The local a plain name means.
-    fn local_named_by(&self, node: SyntaxNode<'_>) -> Option<LocalId> {
-        (node.kind() == "simple_identifier")
-            .then(|| self.lookup_value_local(self.name(node)))
-            .flatten()
     }
 }
 

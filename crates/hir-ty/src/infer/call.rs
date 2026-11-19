@@ -241,12 +241,10 @@ impl<'db> Inferrer<'db> {
         let safe = has_token(suffix, "?.");
         // `x?.let { … x … }`: past the receiver, the call runs only when
         // `x` isn't null.
-        let safely_called = safe
-            .then(|| self.asserted_not_null(receiver_node))
-            .flatten();
+        let safely_called = safe.then(|| self.not_null_chain(receiver_node));
         if let Some(not_null) = &safely_called {
             self.push_scope();
-            self.narrow(std::slice::from_ref(not_null));
+            self.narrow(not_null);
         }
         let ty = self.qualified_call_on(
             receiver_node,

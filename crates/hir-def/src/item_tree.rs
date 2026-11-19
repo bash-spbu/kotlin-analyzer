@@ -268,6 +268,12 @@ impl Modifiers {
     /// `copy`, …), not written. Not a modifier Kotlin writes: signatures
     /// don't show it.
     pub const SYNTHESIZED: Modifiers = Modifiers(1 << 20);
+    /// A property that writes its getter: not a stored value smart casts
+    /// can rely on. Not a modifier Kotlin writes.
+    pub const GETTER: Modifiers = Modifiers(1 << 21);
+    /// A property delegated `by` another object. Not a modifier Kotlin
+    /// writes.
+    pub const DELEGATED: Modifiers = Modifiers(1 << 22);
 
     const NAMES: [(Modifiers, &'static str); 20] = [
         (Modifiers::DATA, "data"),

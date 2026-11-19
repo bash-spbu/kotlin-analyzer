@@ -25,6 +25,7 @@ mod fit;
 mod local_usage;
 mod member_scope;
 mod narrowing;
+mod property_paths;
 mod reassociation;
 mod type_mismatches;
 mod type_operations;
@@ -163,9 +164,9 @@ pub struct UnsafeCall {
     pub receiver: Ty,
 }
 
-/// A null check on a value whose type isn't nullable — as declared, not
-/// through a smart cast (Kotlin doesn't smart-cast every value our data
-/// flow narrows).
+/// A null check on a value whose type isn't nullable: after smart casts
+/// for a value that can't change, as declared for a `var` (Kotlin doesn't
+/// smart-cast every `var` our data flow narrows).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RedundantNullCheck {
     pub kind: NullCheckKind,

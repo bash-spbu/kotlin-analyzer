@@ -119,9 +119,11 @@ are ordinary source directories that happen to be produced by the build.
    The workspace loads by convention meanwhile and reloads when the export
    finishes. The export is redone when the build files
    (`build.gradle(.kts)`, `settings.gradle(.kts)`, `gradle.properties`,
-   `libs.versions.toml`) changed since it was made: the newest one's
-   modification time is recorded next to the model (`project.stamp`) and
-   compared — at startup and on reload — off the main thread. (Comparing
+   `libs.versions.toml`) changed since it was made, or the init script
+   did (a newer one exports more: compiler options): the newest build
+   file's modification time and the script's hash are recorded next to
+   the model (`project.stamp`) and compared — at startup and on reload —
+   off the main thread. (Comparing
    with the model's own time would export forever after a build file
    stamped in the future.) A failed export is reported with
    `window/showMessage`. `gradleExport: false` turns this off.

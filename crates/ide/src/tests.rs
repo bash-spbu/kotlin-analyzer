@@ -454,7 +454,7 @@ public class Clock {
     public String zone() { return null; }
     public <T> T same(T value) { return value; }
 }
-//- /app/b/Use.kt
+//- /app/b/Use.kt lang=2.3
 package b
 import a.Clock
 class Account(val owner: String, val nickname: String?)
@@ -519,10 +519,56 @@ fun <R> run(block: () -> R): R = block()
             [useless-elvis] 8: Elvis operator (`?:`) always returns the left operand of non-null type `String` | Remove the elvis operator: ""
             [senseless-comparison] 9: Condition `account.owner == null` is always `false`: `String` isn't nullable
             [senseless-comparison] 10: Condition `null != name` is always `true`: `String` isn't nullable
+            [unnecessary-safe-call] 12: Unnecessary safe call on a receiver of non-null type `String` | Replace `?.` with `.`: "."
+            [senseless-comparison] 13: Condition `account.nickname != null` is always `true`: `String` isn't nullable
+            [unnecessary-not-null-assertion] 21: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [unnecessary-safe-call] 22: Unnecessary safe call on a receiver of non-null type `String` | Replace `?.` with `.`: "."
             [unnecessary-not-null-assertion] 24: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [useless-elvis] 26: Elvis operator (`?:`) always returns the left operand of non-null type `String` | Remove the elvis operator: ""
             [unnecessary-not-null-assertion] 33: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
             [senseless-comparison] 35: Condition `right == null` is always `false`: `String` isn't nullable
             [unnecessary-not-null-assertion] 41: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: """#]],
+    );
+}
+
+#[test]
+fn before_kotlin_2_3_only_comparisons_are_reported() {
+    // `!!`, `?.` and `?:` on a value that can't be null are the compiler's
+    // data-flow warnings, which it reports from 2.3 on; a comparison with
+    // `null` it reports always, after smart casts too.
+    let fixture = |version: &str| {
+        format!(
+            r#"
+//- /app/b/Use.kt lang={version}
+package b
+fun use(name: String, maybe: String?) {{
+    name!!.length
+    name?.length
+    val other = name ?: ""
+    if (name == null) return
+    if (maybe != null) {{
+        if (maybe == null) println(other)
+    }}
+}}
+"#
+        )
+    };
+    check_diagnostics(
+        &fixture("2.2"),
+        new_warnings(),
+        expect![[r#"
+            [senseless-comparison] 6: Condition `name == null` is always `false`: `String` isn't nullable
+            [senseless-comparison] 8: Condition `maybe == null` is always `false`: `String` isn't nullable"#]],
+    );
+    check_diagnostics(
+        &fixture("2.3"),
+        new_warnings(),
+        expect![[r#"
+            [unnecessary-not-null-assertion] 3: Unnecessary non-null assertion (`!!`) on a value of non-null type `String` | Remove `!!`: ""
+            [unnecessary-safe-call] 4: Unnecessary safe call on a receiver of non-null type `String` | Replace `?.` with `.`: "."
+            [useless-elvis] 5: Elvis operator (`?:`) always returns the left operand of non-null type `String` | Remove the elvis operator: ""
+            [senseless-comparison] 6: Condition `name == null` is always `false`: `String` isn't nullable
+            [senseless-comparison] 8: Condition `maybe == null` is always `false`: `String` isn't nullable"#]],
     );
 }
 
@@ -709,7 +755,7 @@ fn deprecated_since_kotlin_follows_the_api_version_and_werror_makes_warnings_err
     // `Iterable.sumBy`: `@DeprecatedSinceKotlin(warningSince = "1.5")`.
     let diagnostics = |header: &str| {
         let text = format!(
-            "\n//- /app/b/Use.kt {header}\npackage b\nfun total(numbers: List<Int>, name: String) = numbers.sumBy {{ it }} + name?.length!!\n"
+            "\n//- /app/b/Use.kt lang=2.3 {header}\npackage b\nfun total(numbers: List<Int>, name: String) = numbers.sumBy {{ it }} + name?.length!!\n"
         );
         let mut fixture = Fixture::parse(&text);
         let source = base_db::LibrarySource {
@@ -1953,6 +1999,91 @@ fun property(holder: Holder) {
             [unsafe-call] 38: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Box<V>?`
             [unsafe-call] 41: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
             [unsafe-call] 44: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`"#]],
+    );
+}
+
+#[test]
+fn stable_properties_smart_cast_as_locals_do() {
+    // The compiler's rules: a final `val` with the default getter, of this
+    // module (or a friend: tests), read from a value that can't change.
+    // One it never smart-casts keeps its declared type; one it may
+    // smart-cast where this inference can't tell is left alone.
+    let config = || crate::DiagnosticsConfig {
+        only: vec![
+            crate::Check::UnsafeCall,
+            crate::Check::TypeMismatch,
+            crate::Check::UnresolvedReference,
+        ],
+        ..crate::DiagnosticsConfig::default()
+    };
+    check_diagnostics(
+        r#"
+//- /lib/a/Remote.kt module=:lib
+package a
+class Dog { fun bark() {} }
+class Remote(val dog: Dog?)
+//- /app/b/Use.kt module=:app deps=:lib
+package b
+import a.Dog
+import a.Remote
+class Holder(val dog: Dog?)
+class Outer(val holder: Holder)
+class Mutable(var dog: Dog?)
+open class Base(open val dog: Dog?)
+class Getter { val dog: Dog? get() = null }
+class Self(val dog: Dog?) {
+    fun bark() {
+        if (dog != null) dog.bark()
+        if (this.dog != null) dog.bark()
+    }
+}
+fun feed(dog: Dog) {}
+fun stable(holder: Holder) {
+    if (holder.dog != null) holder.dog.bark()
+}
+fun chain(outer: Outer) {
+    if (outer.holder.dog != null) feed(outer.holder.dog)
+}
+fun safeChain(holder: Holder?) {
+    if (holder?.dog != null) holder.dog.bark()
+}
+fun returned(holder: Holder) {
+    holder.dog ?: return
+    holder.dog.bark()
+}
+fun unchecked(holder: Holder) {
+    holder.dog.bark()
+    feed(holder.dog)
+}
+fun mutable(holder: Mutable) {
+    if (holder.dog != null) holder.dog.bark()
+}
+fun getter(holder: Getter) {
+    if (holder.dog != null) holder.dog.bark()
+}
+fun remote(remote: Remote) {
+    if (remote.dog != null) remote.dog.bark()
+}
+fun open(base: Base) {
+    if (base.dog != null) base.dog.bark()
+}
+fun varRoot(input: Holder) {
+    var holder = input
+    if (holder.dog != null) holder.dog.bark()
+}
+//- /app/b/UseTest.kt module=:app set=test deps=:lib
+package b
+fun fromTest(holder: Holder) {
+    if (holder.dog != null) holder.dog.bark()
+}
+"#,
+        config(),
+        expect![[r#"
+            [unsafe-call] 30: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [type-mismatch] 31: Argument type mismatch: expected `Dog`, actual `Dog?`
+            [unsafe-call] 34: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [unsafe-call] 37: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`
+            [unsafe-call] 40: Only safe (`?.`) or non-null asserted (`!!.`) calls are allowed on a receiver of type `Dog?`"#]],
     );
 }
 

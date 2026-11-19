@@ -94,7 +94,8 @@ pub(super) fn export_if_stale(root: &Path, output: &Path) -> Export {
 }
 
 /// Whether the model at `model` is missing, or was exported for other
-/// build files than those whose newest change is `newest`.
+/// build files than those whose newest change is `newest`, or by another
+/// init script (one that exports less: compiler options came later).
 fn is_stale(model: &Path, newest: Option<SystemTime>) -> bool {
     if !model.is_file() {
         return true;
@@ -107,9 +108,17 @@ fn stamp_path(model: &Path) -> PathBuf {
     model.with_extension("stamp")
 }
 
-/// A build files' state as text: the newest one's modification time.
+/// What a model was exported for, as text: this init script, and the
+/// build files' newest modification time.
 fn stamp(newest: Option<SystemTime>) -> String {
-    match newest {
+    stamp_for(INIT_SCRIPT, newest)
+}
+
+fn stamp_for(script: &str, newest: Option<SystemTime>) -> String {
+    let mut hasher = rustc_hash::FxHasher::default();
+    std::hash::Hash::hash(script, &mut hasher);
+    let script_hash = std::hash::Hasher::finish(&hasher);
+    let build_files = match newest {
         Some(time) => {
             let since_epoch = time
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -117,7 +126,8 @@ fn stamp(newest: Option<SystemTime>) -> String {
             since_epoch.as_nanos().to_string()
         }
         None => "none".to_owned(),
-    }
+    };
+    format!("script {script_hash:016x} build {build_files}")
 }
 
 /// The newest modification time among the build files under `root`.
@@ -216,6 +226,14 @@ mod tests {
         );
         std::fs::write(stamp_path(&model), stamp(newest_build_file(&root))).unwrap();
         assert!(!is_stale(&model, newest_build_file(&root)));
+
+        // Exported by another init script: stale, whatever the build files.
+        let older_script = stamp_for("// an older init script", newest_build_file(&root));
+        std::fs::write(stamp_path(&model), older_script).unwrap();
+        assert!(
+            is_stale(&model, newest_build_file(&root)),
+            "another init script"
+        );
         assert!(!is_gradle_build(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }

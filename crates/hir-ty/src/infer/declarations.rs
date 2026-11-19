@@ -10,6 +10,7 @@ use hir_def::{ItemId, ItemLocation, file_item_tree};
 use intern::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::narrowing::Narrowed;
 use super::type_mismatches::Requirement;
 use syntax::ast::AstNode;
 use syntax::ast::kotlin::{
@@ -38,7 +39,7 @@ const PLUGIN_GENERATED_NAMES: &[&str] = &["serializer"];
 struct Scope {
     kind: ScopeKind,
     names: Vec<(Name, LocalId)>,
-    narrowed: Vec<(LocalId, Ty)>,
+    narrowed: Vec<(Narrowed, Ty)>,
 }
 
 /// What a scope belongs to, where that decides what's visible through it.
@@ -105,12 +106,20 @@ pub(crate) struct Inferrer<'db> {
     /// The type the value inferred next must have — taken by it.
     pub(super) requirement: Option<super::type_mismatches::Requirement>,
     /// What the scope popped last had narrowed.
-    last_popped: Vec<(LocalId, Ty)>,
+    last_popped: Vec<(Narrowed, Ty)>,
     /// What the `when` branch being inferred being false says (its
     /// conditions, without a subject, all false).
-    pub(super) entry_false: Vec<(LocalId, Ty)>,
+    pub(super) entry_false: Vec<(Narrowed, Ty)>,
     /// `val chain = info?.let { … }`: `chain` not null means `info` isn't.
-    not_null_implies: FxHashMap<LocalId, LocalId>,
+    not_null_implies: FxHashMap<LocalId, Vec<Narrowed>>,
+    /// Each stable property path read, by number.
+    pub(super) property_paths: Vec<super::property_paths::PropertyPath>,
+    pub(super) path_ids: FxHashMap<
+        (super::property_paths::PathRoot, ItemLocation),
+        super::narrowing::PropertyPathId,
+    >,
+    /// How the data flow saw each property read, by its name's start.
+    pub(super) property_reads: FxHashMap<u32, super::property_paths::PropertyRead>,
     /// The condition inferred last (where it starts), and what it narrows.
     pub(super) last_condition: Option<(u32, super::narrowing::Narrowing)>,
     /// `val ready = x != null`: what `ready` being true or false narrows.
@@ -164,6 +173,9 @@ impl<'db> Inferrer<'db> {
             last_popped: Vec::new(),
             entry_false: Vec::new(),
             not_null_implies: FxHashMap::default(),
+            property_paths: Vec::new(),
+            path_ids: FxHashMap::default(),
+            property_reads: FxHashMap::default(),
             last_condition: None,
             condition_aliases: FxHashMap::default(),
         }
@@ -271,8 +283,10 @@ impl<'db> Inferrer<'db> {
         self.result.argument_mismatches.push(mismatch);
     }
 
-    /// Records `check` when `value`'s type, before smart casts, can't be
-    /// null.
+    /// Records `check` when `value`'s type can't be null: after smart
+    /// casts for a value that can't change (a `val`, a parameter, a stable
+    /// property), whose narrowing is the compiler's; as declared for a
+    /// `var` (one a lambda or a loop writes isn't smart-cast).
     pub(super) fn check_null_check(
         &mut self,
         value: SyntaxNode<'_>,
@@ -280,7 +294,14 @@ impl<'db> Inferrer<'db> {
         kind: NullCheckKind,
         range: TextRange,
     ) {
-        let declared = self.type_before_smart_casts(value, inferred);
+        let follows_smart_casts = self
+            .narrowable(value)
+            .is_some_and(|narrowed| self.is_stable(narrowed));
+        let declared = if follows_smart_casts {
+            inferred.clone()
+        } else {
+            self.type_before_smart_casts(value, inferred)
+        };
         if declared.is_never_null() {
             self.result.redundant_null_checks.push(RedundantNullCheck {
                 kind,
@@ -300,9 +321,23 @@ impl<'db> Inferrer<'db> {
             },
             "simple_identifier" => match self.recorded_at(value).map(|name| name.reference) {
                 Some(Reference::Local(local)) => self.result.locals[local.0 as usize].ty.clone(),
-                Some(_) => inferred.clone(),
+                Some(_) => self
+                    .declared_property_type(value)
+                    .unwrap_or_else(|| inferred.clone()),
                 None => Ty::Unknown,
             },
+            "navigation_expression" => super::property_paths::property_name(value)
+                .and_then(|name| self.declared_property_type(name))
+                .map(|declared| {
+                    // `a?.b`: null when `a` is.
+                    let read_safely = inferred.nullability() == Nullability::Nullable;
+                    if read_safely {
+                        declared.nullable()
+                    } else {
+                        declared
+                    }
+                })
+                .unwrap_or_else(|| inferred.clone()),
             _ => inferred.clone(),
         }
     }
@@ -408,7 +443,7 @@ impl<'db> Inferrer<'db> {
 
     /// Pops the innermost scope and gives what was narrowed in it, in the
     /// order narrowed — what a branch ending there knows.
-    pub(super) fn pop_scope_narrowings(&mut self) -> Vec<(LocalId, Ty)> {
+    pub(super) fn pop_scope_narrowings(&mut self) -> Vec<(Narrowed, Ty)> {
         let popped = self
             .scopes
             .pop()
@@ -422,7 +457,7 @@ impl<'db> Inferrer<'db> {
     }
 
     /// What the innermost scope has narrowed so far.
-    pub(super) fn scope_narrowings(&self) -> Vec<(LocalId, Ty)> {
+    pub(super) fn scope_narrowings(&self) -> Vec<(Narrowed, Ty)> {
         self.scopes
             .last()
             .map(|scope| scope.narrowed.clone())
@@ -430,7 +465,7 @@ impl<'db> Inferrer<'db> {
     }
 
     /// What the scope popped last narrowed (a branch body's block).
-    pub(super) fn take_last_popped(&mut self) -> Vec<(LocalId, Ty)> {
+    pub(super) fn take_last_popped(&mut self) -> Vec<(Narrowed, Ty)> {
         std::mem::take(&mut self.last_popped)
     }
 
@@ -637,16 +672,25 @@ impl<'db> Inferrer<'db> {
     }
 
     pub(super) fn local_type(&self, local: LocalId) -> Ty {
+        self.narrowed_type(Narrowed::Local(local))
+    }
+
+    /// A local's or a stable property's type here: as last narrowed, or as
+    /// declared.
+    pub(super) fn narrowed_type(&self, subject: Narrowed) -> Ty {
         self.scopes
             .iter()
             .rev()
             .flat_map(|scope| scope.narrowed.iter().rev())
-            .find(|(narrowed, _)| *narrowed == local)
+            .find(|(narrowed, _)| *narrowed == subject)
             .map(|(_, ty)| ty.clone())
-            .unwrap_or_else(|| self.result.locals[local.0 as usize].ty.clone())
+            .unwrap_or_else(|| match subject {
+                Narrowed::Local(local) => self.result.locals[local.0 as usize].ty.clone(),
+                Narrowed::Property(path) => self.property_paths[path.0 as usize].ty.clone(),
+            })
     }
 
-    pub(super) fn narrow(&mut self, narrowings: &[(LocalId, Ty)]) {
+    pub(super) fn narrow(&mut self, narrowings: &[(Narrowed, Ty)]) {
         let implied = self.implied_not_null(narrowings);
         let scope = self.scopes.last_mut().expect("there's always a scope");
         scope.narrowed.extend(narrowings.iter().cloned());
@@ -654,23 +698,27 @@ impl<'db> Inferrer<'db> {
     }
 
     /// The values a local narrowed to not null vouches for: what its
-    /// initializer's safe chain started from, transitively.
-    fn implied_not_null(&self, narrowings: &[(LocalId, Ty)]) -> Vec<(LocalId, Ty)> {
+    /// initializer's safe chain went through, transitively.
+    fn implied_not_null(&self, narrowings: &[(Narrowed, Ty)]) -> Vec<(Narrowed, Ty)> {
         if self.not_null_implies.is_empty() {
             return Vec::new();
         }
-        let mut implied: Vec<(LocalId, Ty)> = Vec::new();
-        for (local, ty) in narrowings {
-            if !self.excludes_null(ty) {
+        let mut implied: Vec<(Narrowed, Ty)> = Vec::new();
+        let mut pending: Vec<Narrowed> = narrowings
+            .iter()
+            .filter(|(_, ty)| self.excludes_null(ty))
+            .map(|(narrowed, _)| *narrowed)
+            .collect();
+        while let Some(current) = pending.pop() {
+            let Narrowed::Local(local) = current else {
                 continue;
-            }
-            let mut current = *local;
-            while let Some(root) = self.not_null_implies.get(&current).copied() {
-                if implied.iter().any(|(known, _)| *known == root) {
-                    break;
+            };
+            for vouched in self.not_null_implies.get(&local).into_iter().flatten() {
+                if implied.iter().any(|(known, _)| known == vouched) {
+                    continue;
                 }
-                implied.push((root, self.local_type(root).non_null()));
-                current = root;
+                implied.push((*vouched, self.narrowed_type(*vouched).non_null()));
+                pending.push(*vouched);
             }
         }
         implied
@@ -686,18 +734,21 @@ impl<'db> Inferrer<'db> {
         if start != initializer.start_byte() as u32 {
             return;
         }
-        let stable = |narrowings: Vec<(LocalId, Ty)>, inferrer: &Self| -> Vec<(LocalId, Ty)> {
+        let kept = |narrowings: Vec<(Narrowed, Ty)>, inferrer: &Self| -> Vec<(Narrowed, Ty)> {
             narrowings
                 .into_iter()
                 .filter(|(narrowed, _)| {
-                    inferrer.is_stable_local(*narrowed)
-                        || inferrer.local_kind(*narrowed) == LocalKind::Variable
+                    let reassignable = matches!(
+                        narrowed,
+                        Narrowed::Local(local) if inferrer.local_kind(*local) == LocalKind::Variable
+                    );
+                    inferrer.is_stable(*narrowed) || reassignable
                 })
                 .collect()
         };
         let alias = super::narrowing::Narrowing {
-            when_true: stable(narrowing.when_true, self),
-            when_false: stable(narrowing.when_false, self),
+            when_true: kept(narrowing.when_true, self),
+            when_false: kept(narrowing.when_false, self),
             receiver_when_true: None,
         };
         self.condition_aliases.insert(local, alias);
@@ -706,33 +757,44 @@ impl<'db> Inferrer<'db> {
     /// `variable` is assigned: what a condition said of its old value no
     /// longer holds.
     pub(super) fn forget_aliased(&mut self, variable: LocalId) {
+        let assigned = Narrowed::Local(variable);
         for alias in self.condition_aliases.values_mut() {
             alias
                 .when_true
-                .retain(|(narrowed, _)| *narrowed != variable);
+                .retain(|(narrowed, _)| *narrowed != assigned);
             alias
                 .when_false
-                .retain(|(narrowed, _)| *narrowed != variable);
+                .retain(|(narrowed, _)| *narrowed != assigned);
         }
     }
 
-    /// A local whose value can't change once set: a `val` or a parameter.
-    fn is_stable_local(&self, local: LocalId) -> bool {
-        matches!(
-            self.local_kind(local),
-            LocalKind::Value | LocalKind::Parameter | LocalKind::LambdaParameter
-        )
+    /// A value that can't change once set: a `val`, a parameter, or a
+    /// stable property of one (only those get a path).
+    pub(super) fn is_stable(&self, narrowed: Narrowed) -> bool {
+        match narrowed {
+            Narrowed::Local(local) => matches!(
+                self.local_kind(local),
+                LocalKind::Value
+                    | LocalKind::Parameter
+                    | LocalKind::LambdaParameter
+                    | LocalKind::ImplicitIt
+            ),
+            Narrowed::Property(_) => true,
+        }
     }
 
     /// Remembers that `local`, a `val` whose initializer is a safe chain
-    /// from a value that can't change (`val chain = info?.let { … }`), is
-    /// not null only when that value isn't.
+    /// through values that can't change (`val chain = info?.let { … }`),
+    /// is not null only when they aren't.
     fn remember_not_null_implication(&mut self, local: LocalId, initializer: SyntaxNode<'_>) {
-        let Some((root, _)) = self.asserted_not_null(initializer) else {
-            return;
-        };
-        if self.is_stable_local(root) && root != local {
-            self.not_null_implies.insert(local, root);
+        let vouched: Vec<Narrowed> = self
+            .not_null_chain(initializer)
+            .into_iter()
+            .map(|(narrowed, _)| narrowed)
+            .filter(|narrowed| self.is_stable(*narrowed) && *narrowed != Narrowed::Local(local))
+            .collect();
+        if !vouched.is_empty() {
+            self.not_null_implies.insert(local, vouched);
         }
     }
 

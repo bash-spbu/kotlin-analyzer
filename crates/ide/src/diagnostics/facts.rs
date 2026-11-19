@@ -93,9 +93,10 @@ pub(super) fn diagnostics(
     found
 }
 
-/// The language version from which the compiler reports useless casts and
-/// casts that never succeed (its data-flow warnings, `KT-50965`).
-const DATA_FLOW_CAST_WARNINGS: KotlinVersion = KotlinVersion::new(2, 3);
+/// The language version from which the compiler reports useless casts,
+/// casts that never succeed, `!!`, `?.` and `?:` on a value that can't be
+/// null (its data-flow warnings, `EnableDfaWarningsInK2`, `KT-50965`).
+const DATA_FLOW_WARNINGS: KotlinVersion = KotlinVersion::new(2, 3);
 
 /// Casts and type checks whose outcome the types decide, as Kotlin words
 /// them.
@@ -107,7 +108,7 @@ fn type_operations(
     let inference = hir::infer_file(db, file);
     let data_flow_warnings = hir::compiler_options(db, file)
         .language_version()
-        .is_some_and(|version| version >= DATA_FLOW_CAST_WARNINGS);
+        .is_some_and(|version| version >= DATA_FLOW_WARNINGS);
     let mut found = Vec::new();
     for finding in inference.type_operations() {
         let (check, message, fixes) = match &finding.kind {
@@ -285,12 +286,21 @@ fn deprecations(
     found
 }
 
-/// `x!!`, `x?.f`, `x ?: y`, `x == null` where `x` can't be null.
+/// `x!!`, `x?.f`, `x ?: y`, `x == null` where `x` can't be null. The
+/// compiler reports a comparison always; the others as data-flow warnings
+/// only, from Kotlin 2.3.
 fn null_checks(db: &RootDatabase, file: SourceFile, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
     let inference = hir::infer_file(db, file);
     let text = file.text(db);
+    let data_flow_warnings = hir::compiler_options(db, file)
+        .language_version()
+        .is_some_and(|version| version >= DATA_FLOW_WARNINGS);
     let mut found = Vec::new();
     for check in inference.redundant_null_checks() {
+        let is_comparison = matches!(check.kind, NullCheckKind::Comparison { .. });
+        if !is_comparison && !data_flow_warnings {
+            continue;
+        }
         let ty = hir::display_type(db, &check.ty);
         let (kind, message, fix) = match &check.kind {
             NullCheckKind::NotNullAssertion => (

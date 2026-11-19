@@ -436,7 +436,13 @@ impl<'parse> Lowering<'parse> {
     ) -> Option<ItemId> {
         let variable = property.variable()?;
         let name_node = variable.name()?;
-        let (visibility, modifiers) = self.modifiers(property.modifiers(), container);
+        let (visibility, mut modifiers) = self.modifiers(property.modifiers(), container);
+        if property.has_getter() {
+            modifiers.insert(Modifiers::GETTER);
+        }
+        if property.is_delegated() {
+            modifiers.insert(Modifiers::DELEGATED);
+        }
         let item = NewItem {
             name: self.name(name_node),
             kind: ItemKind::Property {
