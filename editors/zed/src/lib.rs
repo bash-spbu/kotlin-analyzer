@@ -7,8 +7,11 @@
 //! formatter they choose (`formatting.formatter`: ktrs unless `ktfmt` or
 //! `off`) added as `formatting.path` unless they give one: the formatter on
 //! the PATH, else its pinned release, downloaded once like the server's.
-//! Code lenses are off unless they say (`codeLens`): Zed can't run their
-//! commands, and tests run from the gutter instead (`runnables.scm`).
+//! Code lenses show references, what a member overrides and what implements
+//! it, with `editor.action.showReferences`, which Zed runs itself (with
+//! `"code_lens": "on"` in Zed's settings); the test lenses are off unless
+//! they say: Zed can't run their command, and tests run from the gutter
+//! (`runnables.scm`).
 //! The same binary is the debugger (`debugging`).
 
 mod debugging;
@@ -87,7 +90,9 @@ impl zed::Extension for KotlinAnalyzer {
         let options = settings
             .as_ref()
             .and_then(|settings| settings.initialization_options.clone());
-        let options = with_code_lenses_off_by_default(options);
+        let options = with_zed_code_lenses(Some(
+            options.unwrap_or_else(|| Value::Object(Default::default())),
+        ));
         Ok(self.with_formatter(options, settings.as_ref(), language_server_id, worktree))
     }
 
@@ -199,7 +204,8 @@ impl zed::Extension for KotlinAnalyzer {
         resolved_label: String,
         debug_adapter_name: String,
     ) -> Option<DebugScenario> {
-        let is_ours = locator_name == debugging::LOCATOR && debug_adapter_name == debugging::ADAPTER;
+        let is_ours =
+            locator_name == debugging::LOCATOR && debug_adapter_name == debugging::ADAPTER;
         if !is_ours {
             return None;
         }
@@ -273,6 +279,7 @@ impl zed::Extension for KotlinAnalyzer {
         let configuration = settings
             .as_ref()
             .and_then(|settings| settings.settings.clone());
+        let configuration = with_zed_code_lenses(configuration);
         Ok(self.with_formatter(
             configuration,
             settings.as_ref(),
@@ -368,14 +375,23 @@ impl KotlinAnalyzer {
     }
 }
 
-/// `options` with `codeLens` off when they don't set it: the lenses' commands
-/// are the client's to run, and Zed runs only rust-analyzer's.
-fn with_code_lenses_off_by_default(options: Option<Value>) -> Option<Value> {
-    let mut options = options.unwrap_or_else(|| Value::Object(Default::default()));
-    if let Some(object) = options.as_object_mut() {
-        object
-            .entry("codeLens")
-            .or_insert_with(|| zed::serde_json::json!({ "references": false, "tests": false }));
+/// `options` with the code lenses Zed can run: those showing locations
+/// with `editor.action.showReferences` (Zed runs it itself), the test ones
+/// off (Zed runs only rust-analyzer's other commands). What `options` say
+/// about `codeLens` stays; `None` (settings that don't change) stays.
+fn with_zed_code_lenses(options: Option<Value>) -> Option<Value> {
+    let mut options = options?;
+    let Some(object) = options.as_object_mut() else {
+        return Some(options);
+    };
+    let code_lens = object
+        .entry("codeLens")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let Some(code_lens) = code_lens.as_object_mut() {
+        code_lens
+            .entry("locationsCommand")
+            .or_insert_with(|| Value::from("editor.action.showReferences"));
+        code_lens.entry("tests").or_insert(Value::Bool(false));
     }
     Some(options)
 }
@@ -558,3 +574,36 @@ fn is_file(path: &str) -> bool {
 }
 
 zed::register_extension!(KotlinAnalyzer);
+
+#[cfg(test)]
+mod tests {
+    use super::with_zed_code_lenses;
+    use zed_extension_api::serde_json::json;
+
+    #[test]
+    fn code_lenses_show_locations_with_zeds_command_and_tests_stay_off() {
+        assert_eq!(
+            with_zed_code_lenses(Some(json!({}))),
+            Some(json!({
+                "codeLens": { "locationsCommand": "editor.action.showReferences", "tests": false }
+            }))
+        );
+        assert_eq!(
+            with_zed_code_lenses(Some(
+                json!({ "codeLens": { "hierarchy": false, "tests": true } })
+            )),
+            Some(json!({
+                "codeLens": {
+                    "hierarchy": false,
+                    "tests": true,
+                    "locationsCommand": "editor.action.showReferences",
+                }
+            }))
+        );
+        assert_eq!(
+            with_zed_code_lenses(None),
+            None,
+            "no settings: nothing changes"
+        );
+    }
+}

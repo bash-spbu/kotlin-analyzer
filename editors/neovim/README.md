@@ -69,10 +69,10 @@ require("kotlin_analyzer").setup({
   cmd = nil,            -- e.g. { "/path/to/kotlin-analyzer" }
   download = true,      -- download the release when there's no binary
   java = true,          -- also serve Java buffers (false next to jdtls)
-  codelens = true,      -- show code lenses: reference counts, ▶ Run test
+  codelens = true,      -- show code lenses: reference counts, ↑ overridden, ↓ implementations, ▶ Run test
   init_options = {
     diagnostics = { disabled = { "unused-import" }, experimental = false },
-    codeLens = { references = true, tests = true },
+    codeLens = { references = true, hierarchy = true, tests = true },
     gradleExport = true,
     projectJson = nil,  -- a model exported beforehand
   },

@@ -7,7 +7,7 @@ import * as vscode from "vscode";
 export interface ServerSettings {
   diagnostics: { disabled: string[]; experimental: boolean };
   formatting: { formatter: string; style: string; path?: string };
-  codeLens: { references: boolean; tests: boolean };
+  codeLens: { references: boolean; hierarchy: boolean; tests: boolean };
 }
 
 export interface InitializationOptions extends ServerSettings {
@@ -36,6 +36,7 @@ export function serverSettings(
     },
     codeLens: {
       references: configuration.get<boolean>("codeLens.references") ?? true,
+      hierarchy: configuration.get<boolean>("codeLens.hierarchy") ?? true,
       tests: configuration.get<boolean>("codeLens.tests") ?? true,
     },
   };

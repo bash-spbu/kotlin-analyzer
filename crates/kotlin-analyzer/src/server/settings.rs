@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use ide::{Check, DiagnosticsConfig};
 use serde_json::Value;
 
-use super::code_lens::CodeLensConfig;
+use super::code_lens::{CodeLensConfig, LocationsCommand};
 use super::formatting::{Formatter, FormatterSetup, FormattingConfig, Program, Style};
 
 /// How much the log writes as it happens: `log` in `initializationOptions`
@@ -80,12 +80,21 @@ pub(super) fn changed_code_lens_config(settings: &Value) -> Option<CodeLensConfi
     ours.get("codeLens").map(read_code_lens)
 }
 
-/// `references` and `tests`, each on unless `false`.
+/// `references`, `hierarchy` and `tests`, each on unless `false`;
+/// `locationsCommand`, `kotlin-analyzer.showReferences` unless
+/// `editor.action.showReferences`.
 fn read_code_lens(code_lens: &Value) -> CodeLensConfig {
     let enabled = |key: &str| code_lens.get(key).and_then(Value::as_bool).unwrap_or(true);
+    let locations_command = code_lens
+        .get("locationsCommand")
+        .and_then(Value::as_str)
+        .and_then(LocationsCommand::from_setting)
+        .unwrap_or(LocationsCommand::KotlinAnalyzer);
     CodeLensConfig {
         references: enabled("references"),
+        hierarchy: enabled("hierarchy"),
         tests: enabled("tests"),
+        locations_command,
     }
 }
 
@@ -211,18 +220,28 @@ mod tests {
         assert_eq!(
             code_lens_config(Some(&options)),
             CodeLensConfig {
-                references: true,
-                tests: false
+                tests: false,
+                ..CodeLensConfig::default()
             }
         );
-        let changed =
-            serde_json::json!({ "kotlin-analyzer": { "codeLens": { "references": false } } });
+        let changed = serde_json::json!({ "kotlin-analyzer": { "codeLens": {
+            "references": false,
+            "hierarchy": false,
+            "locationsCommand": "editor.action.showReferences",
+        } } });
         assert_eq!(
             changed_code_lens_config(&changed),
             Some(CodeLensConfig {
                 references: false,
-                tests: true
+                hierarchy: false,
+                tests: true,
+                locations_command: LocationsCommand::Editor,
             })
+        );
+        let unknown_command = serde_json::json!({ "codeLens": { "locationsCommand": "run.it" } });
+        assert_eq!(
+            code_lens_config(Some(&unknown_command)).locations_command,
+            LocationsCommand::KotlinAnalyzer
         );
         assert_eq!(changed_code_lens_config(&serde_json::json!({})), None);
     }

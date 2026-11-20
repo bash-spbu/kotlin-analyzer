@@ -1,11 +1,13 @@
 //! `textDocument/codeLens` for Kotlin files: over each declaration, how
-//! many references it has (counted when the editor asks, see
+//! many references it has; over each member that overrides others, what it
+//! overrides; over each class and member that can be implemented, its
+//! implementations (each found when the editor asks, see
 //! `codeLens/resolve`); over each test function and test class, a run of
 //! it by the build, as a Gradle test filter.
 
 use hir::{
-    FileId, ItemId, ItemKind, ItemTree, Language, Path, Resolution, RootDatabase, SourceDatabase,
-    SourceFile,
+    ClassKind, FileId, ItemId, ItemKind, ItemTree, Language, Modifiers, Path, Resolution,
+    RootDatabase, SourceDatabase, SourceFile, Visibility,
 };
 use syntax::TextRange;
 
@@ -20,6 +22,10 @@ pub struct CodeLens {
 pub enum CodeLensKind {
     /// The references to the declaration named at `range`, to count.
     References,
+    /// What the member named at `range` overrides, to find (↑).
+    Overridden,
+    /// What implements the class or member named at `range`, to find (↓).
+    Implementations,
     /// Running a test function, or every test in a class.
     RunTests { target: TestTarget, filter: String },
 }
@@ -66,6 +72,19 @@ pub(crate) fn code_lenses(db: &RootDatabase, file: FileId) -> Vec<CodeLens> {
             continue;
         }
         let range = source_map.ranges(item_id).name_range;
+        let overrides = item.modifiers.contains(Modifiers::OVERRIDE);
+        if overrides {
+            lenses.push(CodeLens {
+                range,
+                kind: CodeLensKind::Overridden,
+            });
+        }
+        if can_be_implemented(&tree, item_id) {
+            lenses.push(CodeLens {
+                range,
+                kind: CodeLensKind::Implementations,
+            });
+        }
         if let Some(target) = tests.target(item_id) {
             lenses.push(CodeLens {
                 range,
@@ -81,6 +100,48 @@ pub(crate) fn code_lenses(db: &RootDatabase, file: FileId) -> Vec<CodeLens> {
         });
     }
     lenses
+}
+
+/// Whether a class or member may have implementations: an interface, an
+/// abstract, open or sealed class; a member of one of those that is
+/// abstract, open, an interface's, or an override not made final. Private
+/// ones can't be overridden.
+fn can_be_implemented(tree: &ItemTree, item_id: ItemId) -> bool {
+    let item = tree.item(item_id);
+    if item.visibility == Visibility::Private {
+        return false;
+    }
+    match item.kind {
+        ItemKind::Class(_) => is_inheritable(tree, item_id),
+        ItemKind::Function | ItemKind::Property { .. } => {
+            let Some(class) = item.parent else {
+                return false;
+            };
+            let in_interface = tree.item(class).kind == ItemKind::Class(ClassKind::Interface);
+            let declared_open = [Modifiers::ABSTRACT, Modifiers::OPEN]
+                .into_iter()
+                .any(|modifier| item.modifiers.contains(modifier));
+            let open_override = item.modifiers.contains(Modifiers::OVERRIDE)
+                && !item.modifiers.contains(Modifiers::FINAL);
+            is_inheritable(tree, class) && (in_interface || declared_open || open_override)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a class can be extended: an interface, or an abstract, open or
+/// sealed class.
+fn is_inheritable(tree: &ItemTree, class: ItemId) -> bool {
+    let item = tree.item(class);
+    match item.kind {
+        ItemKind::Class(ClassKind::Interface) => true,
+        ItemKind::Class(ClassKind::Class) => {
+            [Modifiers::ABSTRACT, Modifiers::OPEN, Modifiers::SEALED]
+                .into_iter()
+                .any(|modifier| item.modifiers.contains(modifier))
+        }
+        _ => false,
+    }
 }
 
 /// Which of a file's items are tests: functions with a test annotation, and

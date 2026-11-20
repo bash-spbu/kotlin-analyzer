@@ -13,6 +13,61 @@ use syntax::{Language, SyntaxNode, TextRange};
 
 use crate::NavigationTarget;
 
+/// Where a declaration is declared, for `textDocument/declaration`.
+enum Declared {
+    /// An `actual`'s `expect`s.
+    Expected(Vec<ItemLocation>),
+    /// What a member that overrides others overrides directly.
+    Overridden(Vec<ItemLocation>),
+    /// Anything else: as its definition.
+    Itself,
+}
+
+impl Declared {
+    fn of(db: &RootDatabase, declaration: ItemLocation) -> Declared {
+        let expected: Vec<ItemLocation> = hir::expect_actual_family(db, declaration)
+            .into_iter()
+            .filter(|member| {
+                hir::item_tree(db, member.container)
+                    .item(member.item)
+                    .modifiers
+                    .contains(hir::Modifiers::EXPECT)
+            })
+            .collect();
+        if !expected.is_empty() {
+            return Declared::Expected(expected);
+        }
+        let overridden = hir::overridden_directly(db, declaration);
+        if !overridden.is_empty() {
+            return Declared::Overridden(overridden);
+        }
+        Declared::Itself
+    }
+}
+
+/// `textDocument/declaration` for a member's name or use, only what it
+/// overrides directly (the ↑ code lens); nothing for anything else.
+pub(crate) fn goto_super(db: &RootDatabase, file: FileId, offset: usize) -> Vec<NavigationTarget> {
+    let Some(name) = name_at(db, file, offset) else {
+        return Vec::new();
+    };
+    let NameTarget::Declarations(declarations) = name.target else {
+        return Vec::new();
+    };
+    let mut overridden: Vec<ItemLocation> = Vec::new();
+    for declaration in declarations {
+        for member in hir::overridden_directly(db, declaration) {
+            if !overridden.contains(&member) {
+                overridden.push(member);
+            }
+        }
+    }
+    overridden
+        .into_iter()
+        .filter_map(|location| NavigationTarget::of(db, location))
+        .collect()
+}
+
 /// The name under the cursor and what it refers to.
 pub(crate) struct NameAt {
     pub(crate) range: TextRange,
@@ -46,7 +101,8 @@ pub(crate) fn goto_definition(
 }
 
 /// `textDocument/declaration`: where the name at `offset` is declared for
-/// every platform — an `actual` declaration's `expect`; anything else, as
+/// every platform — an `actual` declaration's `expect` — or, for a member
+/// that overrides others, what it overrides directly; anything else, as
 /// its definition.
 pub(crate) fn goto_declaration(
     db: &RootDatabase,
@@ -64,19 +120,10 @@ pub(crate) fn goto_declaration(
     };
     let mut targets: Vec<hir::ItemLocation> = Vec::new();
     for declaration in declarations {
-        let expected: Vec<hir::ItemLocation> = hir::expect_actual_family(db, declaration)
-            .into_iter()
-            .filter(|member| {
-                hir::item_tree(db, member.container)
-                    .item(member.item)
-                    .modifiers
-                    .contains(hir::Modifiers::EXPECT)
-            })
-            .collect();
-        let found = if expected.is_empty() {
-            vec![declaration]
-        } else {
-            expected
+        let found = match Declared::of(db, declaration) {
+            Declared::Expected(expected) => expected,
+            Declared::Overridden(overridden) => overridden,
+            Declared::Itself => vec![declaration],
         };
         for location in found {
             if !targets.contains(&location) {

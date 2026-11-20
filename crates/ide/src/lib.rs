@@ -336,6 +336,11 @@ impl Analysis {
         self.with_db(|db| hierarchy::outgoing_calls(db, key))
     }
 
+    /// What the member named at `offset` overrides directly.
+    pub fn goto_super(&self, file: FileId, offset: usize) -> Cancellable<Vec<NavigationTarget>> {
+        self.with_db(|db| goto_definition::goto_super(db, file, offset))
+    }
+
     pub fn goto_implementation(
         &self,
         file: FileId,

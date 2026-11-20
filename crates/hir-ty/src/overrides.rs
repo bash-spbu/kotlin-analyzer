@@ -1,6 +1,7 @@
 //! Which members are one member as far as renaming goes: a function or
 //! property, what it overrides, and what overrides those in the workspace;
-//! and what implements a class or member there (`textDocument/implementation`).
+//! what implements a class or member there (`textDocument/implementation`);
+//! and what a member overrides directly (`textDocument/declaration`).
 
 use base_db::{SourceDatabase, SourceFile};
 use hir_def::item_tree::{ItemKind, Signature};
@@ -53,6 +54,27 @@ pub fn override_family(db: &dyn SourceDatabase, member: ItemLocation) -> Vec<Ite
         }
     }
     family
+}
+
+/// The members `member` overrides directly, nearest first: in each
+/// supertype branch the nearest — one it overrides only through another of
+/// them is left out (`C.f` overrides `B.f`, not `A.f` that `B.f` overrides).
+/// Nothing for a member of no class, or one overriding nothing.
+pub fn overridden_directly(db: &dyn SourceDatabase, member: ItemLocation) -> Vec<ItemLocation> {
+    let ItemContainer::File(file) = member.container else {
+        return Vec::new();
+    };
+    let types = Types::new(db, file);
+    let mut direct: Vec<ItemLocation> = Vec::new();
+    for candidate in types.overridden(member) {
+        let through_another = direct
+            .iter()
+            .any(|kept| types.overridden(*kept).contains(&candidate));
+        if !through_another {
+            direct.push(candidate);
+        }
+    }
+    direct
 }
 
 /// What implements `declaration` in the workspace: a class's or an

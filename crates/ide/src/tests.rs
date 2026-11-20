@@ -4331,6 +4331,8 @@ fn lenses_of(fixture: &Fixture, path: &str) -> String {
             let name = &text[lens.range.as_range()];
             match &lens.kind {
                 crate::CodeLensKind::References => format!("{name}: references"),
+                crate::CodeLensKind::Overridden => format!("{name}: overridden"),
+                crate::CodeLensKind::Implementations => format!("{name}: implementations"),
                 crate::CodeLensKind::RunTests { target, filter } => {
                     format!("{name}: run {target:?} {filter}")
                 }
@@ -4472,4 +4474,131 @@ fun use(metrics: Metrics) {
 
         in `a.Metrics`"#]]
     .assert_eq(&hover_of("success("));
+}
+
+#[test]
+fn the_declaration_of_an_override_is_what_it_overrides_directly() {
+    // The nearest in each supertype branch, nearest first: `Square.area`
+    // declares `Polygon.area`, not `Shape.area` that one overrides; `name`
+    // both interfaces' (two branches); a use the same as the declaration;
+    // an overload or a member overriding nothing, itself.
+    let fixture = r#"
+//- /app/a/Shapes.kt
+package a
+interface Shape { fun area(): Double; val name: String }
+interface Named { val name: String }
+abstract class Polygon : Shape { override fun area(): Double = 0.0 }
+class Square : Polygon(), Named {
+    override fun area(): Double = 1.0
+    override val name: String = "square"
+    fun area(scale: Double): Double = scale
+    fun side(): Double = 1.0
+}
+//- /app/b/Use.kt
+package b
+import a.Square
+fun use(square: Square) = square.area() + square.side()
+"#;
+    let declarations = |marker: &str, marked: &str| {
+        let fixture = Fixture::parse(&fixture.replacen(marker, marked, 1));
+        let (file, offset) = fixture.cursor();
+        let analysis = analysis(&fixture);
+        let lines = |targets: Vec<crate::NavigationTarget>| -> String {
+            targets
+                .iter()
+                .map(|target| match target.file {
+                    crate::NavigationFile::Workspace(file) => {
+                        let text = fixture.vfs.contents(file).unwrap();
+                        let line = text[..target.focus_range.start as usize]
+                            .matches('\n')
+                            .count()
+                            + 1;
+                        format!(
+                            "{}:{line} {}",
+                            fixture.vfs.path(file).display(),
+                            target.name
+                        )
+                    }
+                    crate::NavigationFile::Library { .. } => "library".to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let declared = lines(analysis.goto_declaration(file, offset).unwrap());
+        let super_members = lines(analysis.goto_super(file, offset).unwrap());
+        format!("{declared} | super: {super_members}")
+    };
+    assert_eq!(
+        declarations(
+            "override fun area(): Double = 1.0",
+            "override fun ar$0ea(): Double = 1.0"
+        ),
+        "/app/a/Shapes.kt:4 area | super: /app/a/Shapes.kt:4 area"
+    );
+    assert_eq!(
+        declarations(
+            "override val name: String = \"square\"",
+            "override val na$0me: String = \"square\""
+        ),
+        // `Named` is a direct supertype; `Shape`, through `Polygon`.
+        "/app/a/Shapes.kt:3 name, /app/a/Shapes.kt:2 name | super: /app/a/Shapes.kt:3 name, /app/a/Shapes.kt:2 name"
+    );
+    assert_eq!(
+        declarations("square.area()", "square.ar$0ea()"),
+        "/app/a/Shapes.kt:4 area | super: /app/a/Shapes.kt:4 area"
+    );
+    assert_eq!(
+        declarations("fun area(scale", "fun ar$0ea(scale"),
+        "/app/a/Shapes.kt:8 area | super: "
+    );
+    assert_eq!(
+        declarations("square.side()", "square.si$0de()"),
+        "/app/a/Shapes.kt:9 side | super: "
+    );
+}
+
+#[test]
+fn hierarchy_lenses_are_over_overrides_and_what_can_be_implemented() {
+    // ↑ over each override; ↓ over interfaces, abstract, open and sealed
+    // classes and their abstract, open or interface members, and overrides
+    // in an open class not made final — not over a final class's members,
+    // a private one, nor a final override.
+    let fixture = Fixture::parse(
+        r#"
+//- /app/a/Shapes.kt
+package a
+interface Shape { fun area(): Double }
+abstract class Polygon : Shape {
+    abstract val sides: Int
+    override fun area(): Double = 0.0
+    private fun secret() = 1
+    fun plain() = 2
+}
+open class Box : Polygon() {
+    override val sides: Int = 4
+    final override fun area(): Double = 1.0
+}
+class Square : Polygon() { override val sides: Int = 4 }
+sealed class Result
+"#,
+    );
+    let hierarchy: Vec<String> = lenses_of(&fixture, "/app/a/Shapes.kt")
+        .lines()
+        .filter(|line| !line.ends_with(": references"))
+        .map(str::to_owned)
+        .collect();
+    expect![[r#"
+        Shape: implementations
+        area: implementations
+        Polygon: implementations
+        sides: implementations
+        area: overridden
+        area: implementations
+        Box: implementations
+        sides: overridden
+        sides: implementations
+        area: overridden
+        sides: overridden
+        Result: implementations"#]]
+    .assert_eq(&hierarchy.join("\n"));
 }

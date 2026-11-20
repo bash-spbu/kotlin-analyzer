@@ -44,7 +44,9 @@ pub use hir_ty::infer::{CompletionScope, PLACEHOLDER, Qualifier, completion_scop
 pub use hir_ty::infer::{LocalFinding, local_findings};
 pub use hir_ty::members::{Member, Types};
 pub use hir_ty::opt_in::{OptInUse, opt_in_uses};
-pub use hir_ty::overrides::{direct_subclasses, implementations, override_family};
+pub use hir_ty::overrides::{
+    direct_subclasses, implementations, overridden_directly, override_family,
+};
 pub use hir_ty::ty::ClassType;
 pub use hir_ty::type_references::{TypeReference, type_references};
 pub use hir_ty::{

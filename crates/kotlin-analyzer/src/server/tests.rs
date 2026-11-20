@@ -1542,3 +1542,58 @@ fn the_download_command_names_a_vendor_and_a_release_or_asks() {
     assert_eq!(super::chosen_jdk(&[json!("corretto"), json!(21)]), None);
     assert_eq!(super::chosen_jdk(&[json!("temurin"), json!("21")]), None);
 }
+
+#[test]
+fn hierarchy_lenses_show_what_a_member_overrides_and_what_implements_it() {
+    let root = workspace("hierarchy-lenses");
+    let sources = root.join("src/main/kotlin/app");
+    let file = sources.join("Providers.kt");
+    let text = "package app\n\nabstract class Provider {\n    abstract val id: String\n    open fun poll(): Int = 1\n}\n\nclass Bank : Provider() {\n    override val id = \"bank\"\n}\n\nclass Card : Provider() {\n    override val id = \"card\"\n}\n";
+    std::fs::write(&file, text).unwrap();
+    let (mut client, _) = Client::start_offering(
+        &root,
+        json!({
+            "gradleExport": false,
+            "codeLens": { "locationsCommand": "editor.action.showReferences" },
+        }),
+        json!({}),
+    );
+    client.wait_for_load(1);
+    client.open(&file, text);
+    let document = json!({ "textDocument": { "uri": uri(&file) } });
+    let lenses = client.request("textDocument/codeLens", document);
+    let resolved_at = |client: &mut Client, line: u32, found: &str| -> Value {
+        let lens = lenses
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lens| lens["range"]["start"]["line"] == line && lens["data"]["found"] == found)
+            .unwrap_or_else(|| panic!("no {found} lens on line {line}: {lenses}"))
+            .clone();
+        client.request("codeLens/resolve", lens)["command"].clone()
+    };
+    // ↑ from Bank.id to Provider.id, with Zed's command.
+    let overridden = resolved_at(&mut client, 8, "overridden");
+    assert_eq!(overridden["title"], "↑ Provider.id");
+    assert_eq!(overridden["command"], "editor.action.showReferences");
+    assert_eq!(
+        overridden["arguments"][2],
+        json!([{ "uri": uri(&file), "range": { "start": { "line": 3, "character": 17 }, "end": { "line": 3, "character": 19 } } }])
+    );
+    // ↓ from Provider.id to both overrides, from the class to both subclasses.
+    let implementations = resolved_at(&mut client, 3, "implementations");
+    assert_eq!(implementations["title"], "↓ 2 implementations");
+    assert_eq!(implementations["arguments"][2].as_array().unwrap().len(), 2);
+    assert_eq!(
+        resolved_at(&mut client, 2, "implementations")["title"],
+        "↓ 2 implementations"
+    );
+    // An open member nothing overrides: said, with nothing to run.
+    let none = resolved_at(&mut client, 4, "implementations");
+    assert_eq!(
+        none,
+        json!({ "title": "no implementations", "command": "" })
+    );
+    client.shut_down();
+    let _ = std::fs::remove_dir_all(&root);
+}

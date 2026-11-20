@@ -3,7 +3,7 @@
 //! tasks of the gutter's runnables (`tasks.json`) into debug scenarios.
 //! Configurations are the adapter's (`debug_adapter_schemas/Kotlin.json`).
 
-use zed_extension_api::serde_json::{Value, json};
+use zed_extension_api::serde_json::{json, Value};
 
 /// The adapter's name: `adapter` in `debug.json`, `debuggers` in the
 /// language's config.
@@ -95,7 +95,8 @@ mod tests {
 
     #[test]
     fn a_test_tasks_arguments_become_the_tests_configuration() {
-        let command = "'python3' '-I' '-c' 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))' \
+        let command =
+            "'python3' '-I' '-c' 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))' \
             'IyEv' 'zed-tests' '$ZED_FILE' '${ZED_CUSTOM_kotlin_package_name:}' \
             '${ZED_CUSTOM_kotlin_outer_class_name:}' '$ZED_CUSTOM_kotlin_class_name' \
             '${ZED_CUSTOM_kotlin_method_name:}'";
@@ -116,25 +117,34 @@ mod tests {
 
     #[test]
     fn other_tasks_have_no_test() {
-        assert_eq!(test_configuration("'python3' '-I' 'build' '$ZED_FILE'"), None);
+        assert_eq!(
+            test_configuration("'python3' '-I' 'build' '$ZED_FILE'"),
+            None
+        );
         assert_eq!(test_configuration("cargo test"), None);
-        assert_eq!(test_configuration("'zed-tests' '$ZED_FILE'"), None, "pieces missing");
+        assert_eq!(
+            test_configuration("'zed-tests' '$ZED_FILE'"),
+            None,
+            "pieces missing"
+        );
     }
 
     #[test]
-    fn the_shipped_test_tasks_all_debug() {
+    fn the_shipped_test_tasks_debug_and_their_profiled_runs_dont() {
         let tasks: Value =
             zed_extension_api::serde_json::from_str(include_str!("../languages/kotlin/tasks.json"))
                 .unwrap();
         let tasks = tasks.as_array().unwrap();
-        let test_tasks: Vec<&Value> = tasks.iter().filter(|task| task.get("tags").is_some()).collect();
+        let test_tasks: Vec<&Value> = tasks
+            .iter()
+            .filter(|task| task.get("tags").is_some())
+            .collect();
         assert!(!test_tasks.is_empty());
         for task in test_tasks {
-            assert!(
-                test_configuration(task["command"].as_str().unwrap()).is_some(),
-                "{}",
-                task["label"]
-            );
+            let label = task["label"].as_str().unwrap();
+            let debugs = test_configuration(task["command"].as_str().unwrap()).is_some();
+            // A test's ▶ menu offers its debugging once, beside its run.
+            assert_eq!(debugs, !label.starts_with("profile:"), "{label}");
         }
     }
 

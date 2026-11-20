@@ -282,6 +282,11 @@
           "default": true,
           "markdownDescription": "Show how many references each declaration has above it; clicking one shows them."
         },
+        "kotlin-analyzer.codeLens.hierarchy": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show *↑ Base.name* above a member that overrides others and *↓ N implementations* above interfaces, abstract, open and sealed classes and their overridable members; clicking one shows them."
+        },
         "kotlin-analyzer.codeLens.tests": {
           "type": "boolean",
           "default": true,

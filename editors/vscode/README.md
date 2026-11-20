@@ -147,6 +147,7 @@ In `tasks.json`:
 | `kotlin-analyzer.formatting.style` | `kotlinlang` (default), `meta` or `google` |
 | `kotlin-analyzer.formatting.path` | the formatter's executable, or ktfmt's `.jar` |
 | `kotlin-analyzer.codeLens.references` | reference counts above declarations |
+| `kotlin-analyzer.codeLens.hierarchy` | *↑ Base.name* over overrides, *↓ N implementations* over what can be implemented |
 | `kotlin-analyzer.codeLens.tests` | *▶ Run test* above tests and test classes |
 | `kotlin-analyzer.gradleExport` | export the Gradle model on start |
 | `kotlin-analyzer.projectJson` | a model exported beforehand |

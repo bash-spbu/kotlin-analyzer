@@ -95,7 +95,7 @@ fn run_check() -> ExitCode {
     if let ExitCode::FAILURE = report(check_formatter_pins(&root)) {
         return ExitCode::FAILURE;
     }
-    let steps: [&[&str]; 3] = [
+    let steps: [&[&str]; 4] = [
         &["fmt", "--all", "--check"],
         &[
             "clippy",
@@ -106,6 +106,14 @@ fn run_check() -> ExitCode {
             "warnings",
         ],
         &["test", "--workspace", "--quiet"],
+        // The Zed extension is a crate of its own (built for wasm); its
+        // tests run on the host.
+        &[
+            "test",
+            "--manifest-path",
+            "editors/zed/Cargo.toml",
+            "--quiet",
+        ],
     ];
     for arguments in steps {
         let status = Command::new(env_cargo())

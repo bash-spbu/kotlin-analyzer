@@ -88,11 +88,28 @@ classes holding them, top-level or nested one level
 --rerun` in the file's project — `app.OrderTest.creates an order`,
 `app.OrderTest`, `app.Outer$Nested` — through `gradle_task.py zed-tests`.
 
-The server's code lenses are off in Zed (`codeLens` defaults to
-`{ "references": false, "tests": false }`): Zed doesn't run their commands,
-and tests run from the gutter. Turning `references` on in `settings` shows
-the reference counts with `"code_lens": "on"`, but clicking one does
-nothing.
+## Navigating the hierarchy
+
+Zed has no gutter icons of a language server's own; with `"code_lens": "on"`
+in Zed's settings, the server's code lenses stand over declarations
+instead:
+
+- **↑ Base.name** over a member that overrides others: what it overrides
+  directly (`+N` when there are more);
+- **↓ N implementations** over an interface, an abstract, open or sealed
+  class and their overridable members: subclasses and overrides in the
+  workspace;
+- **N references**.
+
+Clicking one goes there (several: Zed lists them). The extension makes them
+run Zed's own `editor.action.showReferences` (`codeLens.locationsCommand`);
+`codeLens.hierarchy: false` or `references: false` in `settings` turns them
+off. The test lenses stay off (`codeLens.tests`): Zed can't run their
+command, and tests run from the gutter.
+
+From the keyboard, *editor: go to declaration* on an override (or a use of
+one) goes to what it overrides — IntelliJ's *Go to Super Method* — and
+*editor: go to implementation* to its overrides and subclasses.
 
 ## Profiling
 
