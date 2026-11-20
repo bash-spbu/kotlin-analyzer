@@ -74,15 +74,64 @@ describe("formatterAsset", () => {
   });
 });
 
+/** A tar record: a header of `type` named `name` (its ustar fields), then `data`. */
+function tarRecord(name: string, type: string, data: string, prefix = ""): Buffer {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write(Buffer.byteLength(data).toString(8).padStart(11, "0"), 124, "ascii");
+  header.write(type, 156, "ascii");
+  header.write("ustar\0", 257, "ascii");
+  header.write(prefix, 345, 155, "utf8");
+  const body = Buffer.alloc(Math.ceil(Buffer.byteLength(data) / 512) * 512);
+  body.write(data, "utf8");
+  return Buffer.concat([header, body]);
+}
+
+/** A pax record, `<length> path=<value>\n`, its length counting itself. */
+function paxPathRecord(value: string): string {
+  const rest = ` path=${value}\n`;
+  let length = Buffer.byteLength(rest) + 1;
+  while (`${length}`.length + Buffer.byteLength(rest) !== length) {
+    length += 1;
+  }
+  return `${length}${rest}`;
+}
+
 describe("tarMember", () => {
-  it("finds a file by its whole path, a long one too", async () => {
-    const long = `${"directory-".repeat(12)}/ktrs`;
+  const long = `${"directory-".repeat(12)}/ktrs`;
+
+  it("finds a file by its whole path", async () => {
     const archive = gunzipSync(
-      await tarGz({ "ktrs-v0.5.3/README.md": "readme", "ktrs-v0.5.3/ktrs": "the program", [long]: "deep" }),
+      await tarGz({ "ktrs-v0.5.3/README.md": "readme", "ktrs-v0.5.3/ktrs": "the program" }),
     );
     assert.equal(tarMember(archive, "ktrs-v0.5.3/ktrs")?.toString(), "the program");
-    assert.equal(tarMember(archive, long)?.toString(), "deep");
     assert.equal(tarMember(archive, "ktrs-v0.5.3/ktfmt"), undefined);
+  });
+
+  it("reads a long name as ustar's prefix, GNU tar's long link or pax's path writes it", () => {
+    const end = Buffer.alloc(1024);
+    const ustar = Buffer.concat([
+      tarRecord("ktrs", "0", "decoy"),
+      tarRecord("ktrs", "0", "deep", "directory-".repeat(12)),
+      end,
+    ]);
+    const gnu = Buffer.concat([
+      tarRecord("././@LongLink", "L", `${long}\0`),
+      tarRecord(long.slice(0, 100), "0", "deep"),
+      end,
+    ]);
+    const pax = Buffer.concat([
+      tarRecord("PaxHeaders/ktrs", "x", paxPathRecord(long)),
+      tarRecord(long.slice(0, 100), "0", "deep"),
+      tarRecord("ktrs", "0", "after"),
+      end,
+    ]);
+    assert.equal(tarMember(ustar, long)?.toString(), "deep");
+    assert.equal(tarMember(gnu, long)?.toString(), "deep");
+    assert.equal(tarMember(pax, long)?.toString(), "deep");
+    // A long name is the next header's only.
+    assert.equal(tarMember(pax, "ktrs")?.toString(), "after");
+    assert.equal(tarMember(gnu, long.slice(0, 100)), undefined);
   });
 });
 

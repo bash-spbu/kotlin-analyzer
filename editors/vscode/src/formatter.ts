@@ -148,12 +148,14 @@ export async function downloadFormatter(asset: FormatterAsset, destination: stri
 const BLOCK = 512;
 
 /**
- * The file at `member` in the (uncompressed) tar `archive`. Reads ustar
- * headers (a name up to 100 bytes, or 255 with the prefix field) and steps
- * over pax and GNU long-name records.
+ * The file at `member` in the (uncompressed) tar `archive`. A name is a
+ * ustar header's (up to 100 bytes, or 255 with the prefix field), or the
+ * long one a record before it gives: GNU tar's `././@LongLink` (type `L`)
+ * or a pax header's `path` (type `x`).
  */
 export function tarMember(archive: Buffer, member: string): Buffer | undefined {
   let offset = 0;
+  let longName: string | undefined;
   while (offset + BLOCK <= archive.length) {
     const header = archive.subarray(offset, offset + BLOCK);
     const isEnd = header.every((byte) => byte === 0);
@@ -162,15 +164,50 @@ export function tarMember(archive: Buffer, member: string): Buffer | undefined {
     }
     const size = parseInt(field(header, 124, 12).trim() || "0", 8);
     const type = String.fromCharCode(header[156]);
-    const prefix = field(header, 345, 155);
-    const name = field(header, 0, 100);
-    const fullName = prefix === "" ? name : `${prefix}/${name}`;
     const dataStart = offset + BLOCK;
-    const isFile = type === "0" || type === "\0";
-    if (isFile && fullName === member) {
-      return archive.subarray(dataStart, dataStart + size);
-    }
+    const data = archive.subarray(dataStart, dataStart + size);
     offset = dataStart + Math.ceil(size / BLOCK) * BLOCK;
+    if (type === "L") {
+      longName = field(data, 0, data.length);
+      continue;
+    }
+    if (type === "x") {
+      longName = paxPath(data) ?? longName;
+      continue;
+    }
+    const name = longName ?? ustarName(header);
+    longName = undefined;
+    const isFile = type === "0" || type === "\0";
+    if (isFile && name === member) {
+      return data;
+    }
+  }
+  return undefined;
+}
+
+/** A ustar header's name: its prefix field, if any, then its name field. */
+function ustarName(header: Buffer): string {
+  const prefix = field(header, 345, 155);
+  const name = field(header, 0, 100);
+  return prefix === "" ? name : `${prefix}/${name}`;
+}
+
+/** The `path` of a pax extended header's records (`<length> path=<value>\n`). */
+function paxPath(records: Buffer): string | undefined {
+  let offset = 0;
+  while (offset < records.length) {
+    const space = records.indexOf(0x20, offset);
+    const length = parseInt(records.subarray(offset, space).toString("utf8"), 10);
+    const isMalformed = space === -1 || !(length > 0);
+    if (isMalformed) {
+      return undefined;
+    }
+    const record = records.subarray(space + 1, offset + length - 1).toString("utf8");
+    const equals = record.indexOf("=");
+    if (record.slice(0, equals) === "path") {
+      return record.slice(equals + 1);
+    }
+    offset += length;
   }
   return undefined;
 }
