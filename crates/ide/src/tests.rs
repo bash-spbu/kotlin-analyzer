@@ -4602,3 +4602,64 @@ sealed class Result
         Result: implementations"#]]
     .assert_eq(&hierarchy.join("\n"));
 }
+
+#[test]
+fn workspace_symbols_find_library_classes_once_and_only_closely() {
+    let Some(jar) = newest_cached_stdlib() else {
+        eprintln!("skipped: no kotlin-stdlib in the Gradle cache");
+        return;
+    };
+    let mut fixture =
+        Fixture::parse("\n//- /app/b/Use.kt\npackage b\nclass PairUp\nfun pairwise() = 1\n");
+    // The same library twice (two versions of one, say): each class once.
+    let library = || base_db::LibrarySource {
+        archive: jar.clone(),
+        kind: base_db::ArchiveKind::Jar,
+        sources: None,
+    };
+    let indexed = hir::index_library(&library()).unwrap();
+    fixture.database.set_libraries(
+        vec![(library(), indexed.clone()), (library(), indexed)],
+        vec![vec![0, 1]],
+        None,
+    );
+    let analysis = analysis(&fixture);
+    let found = |query: &str| -> Vec<String> {
+        analysis
+            .workspace_symbols(query, 100)
+            .unwrap()
+            .iter()
+            .map(|target| {
+                let place = match target.file {
+                    crate::NavigationFile::Workspace(_) => "workspace",
+                    crate::NavigationFile::Library { .. } => "library",
+                };
+                format!(
+                    "{} {} ({place})",
+                    target.container.as_deref().unwrap_or(""),
+                    target.name
+                )
+            })
+            .collect()
+    };
+    // The workspace's first; then the library's class, once; `listOf`-like
+    // functions are no classes, and a subsequence (`PaUp`) is too loose.
+    assert_eq!(
+        found("Pair"),
+        [
+            "b PairUp (workspace)",
+            "b pairwise (workspace)",
+            "kotlin Pair (library)"
+        ]
+    );
+    assert_eq!(
+        found("ArrayDeq"),
+        ["kotlin.collections ArrayDeque (library)"]
+    );
+    assert_eq!(found("listOf"), Vec::<String>::new());
+    // Too short to search the libraries.
+    assert_eq!(
+        found("Pa"),
+        ["b PairUp (workspace)", "b pairwise (workspace)"]
+    );
+}

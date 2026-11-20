@@ -220,6 +220,67 @@ pub fn library_names(db: &dyn SourceDatabase) -> Arc<FxHashMap<Name, Vec<Library
     Arc::new(names)
 }
 
+/// A top-level name of the libraries in one package: what a search of
+/// library classes by name finds before reading any of them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LibraryName {
+    pub name: Name,
+    pub package: Path,
+    /// The first library declaring the package (the JDK, then the
+    /// classpaths in order): the one whose declaration a search shows.
+    declaring: LibraryPackage,
+}
+
+/// The libraries' top-level names `accept` takes, the JDK's included, each
+/// package's once — two libraries (or two versions of one) declaring the
+/// same name in the same package give it once. A function's or a
+/// property's name is among them: [`library_classes_in`] tells.
+pub fn library_names_matching(
+    db: &dyn SourceDatabase,
+    accept: impl Fn(&str) -> bool,
+) -> Vec<LibraryName> {
+    let names = library_names(db);
+    let mut found: Vec<LibraryName> = Vec::new();
+    for (name, declaring) in names.iter() {
+        if !accept(name.as_str()) {
+            continue;
+        }
+        for library_package in declaring {
+            let package = library_package.package(db);
+            let known = found
+                .iter()
+                .any(|seen| seen.name == *name && seen.package == *package);
+            if !known {
+                found.push(LibraryName {
+                    name: *name,
+                    package: package.clone(),
+                    declaring: *library_package,
+                });
+            }
+        }
+    }
+    found
+}
+
+/// The top-level classes `name` stands for (none for a function's or a
+/// property's), read from its library.
+pub fn library_classes_in(db: &dyn SourceDatabase, name: &LibraryName) -> Vec<ItemLocation> {
+    let tree = library_package_tree(db, name.declaring);
+    tree.named(None, name.name)
+        .iter()
+        .filter(|index| {
+            matches!(
+                tree.item(**index).kind,
+                crate::item_tree::ItemKind::Class(_)
+            )
+        })
+        .map(|index| ItemLocation {
+            container: ItemContainer::Library(name.declaring),
+            item: *index,
+        })
+        .collect()
+}
+
 /// The top-level names of the source sets `source_set` sees, with the
 /// packages declaring each.
 #[salsa::tracked(returns(clone))]

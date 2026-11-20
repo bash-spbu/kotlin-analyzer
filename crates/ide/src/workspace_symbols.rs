@@ -1,7 +1,9 @@
 //! `workspace/symbol`: declarations across the workspace whose names match a
-//! query — exactly, by prefix, by camel-case humps, or as a subsequence.
+//! query — exactly, by prefix, by camel-case humps, or as a subsequence —
+//! then, for a query of a few characters, library classes (the JDK's
+//! included) whose names match it closely.
 
-use hir::{ItemKind, ItemLocation, RootDatabase, SourceDatabase};
+use hir::{ItemKind, ItemLocation, LibraryName, RootDatabase, SourceDatabase};
 
 use crate::NavigationTarget;
 
@@ -40,11 +42,76 @@ pub(crate) fn workspace_symbols(
         }
     }
     matches.sort_by_key(|(quality, length, _)| (*quality, *length));
-    matches
+    let mut found: Vec<NavigationTarget> = matches
         .into_iter()
         .take(limit)
         .filter_map(|(_, _, location)| NavigationTarget::of(db, location))
-        .collect()
+        .collect();
+    let asks_libraries = query.chars().count() >= LIBRARY_QUERY_MINIMUM;
+    if asks_libraries {
+        found.extend(library_classes(db, query));
+    }
+    found
+}
+
+/// How long a query is before library classes are searched too: shorter
+/// ones match too many.
+const LIBRARY_QUERY_MINIMUM: usize = 3;
+
+/// How many library classes a query gets at most: each is read from its
+/// library (its declarations, then its source or its class file rendered)
+/// before the answer goes out.
+const LIBRARY_LIMIT: usize = 20;
+
+/// The library classes whose names match `query` exactly, by prefix or by
+/// camel-case humps — not looser: the libraries' names are many — best
+/// first; among equal names, the shortest package first (a library's own
+/// before a copy another shades: `com.fasterxml.jackson.databind` before
+/// `org.testcontainers.shaded.com.fasterxml.jackson.databind`). One class
+/// per qualified name, however many libraries hold it.
+fn library_classes(db: &RootDatabase, query: &str) -> Vec<NavigationTarget> {
+    let close = |name: &str| {
+        match_quality(name, query).is_some_and(|quality| quality <= MatchQuality::CamelHumps)
+    };
+    let mut names: Vec<(MatchQuality, usize, usize, String, LibraryName)> =
+        hir::library_names_matching(db, close)
+            .into_iter()
+            .filter_map(|name| {
+                let quality = match_quality(name.name.as_str(), query)?;
+                let package = name.package.to_string();
+                Some((
+                    quality,
+                    name.name.as_str().len(),
+                    package.len(),
+                    package,
+                    name,
+                ))
+            })
+            .collect();
+    names.sort_by(|first, second| {
+        let (quality, length, package_length, package, name) = first;
+        let (other_quality, other_length, other_package_length, other_package, other_name) = second;
+        (quality, length, package_length, package, name.name.as_str()).cmp(&(
+            other_quality,
+            other_length,
+            other_package_length,
+            other_package,
+            other_name.name.as_str(),
+        ))
+    });
+    let mut found = Vec::new();
+    for (_, _, _, _, name) in names {
+        if found.len() >= LIBRARY_LIMIT {
+            break;
+        }
+        // A function's or property's name is no class: nothing to show.
+        if let Some(class) = hir::library_classes_in(db, &name).into_iter().next()
+            && let Some(target) = NavigationTarget::of(db, class)
+        {
+            found.push(target);
+        }
+    }
+    found
 }
 
 pub(crate) fn match_quality(name: &str, query: &str) -> Option<MatchQuality> {

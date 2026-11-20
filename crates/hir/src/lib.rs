@@ -8,8 +8,9 @@ pub use base_db::{
 };
 pub use hir_def::decompiled::MissingSources;
 pub use hir_def::def_map::{
-    classpath_complete, importable_names, package_exists, package_names, package_prefix_exists,
-    packages_declaring, sees, visible_top_level,
+    LibraryName, classpath_complete, importable_names, library_classes_in, library_names_matching,
+    package_exists, package_names, package_prefix_exists, packages_declaring, sees,
+    visible_top_level,
 };
 pub use hir_def::expect_actual::{
     Side as MultiplatformSide, expect_actual_family, side_of as multiplatform_side,
