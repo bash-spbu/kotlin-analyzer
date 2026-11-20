@@ -2,7 +2,7 @@
 """Writes the Zed extension's Kotlin tasks (editors/zed/languages/kotlin/tasks.json).
 
 Zed tasks can't reach a file shipped with an extension, so each task runs
-gradle_task.py's text with `python3 -I -c`. A task is one `/bin/sh -c`
+gradle_task.py's text (compressed) with `python3 -I -c`. A task is one `/bin/sh -c`
 command with no `args`: Zed puts arguments into the shell's command line
 unquoted (it splits `a;b` and globs `exec(…)`), but a lone command is
 shell code as written. So the quoting is ours: the script goes in base64,
@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +29,7 @@ TASKS = [
     ("gradle clean", "clean"),
     ("gradle test --rerun-tasks: this file's project", "test"),
     ("gradle test --rerun-tasks: choose the project or a parent", "choose"),
+    ("profile: a Gradle task of this file's project (run, bootRun, …)", "profile-run"),
 ]
 
 # The runnables (languages/kotlin/runnables.scm): (tag, what the label
@@ -52,8 +54,8 @@ TEST_PIECES = [
     "${ZED_CUSTOM_kotlin_method_name:}",
 ]
 
-# Decodes and runs the script given as the next argument.
-BOOTSTRAP = "import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))"
+# Decodes, decompresses and runs the script given as the next argument.
+BOOTSTRAP = "import base64,sys,zlib;exec(zlib.decompress(base64.b64decode(sys.argv.pop(1))))"
 
 
 def single_quoted(text: str) -> str:
@@ -64,7 +66,7 @@ def single_quoted(text: str) -> str:
 def task(label: str, arguments: list[str]) -> dict:
     """A task running gradle_task.py with `arguments`, each single-quoted
     for the shell (Zed expands its variables in them first)."""
-    encoded = base64.b64encode(SCRIPT.read_bytes()).decode("ascii")
+    encoded = base64.b64encode(zlib.compress(SCRIPT.read_bytes(), 9)).decode("ascii")
     words = ["python3", "-I", "-c", BOOTSTRAP, encoded, *arguments]
     return {
         "label": label,
@@ -85,6 +87,12 @@ def tasks_json() -> str:
         run = task(f"gradle test --tests {shown}", ["zed-tests", "$ZED_FILE", *TEST_PIECES])
         run["tags"] = [tag]
         tasks.append(run)
+        profiled = task(
+            f"profile: gradle test --tests {shown}",
+            ["zed-profile-tests", "$ZED_FILE", *TEST_PIECES],
+        )
+        profiled["tags"] = [tag]
+        tasks.append(profiled)
     return json.dumps(tasks, indent=2) + "\n"
 
 if __name__ == "__main__":

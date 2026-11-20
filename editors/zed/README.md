@@ -75,8 +75,8 @@ the language server already analysing the project — the editor's view,
 unsaved text included — through its socket; a project no language server
 analyses (an agent's git worktree) gets one of its own, kept current with
 the agent's edits on disk. Zed asks before each tool call unless
-`agent.tool_permissions` allows `mcp:kotlin-analyzer:*`. The released
-1.0.1 binary has no `mcp`: use a newer server (`binary.path`, or on the
+`agent.tool_permissions` allows `mcp:kotlin-analyzer:*`. Releases before
+1.1.0 have no `mcp`: use a newer server (`binary.path`, or on the
 `PATH`). `context_servers.kotlin-analyzer.command` sets another command.
 
 ## Running tests
@@ -93,6 +93,25 @@ The server's code lenses are off in Zed (`codeLens` defaults to
 and tests run from the gutter. Turning `references` on in `settings` shows
 the reference counts with `"code_lens": "on"`, but clicking one does
 nothing.
+
+## Profiling
+
+The ▶ menu of a test function or class also has *profile: gradle test
+--tests …*, and *task: spawn* has *profile: a Gradle task of this file's
+project (run, bootRun, …)* for the application. In the terminal the task
+asks what to profile — `cpu`, `alloc`, `lock`, `wall`, or `all` of the
+first three — and which more async-profiler options to add (`interval=1ms`,
+`alloc=512k`, `threads`, `include=app.*`); Enter keeps the last answers.
+Every test or `JavaExec` JVM Gradle starts runs with async-profiler's agent
+and writes a JFR recording when it exits (stop an application with Ctrl-C);
+the task then makes a flame graph of each event with `jfrconv` and opens
+it in the browser (Zed shows no HTML; `KOTLIN_ANALYZER_OPEN_WITH` names
+another program). Everything is in `build/kotlin-analyzer/profiles/<time>/`.
+
+async-profiler is `ASYNC_PROFILER_HOME`, `asprof` on the `PATH`
+(Homebrew's), or else its latest GitHub release, downloaded once for this
+platform into `~/.cache/kotlin-analyzer/async-profiler/` with its SHA-256
+checked (`docs/spec/profiling.md`).
 
 ## Debugging
 

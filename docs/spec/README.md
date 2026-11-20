@@ -10,6 +10,7 @@ rust-analyzer's architecture — never from another implementation's source.
 | [resolution.md](resolution.md) | which declaration a name means, per the Kotlin spec |
 | [libraries.md](libraries.md) | compiled JARs, sources JARs, the JDK |
 | [jdk.md](jdk.md) | which JDK runs Gradle and is read, and downloading one when there is none |
+| [profiling.md](profiling.md) | running tests or the application under async-profiler, and its flame graphs |
 | [lsp.md](lsp.md) | the LSP requests served and what each answers |
 | [diagnostics.md](diagnostics.md) | the checks, when they report, and the corpus gate |
 | [cli.md](cli.md) | command-line tools |
