@@ -246,7 +246,10 @@ fn resolve(
             (title, locations)
         }
     };
-    lens["command"] = if locations.is_empty() {
+    // Nothing found to go to: a label, not a command — but a reference
+    // count stays one whatever it counts, as it always was.
+    let nothing_to_show = locations.is_empty() && found != Found::References;
+    lens["command"] = if nothing_to_show {
         json!({ "title": title, "command": "" })
     } else {
         json!({

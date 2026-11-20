@@ -12,6 +12,17 @@ script every editor runs Gradle tasks with; nothing of it is in the server.
 | `profile-tests <path> <filter>` | the gutter's ▶ menu on a test function or class: *profile: gradle test --tests …* (`zed-profile-tests`) | `test --tests <filter> --rerun` in the project holding the file |
 | `profile-run <path>` | the task *profile: a Gradle task of this file's project* | the task asked for (Enter: `run`; `bootRun` for Spring Boot) of the project holding the file |
 
+In VS Code, the server's *▶ Run test* lenses get a *Profile test* twin, and
+the command *Profile a Gradle Task (run, bootRun, …)* profiles a task of the
+active file's project; VS Code asks the two questions below itself (a quick
+pick of the events, the last first; an input box of the options, the last
+ones in it, refusing `file=`), tells the script with
+`KOTLIN_ANALYZER_PROFILER_EVENT`, `KOTLIN_ANALYZER_PROFILER_OPTIONS` and
+`KOTLIN_ANALYZER_PROFILED_TASK`, and gets the flame graphs' paths back in
+the JSON file `KOTLIN_ANALYZER_PROFILE_RESULT` names (`title`, `event`,
+`pages`, `recordings`, `gradleExitCode`) instead of the script opening
+them: each opens in a webview tab, titled `CPU: app.OrderTest`.
+
 Before Gradle runs, the task asks in the terminal, each answer's default the
 last one given (Enter keeps it):
 

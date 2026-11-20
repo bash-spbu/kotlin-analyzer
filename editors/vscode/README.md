@@ -70,12 +70,43 @@ them), and *▶ Run test* / *▶ Run tests* above test functions (JUnit 4 and 5,
 kotlin.test, TestNG) and the classes holding them. Running one starts the
 `kotlin-gradle` task `gradle test --tests <filter> --rerun` in the file's
 project (`"tests"` in `tasks.json` does the same); *Debug test* / *Debug
-tests* next to each runs it under the debugger. *Expand Selection*
+tests* next to each runs it under the debugger, *Profile test* / *Profile
+tests* under async-profiler (see Profiling). *↑ Base.name* and *↓ N
+implementations* over members and classes peek at what they override and
+what implements them. *Expand Selection*
 (`⌃⇧⌘→`) grows through the server's syntax-aware ranges.
 
 Open the Gradle build's root folder. The server exports the build's model
 in the background, then reloads; until then it works from the directory
 layout.
+
+## Profiling
+
+*Profile test* over a test, or *kotlin-analyzer: Profile a Gradle Task (run,
+bootRun, …)* for the application, asks what to profile — CPU, allocations,
+locks, wall clock, or the first three at once — and which more
+async-profiler options to add (`interval=1ms`, `alloc=512k`, `threads`,
+`include=app.*`; the last answers are offered again). The run is a
+`kotlin-profile` task: every test or `JavaExec` JVM Gradle starts gets
+async-profiler's agent and writes a JFR recording when it exits (stop an
+application by stopping the task). Each flame graph then opens in a tab of
+its own; *Show the recordings* reveals
+`build/kotlin-analyzer/profiles/<time>/`, where the recordings and pages
+are.
+
+async-profiler is `ASYNC_PROFILER_HOME`, `asprof` on the `PATH`, or its
+latest GitHub release, downloaded once into
+`~/.cache/kotlin-analyzer/async-profiler/` with its SHA-256 checked. A
+keybinding can skip the questions: the command `kotlin-analyzer.profileTests`
+takes the lens's test and `{ "event": "alloc", "options": "" }`. In
+`tasks.json`:
+
+```json
+{ "type": "kotlin-profile", "path": "${file}", "event": "wall", "task": "bootRun" }
+```
+
+(`"tests": "app.OrderTest"` instead of `task` profiles tests); such a task's
+flame graphs open in the browser.
 
 ## Debugging
 

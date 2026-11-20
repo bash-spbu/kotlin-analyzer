@@ -16,6 +16,8 @@ import {
 import { registerDebugger } from "./debugger";
 import { debugTwin } from "./debugging";
 import { registerGradleTasks } from "./gradle";
+import { registerProfiling } from "./profiler";
+import { profileTwin } from "./profiling";
 import { findFormatter, findServer, type ServerBinary } from "./server";
 import { RESTART_SETTINGS, initializationOptions, serverSettings } from "./settings";
 
@@ -40,6 +42,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Api> {
     vscode.commands.registerCommand(`${SECTION}.restartServer`, () => restart(context)),
     vscode.commands.registerCommand(`${SECTION}.showLogs`, () => output?.show()),
     registerGradleTasks(context),
+    registerProfiling(context),
     registerDebugger(async () => (binary ?? (await findServer(context))).path),
     vscode.commands.registerCommand(SHOW_REFERENCES_COMMAND, showReferences),
     vscode.workspace.onDidChangeConfiguration((change) => {
@@ -93,14 +96,14 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
   await client.start();
 }
 
-/** The server's lenses, each "Run test" one followed by its "Debug test". */
+/** The server's lenses, each "Run test" one followed by its "Debug test" and "Profile test". */
 function withDebugLenses(lenses: vscode.CodeLens[] | null | undefined): vscode.CodeLens[] | null | undefined {
   if (!lenses) {
     return lenses;
   }
   return lenses.flatMap((lens) => {
-    const twin = debugTwin(lens.command);
-    return twin === undefined ? [lens] : [lens, new vscode.CodeLens(lens.range, twin)];
+    const twins = [debugTwin(lens.command), profileTwin(lens.command)].filter((twin) => twin !== undefined);
+    return [lens, ...twins.map((twin) => new vscode.CodeLens(lens.range, twin))];
   });
 }
 

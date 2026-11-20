@@ -17,6 +17,7 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onTaskType:kotlin-gradle",
+    "onTaskType:kotlin-profile",
     "onDebugResolve:kotlin-analyzer",
     "onLanguage:kotlin",
     "onLanguage:java",
@@ -63,6 +64,33 @@
           "tests": {
             "type": "string",
             "markdownDescription": "For `test`: only the tests this filter names (Gradle's `--tests`, e.g. `app.OrderTest` or `app.OrderTest.creates an order`), in the project holding `path`."
+          }
+        }
+      },
+      {
+        "type": "kotlin-profile",
+        "required": ["path", "event"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "markdownDescription": "A file or directory of the project to profile, e.g. `${file}`."
+          },
+          "event": {
+            "type": "string",
+            "enum": ["cpu", "alloc", "lock", "wall", "all"],
+            "markdownDescription": "What async-profiler profiles: CPU time, allocations, lock contention, wall-clock time, or the first three at once."
+          },
+          "options": {
+            "type": "string",
+            "markdownDescription": "More async-profiler agent options, comma-separated: `interval=1ms,threads`."
+          },
+          "tests": {
+            "type": "string",
+            "markdownDescription": "Profile the tests this Gradle `--tests` filter names, in the project holding `path`."
+          },
+          "task": {
+            "type": "string",
+            "markdownDescription": "Else profile this task of that project (`run` by default): `bootRun`, …"
           }
         }
       }
@@ -174,6 +202,11 @@
       {
         "command": "kotlin-analyzer.downloadJdk",
         "title": "Download a JDK",
+        "category": "kotlin-analyzer"
+      },
+      {
+        "command": "kotlin-analyzer.profileTask",
+        "title": "Profile a Gradle Task (run, bootRun, …)",
         "category": "kotlin-analyzer"
       },
       {

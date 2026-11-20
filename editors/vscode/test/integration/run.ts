@@ -54,6 +54,9 @@ async function main(): Promise<void> {
   // The Gradle tasks run in VS Code's terminals, whose environment is VS
   // Code's: the recording gradlew writes its call here.
   process.env.GRADLE_CALL = path.join(scratch, "gradle-call");
+  // Profiling's tasks find the fake async-profiler, and a cache of their own.
+  process.env.ASYNC_PROFILER_HOME = path.join(workspace, ".profiler");
+  process.env.XDG_CACHE_HOME = path.join(scratch, "cache");
   try {
     await runTests({
       vscodeExecutablePath: process.env.VSCODE_EXECUTABLE,
@@ -129,10 +132,35 @@ async function writeWorkspace(root: string): Promise<void> {
   await fs.mkdir(program, { recursive: true });
   await fs.writeFile(path.join(program, "Main.java"), JAVA_PROGRAM);
   execFileSync("javac", ["-g", "-d", path.join(root, "debug/classes"), path.join(program, "Main.java")]);
-  // Records where and how it was called instead of running Gradle.
+  // Records where and how it was called instead of running Gradle; and,
+  // like a JVM async-profiler's agent ran in, writes a recording where the
+  // profiling init script's agent says.
   await fs.writeFile(
     path.join(root, "gradlew"),
-    '#!/bin/sh\n{ pwd; for argument in "$@"; do echo "$argument"; done; } > "$GRADLE_CALL"\n',
+    [
+      "#!/bin/sh",
+      '{ pwd; for argument in "$@"; do echo "$argument"; done; } > "$GRADLE_CALL"',
+      'previous=""',
+      'for argument in "$@"; do',
+      '  if [ "$previous" = "-I" ]; then',
+      "    recording=$(sed -n \"s/.*file=\\([^']*\\)'.*/\\1/p\" \"$argument\" | sed 's/%p/4242/')",
+      '    [ -n "$recording" ] && echo JFR > "$recording"',
+      "  fi",
+      '  previous="$argument"',
+      "done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // An async-profiler whose jfrconv makes a page naming what it was given.
+  const profiler = path.join(root, ".profiler");
+  await fs.mkdir(path.join(profiler, "lib"), { recursive: true });
+  await fs.mkdir(path.join(profiler, "bin"), { recursive: true });
+  await fs.writeFile(path.join(profiler, "lib/libasyncProfiler.dylib"), "");
+  await fs.writeFile(path.join(profiler, "lib/libasyncProfiler.so"), "");
+  await fs.writeFile(
+    path.join(profiler, "bin/jfrconv"),
+    '#!/bin/sh\nfor last in "$@"; do :; done\necho "<html><body><h1 id=kind>$1</h1></body></html>" > "$last"\n',
     { mode: 0o755 },
   );
 }

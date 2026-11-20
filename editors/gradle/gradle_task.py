@@ -31,6 +31,11 @@ in its tasks.json (see zed_tasks.py).
                                     a task of the project holding <path>
                                     (asked for; Enter for `run`), profiled so
 
+An editor that asks itself sets KOTLIN_ANALYZER_PROFILER_EVENT (and
+KOTLIN_ANALYZER_PROFILER_OPTIONS, KOTLIN_ANALYZER_PROFILED_TASK): nothing is
+asked; and KOTLIN_ANALYZER_PROFILE_RESULT, a file the flame graphs' paths
+are written to as JSON instead of being opened.
+
 <path> is a file or a directory. The projects holding it are its ancestor
 directories with a build script, up to the build's root: the nearest
 directory with a settings script. Gradle is the root's gradlew, else
@@ -536,13 +541,25 @@ def open_command(environment: dict[str, str], page: Path) -> Optional[list[str]]
     return None
 
 
+def chosen_settings(environment: dict[str, str], last: ProfileSettings, ask: Callable[[str], str]) -> ProfileSettings:
+    """What to profile: as KOTLIN_ANALYZER_PROFILER_EVENT (and _OPTIONS) say
+    when an editor asked; else asked in the terminal; else the last."""
+    event = environment.get("KOTLIN_ANALYZER_PROFILER_EVENT")
+    if event:
+        if event not in PROFILER_EVENTS:
+            raise ProfilingFailed(f"no such event: {event}")
+        return ProfileSettings(event, checked_options(environment.get("KOTLIN_ANALYZER_PROFILER_OPTIONS", "")))
+    if sys.stdin.isatty():
+        return asked_settings(last, ask)
+    return last
+
+
 def profile(build: Build, arguments: list[str], title: str, ask: Callable[[str], str]) -> int:
-    """Runs Gradle with `arguments` under async-profiler, then makes and
-    opens the flame graphs."""
+    """Runs Gradle with `arguments` under async-profiler, then makes the
+    flame graphs and opens them (or, for an editor, writes where they are)."""
     environment = with_java(dict(os.environ))
     cache = cache_directory(environment)
-    last = remembered_settings(cache)
-    settings = asked_settings(last, ask) if sys.stdin.isatty() else last
+    settings = chosen_settings(environment, remembered_settings(cache), ask)
     remember_settings(cache, settings)
     profiler = find_profiler(environment, cache) or install_profiler(cache)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -568,17 +585,29 @@ def profile(build: Build, arguments: list[str], title: str, ask: Callable[[str],
         finally:
             signal.signal(signal.SIGINT, previous)
     recordings = sorted(output.glob("profile-*.jfr"))
-    if not recordings:
-        print(f"No JVM was profiled: no recording in {output}", file=sys.stderr)
-        return gradle.returncode or 1
     pages = []
     for command, page in flame_graph_commands(profiler, recordings, output, settings, title):
+        if not recordings:
+            break
         converted = subprocess.run(command, env=environment)
         if converted.returncode == 0 and page.is_file():
             pages.append(page)
+    result_file = environment.get("KOTLIN_ANALYZER_PROFILE_RESULT")
+    if result_file:
+        result = {
+            "title": title,
+            "event": settings.event,
+            "pages": [str(page) for page in pages],
+            "recordings": str(output),
+            "gradleExitCode": gradle.returncode,
+        }
+        Path(result_file).write_text(json.dumps(result) + "\n")
+    if not recordings:
+        print(f"No JVM was profiled: no recording in {output}", file=sys.stderr)
+        return gradle.returncode or 1
     for page in pages:
         print(f"Flame graph: {page}", flush=True)
-        opener = open_command(environment, page)
+        opener = None if result_file else open_command(environment, page)
         if opener is not None:
             subprocess.run(opener, env=environment)
     print(f"Recordings: {output}")
@@ -635,7 +664,13 @@ def main(arguments: list[str]) -> int:
             )
         if task == "profile-run":
             project = build.projects[0]
-            ask = input if sys.stdin.isatty() else (lambda _prompt: "")
+            chosen_task = os.environ.get("KOTLIN_ANALYZER_PROFILED_TASK")
+            if chosen_task:
+                ask = lambda _prompt: chosen_task  # noqa: E731
+            elif sys.stdin.isatty():
+                ask = input
+            else:
+                ask = lambda _prompt: ""  # noqa: E731
             gradle_task = profiled_task(build, project, ask)
             return profile(build, gradle_task, gradle_task[0], input)
         if task == "build":

@@ -1414,8 +1414,11 @@ fn without_a_jdk_the_server_asks_which_vendor_then_which_release() {
         [
             "Eclipse Temurin",
             "Azul Zulu",
+            "Amazon Corretto",
+            "BellSoft Liberica",
             "GraalVM Community",
             "Microsoft",
+            "Oracle OpenJDK",
             "Not now"
         ]
     );
@@ -1539,7 +1542,11 @@ fn the_download_command_names_a_vendor_and_a_release_or_asks() {
         Some((Vendor::GraalVmCommunity, 25))
     );
     assert_eq!(super::chosen_jdk(&[]), None);
-    assert_eq!(super::chosen_jdk(&[json!("corretto"), json!(21)]), None);
+    assert_eq!(
+        super::chosen_jdk(&[json!("corretto"), json!(21)]),
+        Some((Vendor::Corretto, 21))
+    );
+    assert_eq!(super::chosen_jdk(&[json!("sap_machine"), json!(21)]), None);
     assert_eq!(super::chosen_jdk(&[json!("temurin"), json!("21")]), None);
 }
 
@@ -1594,6 +1601,11 @@ fn hierarchy_lenses_show_what_a_member_overrides_and_what_implements_it() {
         none,
         json!({ "title": "no implementations", "command": "" })
     );
+    // A reference count of nothing still shows the (no) references.
+    let unreferenced = resolved_at(&mut client, 4, "references");
+    assert_eq!(unreferenced["title"], "0 references");
+    assert_eq!(unreferenced["command"], "editor.action.showReferences");
+    assert_eq!(unreferenced["arguments"][2], json!([]));
     client.shut_down();
     let _ = std::fs::remove_dir_all(&root);
 }

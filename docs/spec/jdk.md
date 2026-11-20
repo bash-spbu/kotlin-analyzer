@@ -29,8 +29,11 @@ No JDK is when none of the places above runs programs. The server then asks,
 once per session, as the workspace starts loading (`window/showMessageRequest`):
 
 1. *No JDK found … Download one into `~/.jdks`?* — a vendor: **Eclipse
-   Temurin**, **Azul Zulu**, **GraalVM Community**, **Microsoft**, or **Not
-   now**. These are the vendors whose packages come with a SHA-256 checksum.
+   Temurin**, **Azul Zulu**, **Amazon Corretto**, **BellSoft Liberica**,
+   **GraalVM Community**, **Microsoft**, **Oracle OpenJDK** (jdk.java.net's
+   builds: a release's last one there, not updated after it), or **Not
+   now**. These are the vendors whose packages have a SHA-256 to check them
+   against.
 2. *Which version of Temurin?* — the project's release first when the model
    names one (`jdk.release`, else the one every JVM source set compiles
    against), then the LTS releases **21**, **25**, **17**, or **Cancel**.
@@ -46,12 +49,18 @@ startup (the code action and the command stay).
 
 The package is found with the Foojay Disco API (`api.foojay.io`, the index
 Gradle's toolchains use): the latest GA JDK of that vendor and version for
-this OS and architecture (glibc on Linux), a `.tar.gz`, without JavaFX. It is
-downloaded from the vendor's own address with `curl` (HTTPS only), its SHA-256
-checked against the checksum the API gives or links to — a package without
-one isn't installed — and unpacked with `tar` beside the others, then moved
-into place: `~/.jdks/<vendor>-<version>` (`temurin-21.0.13.1`), as IntelliJ
-names it. A JDK already there is used as it is. Nothing is left behind when
+this OS and architecture (glibc on Linux), a `.tar.gz`, without JavaFX. Its
+SHA-256 is the one the API gives, else the file it links to, else — for a
+GitHub release's asset (Liberica's, whose API checksum is a SHA-1) — the
+digest GitHub's API records of it; a package without one isn't installed.
+Corretto, which the API gives no checksum for, comes from Amazon's own
+addresses instead: the archive `corretto.aws/downloads/latest/…` redirects
+to, checked against `…/latest_sha256/…` (a release between the two leaves
+them disagreeing: nothing is installed). It is downloaded from the vendor's
+own address with `curl` (HTTPS only), checked, and unpacked with `tar`
+beside the others, then moved into place: `~/.jdks/<vendor>-<version>`
+(`temurin-21.0.13.1`, `corretto-21.0.13.1.2`, `openjdk-25.0.2`), as
+IntelliJ names it. A JDK already there is used as it is. Nothing is left behind when
 any step fails: the download, the checksum, unpacking, or an archive without
 a JDK in it.
 

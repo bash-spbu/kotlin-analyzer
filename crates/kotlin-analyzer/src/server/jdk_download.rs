@@ -1,7 +1,8 @@
 //! Downloading a JDK into `~/.jdks` when the machine has none
 //! (`docs/spec/jdk.md`): the questions asking which, and the download —
-//! found with the Foojay Disco API, fetched with `curl`, its SHA-256
-//! checked, unpacked with `tar` and moved into place.
+//! found with the Foojay Disco API (Corretto: with Amazon's own latest
+//! addresses), fetched with `curl`, its SHA-256 checked, unpacked with
+//! `tar` and moved into place.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -12,21 +13,29 @@ use lsp_types::{MessageActionItem, MessageType, ShowMessageRequestParams};
 use project_model::jdk::jdk_home_in;
 use sha2::{Digest, Sha256};
 
-/// The vendors offered: those whose packages come with a SHA-256 checksum.
+/// The vendors offered: those whose packages have a SHA-256 to check them
+/// against — from the Foojay API, a file it links, GitHub's digest of a
+/// release asset, or Amazon's latest checksum for Corretto.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Vendor {
     Temurin,
     Zulu,
+    Corretto,
+    Liberica,
     GraalVmCommunity,
     Microsoft,
+    OracleOpenJdk,
 }
 
 impl Vendor {
-    const ALL: [Vendor; 4] = [
+    const ALL: [Vendor; 7] = [
         Vendor::Temurin,
         Vendor::Zulu,
+        Vendor::Corretto,
+        Vendor::Liberica,
         Vendor::GraalVmCommunity,
         Vendor::Microsoft,
+        Vendor::OracleOpenJdk,
     ];
 
     /// Its name on a button.
@@ -34,8 +43,11 @@ impl Vendor {
         match self {
             Vendor::Temurin => "Eclipse Temurin",
             Vendor::Zulu => "Azul Zulu",
+            Vendor::Corretto => "Amazon Corretto",
+            Vendor::Liberica => "BellSoft Liberica",
             Vendor::GraalVmCommunity => "GraalVM Community",
             Vendor::Microsoft => "Microsoft",
+            Vendor::OracleOpenJdk => "Oracle OpenJDK",
         }
     }
 
@@ -44,15 +56,20 @@ impl Vendor {
         match self {
             Vendor::Temurin => "temurin",
             Vendor::Zulu => "zulu",
+            Vendor::Corretto => "corretto",
+            Vendor::Liberica => "liberica",
             Vendor::GraalVmCommunity => "graalvm_community",
             Vendor::Microsoft => "microsoft",
+            Vendor::OracleOpenJdk => "oracle_open_jdk",
         }
     }
 
-    /// Its name in the installed JDK's directory (`temurin-21.0.5`).
+    /// Its name in the installed JDK's directory (`temurin-21.0.5`), as
+    /// IntelliJ IDEA names it.
     fn directory_prefix(self) -> &'static str {
         match self {
             Vendor::GraalVmCommunity => "graalvm-community",
+            Vendor::OracleOpenJdk => "openjdk",
             other => other.name(),
         }
     }
@@ -288,6 +305,9 @@ enum Checksum {
     Sha256(String),
     /// A file holding the SHA-256 (`<hex>  <file name>`, or the hex alone).
     Linked(String),
+    /// A GitHub release's asset: its SHA-256 is the release's digest of it
+    /// (`release` is the API's address of the release).
+    GitHubAsset { release: String, name: String },
 }
 
 fn archive_from(json: &str) -> Result<Archive, Failure> {
@@ -312,9 +332,11 @@ fn archive_from(json: &str) -> Result<Archive, Failure> {
     let is_sha256 = text("checksum_type") == "sha256";
     let inline = sha256_hex(&text("checksum"));
     let linked = text("checksum_uri");
-    let checksum = match inline {
-        Some(hex) if is_sha256 => Checksum::Sha256(hex),
-        _ if linked.starts_with("https://") => Checksum::Linked(linked),
+    let github_asset = github_release_asset(&url);
+    let checksum = match (inline, github_asset) {
+        (Some(hex), _) if is_sha256 => Checksum::Sha256(hex),
+        _ if linked.starts_with("https://") && is_sha256 => Checksum::Linked(linked),
+        (_, Some((release, name))) => Checksum::GitHubAsset { release, name },
         _ => {
             return Err(Failure::new(
                 FailureKind::NoChecksum,
@@ -327,6 +349,19 @@ fn archive_from(json: &str) -> Result<Archive, Failure> {
         filename,
         checksum,
     })
+}
+
+/// A GitHub release asset's download address
+/// (`https://github.com/<owner>/<repo>/releases/download/<tag>/<name>`) as
+/// the API's address of its release and the asset's name.
+fn github_release_asset(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    let [owner, repository, "releases", "download", tag, name] = parts[..] else {
+        return None;
+    };
+    let release = format!("https://api.github.com/repos/{owner}/{repository}/releases/tags/{tag}");
+    Some((release, name.replace("%2B", "+").replace("%2b", "+")))
 }
 
 /// `text`'s first word when it is a SHA-256 in hex, lowercased.
@@ -420,6 +455,57 @@ pub(crate) fn install(
         )
     })?;
     report(format!("Finding {} {release}", vendor.label()), None);
+    let found = match vendor {
+        Vendor::Corretto => latest_corretto(release, platform)?,
+        _ => from_foojay(vendor, release, platform)?,
+    };
+    let FoundJdk {
+        url,
+        filename,
+        java_version,
+        size,
+        checksum,
+    } = found;
+    let name = format!(
+        "{}-{}",
+        vendor.directory_prefix(),
+        version_without_build(&java_version)
+    );
+    if let Some(home) = jdk_home_in(&jdks.join(&name)) {
+        return Ok(InstalledJdk {
+            home,
+            name,
+            already_there: true,
+        });
+    }
+    let staging = Staging::new(jdks, &name)?;
+    let downloaded = staging.directory.join(&filename);
+    let label = format!("{} {java_version}", vendor.label());
+    download(&url, &downloaded, size, &|done| {
+        let message = if size == 0 {
+            format!("{label}: {} MB", done / 1_000_000)
+        } else {
+            format!("{label}: {} of {} MB", done / 1_000_000, size / 1_000_000)
+        };
+        let percentage = super::progress::percentage(done as usize, size as usize);
+        report(message, percentage);
+    })?;
+    report(format!("Checking and unpacking {label}"), None);
+    install_archive(&downloaded, &checksum, jdks, &name, &staging)
+}
+
+/// A JDK package found: where it downloads from, its version, its size
+/// (0 when unknown) and its SHA-256.
+struct FoundJdk {
+    url: String,
+    filename: String,
+    java_version: String,
+    size: u64,
+    checksum: String,
+}
+
+/// The latest GA package of `vendor`'s `release`, as the Foojay API has it.
+fn from_foojay(vendor: Vendor, release: u32, platform: Platform) -> Result<FoundJdk, Failure> {
     let package = package_from(&fetch(&packages_url(vendor, release, platform))?)?;
     let archive = archive_from(&fetch(&package.info_url)?)?;
     let checksum = match &archive.checksum {
@@ -430,33 +516,89 @@ pub(crate) fn install(
                 "the package's checksum file holds no SHA-256".to_owned(),
             )
         })?,
+        Checksum::GitHubAsset { release, name } => github_asset_sha256(&fetch(release)?, name)
+            .ok_or_else(|| {
+                Failure::new(
+                    FailureKind::NoChecksum,
+                    format!("GitHub has no SHA-256 of {name}"),
+                )
+            })?,
     };
-    let name = format!(
-        "{}-{}",
-        vendor.directory_prefix(),
-        version_without_build(&package.java_version)
-    );
-    if let Some(home) = jdk_home_in(&jdks.join(&name)) {
-        return Ok(InstalledJdk {
-            home,
-            name,
-            already_there: true,
-        });
-    }
-    let staging = Staging::new(jdks, &name)?;
-    let downloaded = staging.directory.join(&archive.filename);
-    let label = format!("{} {}", vendor.label(), package.java_version);
-    download(&archive.url, &downloaded, package.size, &|done| {
-        let message = format!(
-            "{label}: {} of {} MB",
-            done / 1_000_000,
-            package.size / 1_000_000
-        );
-        let percentage = super::progress::percentage(done as usize, package.size as usize);
-        report(message, percentage);
+    Ok(FoundJdk {
+        url: archive.url,
+        filename: archive.filename,
+        java_version: package.java_version,
+        size: package.size,
+        checksum,
+    })
+}
+
+/// Corretto's latest `release`: the archive Amazon's `latest` address
+/// redirects to, and the SHA-256 its `latest_sha256` gives — the Foojay
+/// API has no checksum of Corretto's. A release between the two answers
+/// leaves them disagreeing, and nothing is installed.
+fn latest_corretto(release: u32, platform: Platform) -> Result<FoundJdk, Failure> {
+    let file = corretto_file(release, platform);
+    let url = redirect_of(&format!("{CORRETTO_DOWNLOADS}/latest/{file}"))?;
+    let (filename, java_version) = corretto_archive(&url).ok_or_else(|| {
+        Failure::new(
+            FailureKind::Lookup,
+            format!("Corretto's latest {release} isn't an archive: {url}"),
+        )
     })?;
-    report(format!("Checking and unpacking {label}"), None);
-    install_archive(&downloaded, &checksum, jdks, &name, &staging)
+    let checksum = sha256_hex(&fetch(&format!(
+        "{CORRETTO_DOWNLOADS}/latest_sha256/{file}"
+    ))?)
+    .ok_or_else(|| {
+        Failure::new(
+            FailureKind::NoChecksum,
+            "Amazon gives no SHA-256 of Corretto's latest".to_owned(),
+        )
+    })?;
+    Ok(FoundJdk {
+        url,
+        filename,
+        java_version,
+        size: 0,
+        checksum,
+    })
+}
+
+const CORRETTO_DOWNLOADS: &str = "https://corretto.aws/downloads";
+
+/// Amazon's name of Corretto's latest archive: `amazon-corretto-21-aarch64-macos-jdk.tar.gz`.
+fn corretto_file(release: u32, platform: Platform) -> String {
+    format!(
+        "amazon-corretto-{release}-{}-{}-jdk.tar.gz",
+        platform.architecture, platform.operating_system
+    )
+}
+
+/// The file name and version of a Corretto download address
+/// (`…/downloads/resources/21.0.13.1.2/amazon-corretto-21.0.13.1.2-macosx-aarch64.tar.gz`).
+fn corretto_archive(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix(&format!("{CORRETTO_DOWNLOADS}/resources/"))?;
+    let (version, filename) = rest.split_once('/')?;
+    let is_plain_name = filename.ends_with(".tar.gz") && !filename.contains(['/', '\\']);
+    let is_version = !version.is_empty()
+        && version
+            .chars()
+            .all(|char| char.is_ascii_digit() || char == '.');
+    if !is_plain_name || !is_version {
+        return None;
+    }
+    Some((filename.to_owned(), version.to_owned()))
+}
+
+/// The SHA-256 GitHub's release (its API's JSON) records of its asset `name`.
+fn github_asset_sha256(release: &str, name: &str) -> Option<String> {
+    let release: serde_json::Value = serde_json::from_str(release).ok()?;
+    let asset = release["assets"]
+        .as_array()?
+        .iter()
+        .find(|asset| asset["name"].as_str() == Some(name))?;
+    let digest = asset["digest"].as_str()?.strip_prefix("sha256:")?;
+    sha256_hex(digest)
 }
 
 /// `21.0.13.1+2` without its build: `21.0.13.1`.
@@ -613,6 +755,35 @@ fn curl() -> Command {
     command
 }
 
+/// Where `url` redirects to (its `Location`), not followed.
+fn redirect_of(url: &str) -> Result<String, Failure> {
+    let output = Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--proto", "=https"])
+        .args(["--connect-timeout", "30", "--max-time", "60"])
+        .args(["--output", "/dev/null", "--write-out", "%{redirect_url}"])
+        .arg(url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            Failure::new(FailureKind::CannotRun, format!("cannot run curl: {error}"))
+        })?;
+    let location = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || !location.starts_with("https://") {
+        return Err(Failure::new(
+            FailureKind::Lookup,
+            format!("{url}: {}", String::from_utf8_lossy(&output.stderr).trim()),
+        ));
+    }
+    Ok(location)
+}
+
+/// How much of a download of `size` bytes (0: unknown) to report when
+/// `done` bytes are on disk: never more than the whole, when it's known.
+fn arrived(done: u64, size: u64) -> u64 {
+    let size_known = size > 0;
+    if size_known { done.min(size) } else { done }
+}
+
 /// The body at `url`, as text.
 fn fetch(url: &str) -> Result<String, Failure> {
     let output = curl()
@@ -658,7 +829,7 @@ fn download(
             }
         }
         let done = std::fs::metadata(destination).map_or(0, |metadata| metadata.len());
-        progress(done.min(size));
+        progress(arrived(done, size));
         std::thread::sleep(Duration::from_millis(250));
     };
     if status.success() {
@@ -705,8 +876,11 @@ mod tests {
             [
                 "Eclipse Temurin",
                 "Azul Zulu",
+                "Amazon Corretto",
+                "BellSoft Liberica",
                 "GraalVM Community",
                 "Microsoft",
+                "Oracle OpenJDK",
                 "Not now"
             ]
         );
@@ -829,6 +1003,81 @@ mod tests {
             archive_from(escaping).unwrap_err().kind,
             FailureKind::Lookup
         );
+    }
+
+    #[test]
+    fn a_github_release_asset_is_checked_against_githubs_digest() {
+        // Liberica: the Foojay API gives a SHA-1 only.
+        let liberica = r#"{"result":[{"filename":"bellsoft-jdk21.0.13.1+5-macos-aarch64.tar.gz",
+            "direct_download_uri":"https://github.com/bell-sw/Liberica/releases/download/21.0.13.1%2B5/bellsoft-jdk21.0.13.1+5-macos-aarch64.tar.gz",
+            "checksum_uri":"","checksum":"e9ef84354eebf7bd5bd1d1f0c7a8a5b7dcd5f1e3","checksum_type":"sha1"}]}"#;
+        assert_eq!(
+            archive_from(liberica).unwrap().checksum,
+            Checksum::GitHubAsset {
+                release:
+                    "https://api.github.com/repos/bell-sw/Liberica/releases/tags/21.0.13.1%2B5"
+                        .to_owned(),
+                name: "bellsoft-jdk21.0.13.1+5-macos-aarch64.tar.gz".to_owned(),
+            }
+        );
+        let hex = "ed7803642ffa4df3f74f409437daee4b97e509e1d249fe69696539c295634bb1";
+        let release = format!(
+            r#"{{"assets":[{{"name":"other.zip","digest":"sha256:{}"}},
+                {{"name":"bellsoft-jdk21.0.13.1+5-macos-aarch64.tar.gz","digest":"sha256:{hex}"}}]}}"#,
+            "0".repeat(64)
+        );
+        assert_eq!(
+            github_asset_sha256(&release, "bellsoft-jdk21.0.13.1+5-macos-aarch64.tar.gz")
+                .as_deref(),
+            Some(hex)
+        );
+        assert_eq!(github_asset_sha256(&release, "missing.tar.gz"), None);
+        assert_eq!(
+            github_release_asset("https://example.com/a/b/releases/download/t/n"),
+            None
+        );
+    }
+
+    #[test]
+    fn correttos_latest_is_read_from_amazons_addresses() {
+        let platform = Platform {
+            operating_system: "macos",
+            architecture: "aarch64",
+            lib_c: None,
+        };
+        assert_eq!(
+            corretto_file(21, platform),
+            "amazon-corretto-21-aarch64-macos-jdk.tar.gz"
+        );
+        assert_eq!(
+            corretto_archive(
+                "https://corretto.aws/downloads/resources/21.0.13.1.2/amazon-corretto-21.0.13.1.2-macosx-aarch64.tar.gz"
+            ),
+            Some((
+                "amazon-corretto-21.0.13.1.2-macosx-aarch64.tar.gz".to_owned(),
+                "21.0.13.1.2".to_owned()
+            ))
+        );
+        // Elsewhere, or not an archive: not Corretto's.
+        assert_eq!(
+            corretto_archive("https://example.com/downloads/resources/21/jdk.tar.gz"),
+            None
+        );
+        assert_eq!(
+            corretto_archive("https://corretto.aws/downloads/resources/21.0.13/x/../jdk.tar.gz"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_download_of_unknown_size_reports_what_has_arrived() {
+        assert_eq!(
+            arrived(5_000_000, 0),
+            5_000_000,
+            "Corretto's size isn't known"
+        );
+        assert_eq!(arrived(5_000_000, 3_000_000), 3_000_000);
+        assert_eq!(arrived(1_000_000, 3_000_000), 1_000_000);
     }
 
     #[test]

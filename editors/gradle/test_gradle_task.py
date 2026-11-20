@@ -381,6 +381,47 @@ class ProfileTest(BuildFixture):
         self.assertEqual(kinds, ["--cpu", "--alloc", "--lock"])
         self.assertEqual(len(self.profiling.opened.read_text().splitlines()), 3)
 
+    def test_an_editor_chooses_without_a_terminal_and_gets_the_pages_written(self) -> None:
+        result_file = Path(self.scratch.name) / "result.json"
+        chosen = {
+            **self.profiling.environment,
+            "KOTLIN_ANALYZER_PROFILER_EVENT": "alloc",
+            "KOTLIN_ANALYZER_PROFILER_OPTIONS": "alloc=512k",
+            "KOTLIN_ANALYZER_PROFILE_RESULT": str(result_file),
+        }
+        result = self.run_task("profile-tests", str(self.source), "pay.PayTest", extra=chosen)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        init_script = Path(f"{self.call_file}.init").read_text()
+        self.assertIn("=start,event=alloc,alloc=512k,file=", init_script)
+        written = json.loads(result_file.read_text())
+        (run,) = list((self.root / "build" / "kotlin-analyzer" / "profiles").iterdir())
+        self.assertEqual(written["pages"], [str(run / "alloc.html")])
+        self.assertEqual(written["event"], "alloc")
+        self.assertEqual(written["title"], "pay.PayTest")
+        self.assertEqual(written["gradleExitCode"], 0)
+        self.assertFalse(self.profiling.opened.exists(), "the editor opens them")
+
+    def test_an_editor_names_the_task_to_profile(self) -> None:
+        chosen = {
+            **self.profiling.environment,
+            "KOTLIN_ANALYZER_PROFILER_EVENT": "wall",
+            "KOTLIN_ANALYZER_PROFILED_TASK": "bootRun",
+        }
+        result = self.run_task("profile-run", str(self.source), extra=chosen)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gradle_call()[1][0], ":services:payments:bootRun")
+
+    def test_an_editors_unknown_event_or_file_option_is_refused(self) -> None:
+        for refused in ({"KOTLIN_ANALYZER_PROFILER_EVENT": "heap"}, {
+            "KOTLIN_ANALYZER_PROFILER_EVENT": "cpu",
+            "KOTLIN_ANALYZER_PROFILER_OPTIONS": "file=/tmp/x.jfr",
+        }):
+            result = self.run_task(
+                "profile-tests", str(self.source), "pay.PayTest", extra={**self.profiling.environment, **refused}
+            )
+            self.assertEqual(result.returncode, 1, refused)
+            self.assertFalse(self.call_file.exists(), "Gradle didn't run")
+
     def test_no_recording_is_said_and_fails(self) -> None:
         self.write_executable(self.root / "gradlew", RECORDING_GRADLE)
         result = self.run_task("profile-tests", str(self.source), "pay.PayTest", extra=self.profiling.environment)

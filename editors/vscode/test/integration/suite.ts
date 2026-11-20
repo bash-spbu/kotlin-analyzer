@@ -23,6 +23,7 @@ export async function run(): Promise<void> {
     ["Gradle tasks build, clean and test the file's project or a parent", () => runsGradleTasks(workspace)],
     ["code lenses run a test and count references", () => runsTestsFromLenses(workspace)],
     ["a Debug test lens debugs the test through Gradle", () => debugsTestsFromLenses(workspace)],
+    ["a Profile test lens profiles the test and opens its flame graph", () => profilesTestsFromLenses(workspace)],
     ["the debugger stops at a breakpoint and runs a logpoint", () => debugsAProgram(workspace)],
   ];
   const failures: string[] = [];
@@ -143,7 +144,14 @@ async function debugsTestsFromLenses(workspace: string): Promise<void> {
     return found.some((lens) => lens.command?.title === "Debug test") ? found : undefined;
   }, "a Debug test lens in LibTest.kt");
   const titles = lenses.map((lens) => lens.command?.title).filter((title) => title?.includes("test"));
-  assert.deepEqual(titles, ["▶ Run tests", "Debug tests", "▶ Run test", "Debug test"]);
+  assert.deepEqual(titles, [
+    "▶ Run tests",
+    "Debug tests",
+    "Profile tests",
+    "▶ Run test",
+    "Debug test",
+    "Profile test",
+  ]);
   const debugTest = lenses.find((lens) => lens.command?.title === "Debug test")!.command!;
   const callFile = process.env.GRADLE_CALL;
   assert.ok(callFile, "run.ts sets GRADLE_CALL");
@@ -158,6 +166,40 @@ async function debugsTestsFromLenses(workspace: string): Promise<void> {
   const tests = call.indexOf("--tests");
   assert.deepEqual(call.slice(tests - 3, tests + 3), ["-p", "lib", "test", "--tests", "lib.LibTest.works", "--rerun"]);
   assert.ok(call.includes("-I"), `the init script giving the test JVM the debugger: ${call.join(" ")}`);
+}
+
+async function profilesTestsFromLenses(workspace: string): Promise<void> {
+  const file = vscode.Uri.file(path.join(workspace, "lib/src/test/kotlin/lib/LibTest.kt"));
+  await vscode.window.showTextDocument(file);
+  const lenses = await waitFor(async () => {
+    const found = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", file, 100);
+    return found.some((lens) => lens.command?.title === "Profile test") ? found : undefined;
+  }, "a Profile test lens in LibTest.kt");
+  const profileTest = lenses.find((lens) => lens.command?.title === "Profile test")!.command!;
+  const callFile = process.env.GRADLE_CALL;
+  assert.ok(callFile, "run.ts sets GRADLE_CALL");
+  await fs.rm(callFile, { force: true });
+  // What the pickers would have asked, given as the command's argument.
+  await vscode.commands.executeCommand(profileTest.command, ...(profileTest.arguments ?? []), {
+    event: "cpu",
+    options: "interval=1ms",
+  });
+  const call: string[] = (await fs.readFile(callFile, "utf8")).trim().split("\n");
+  const tests = call.indexOf("--tests");
+  assert.deepEqual(call.slice(tests - 3, tests + 3), ["-p", "lib", "test", "--tests", "lib.LibTest.works", "--rerun"]);
+  const flameGraph = await waitFor(
+    () =>
+      vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .find((tab) => tab.input instanceof vscode.TabInputWebview && tab.label === "CPU: lib.LibTest.works"),
+    "the flame graph's tab",
+  );
+  assert.ok(flameGraph);
+  const profiles = path.join(workspace, "build/kotlin-analyzer/profiles");
+  const [run] = await fs.readdir(profiles);
+  assert.ok(run.endsWith("-cpu"), run);
+  const page = await fs.readFile(path.join(profiles, run, "cpu.html"), "utf8");
+  assert.match(page, /--cpu/);
 }
 
 async function debugsAProgram(workspace: string): Promise<void> {
