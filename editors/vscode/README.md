@@ -38,7 +38,7 @@ Download `kotlin-analyzer-<version>.vsix` from the
 run *Extensions: Install from VSIX…*, or:
 
 ```bash
-code --install-extension kotlin-analyzer-1.1.0.vsix
+code --install-extension kotlin-analyzer-1.1.1.vsix
 ```
 
 The server binary is found in this order:
