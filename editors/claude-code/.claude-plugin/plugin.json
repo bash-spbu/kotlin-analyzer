@@ -1,7 +1,7 @@
 {
   "name": "kotlin-analyzer",
   "description": "Kotlin code intelligence from kotlin-analyzer, a lightweight Kotlin language server in Rust: definitions, references, hover and diagnostics for Kotlin JVM, Multiplatform and Android projects",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": {
     "name": "bash-spbu"
   },

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.svg" width="100%" alt="kotlin-analyzer: a lightweight Kotlin language server in Rust, built like rust-analyzer. It serves many large projects (ktor, Spring backends, nowinandroid, kotlinconf-app) with sub-millisecond hover, a 2-second load and about 250 MB of memory, through extensions for Zed, VS Code, Neovim and Helix, and your AI agent adapts it to your project in a few hundred lines.">
+  <img src="docs/banner.svg" width="100%" alt="kotlin-analyzer: a lightweight Kotlin language server in Rust, built like rust-analyzer, with type inference, data-flow analysis, a debugger, a decompiler, the ktrs formatter and an MCP server built in. It serves many large projects (ktor, Spring backends, nowinandroid, kotlinconf-app) with sub-millisecond hover, a 2.5-second load and about 200 MB of memory, through extensions for Zed, VS Code, Neovim and Helix, and your AI agent adapts it to your project in a few hundred lines.">
 </p>
 
 # kotlin-analyzer
@@ -21,8 +21,8 @@ listed under [Tested on](#tested-on).
   of a millisecond, and diagnostics come back a few milliseconds after an edit
   (see [Benchmarks](#benchmarks)).
 - **Low resource use, even on large projects:** no JVM of its own (Gradle runs once, to
-  export the build's model) and no background compiler. ktor's 2,300 files load in about 2 seconds and stay at about
-  250 MB.
+  export the build's model) and no background compiler. ktor's 2,300 files load in about 2.5 seconds and stay at about
+  200 MB.
 - **Made to be customised by AI agents.** No language server can cover every
   combination of SDK, Kotlin and Gradle versions, build scripts and project
   conventions, and no editor extension suits everyone. Instead of trying to,
@@ -45,12 +45,19 @@ Features:
   selection;
 - code lenses: reference counts, and running a test or a test class with
   Gradle;
+- type inference (generics, lambdas, overload resolution) and data-flow
+  analysis (smart casts, null safety) behind hover, inlay hints and
+  diagnostics;
 - diagnostics with quick fixes, which report only what they are sure of;
 - formatting by ktrs (ktfmt's output, natively) or ktfmt, which the editor
   extensions download;
 - an MCP server for coding agents (`kotlin-analyzer mcp`): definitions,
   references, types, outlines and diagnostics from the editor's own
   analysis, in git worktrees too;
+- a debugger for JVM tests and programs (`kotlin-analyzer dap`), in Zed
+  and VS Code;
+- libraries without sources open decompiled: declarations as Kotlin or
+  Java, bodies as Java;
 - Gradle tasks in every editor (build, clean, test a module).
 
 ### Compared with other Kotlin language servers
@@ -128,8 +135,8 @@ or set `sdk.dir` in `local.properties`.
 **VS Code**
 
 ```bash
-curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v1.0.1/kotlin-analyzer-1.0.1.vsix
-code --install-extension kotlin-analyzer-1.0.1.vsix
+curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v1.1.0/kotlin-analyzer-1.1.0.vsix
+code --install-extension kotlin-analyzer-1.1.0.vsix
 ```
 
 **Neovim** (0.11+, with [lazy.nvim](https://github.com/folke/lazy.nvim))
@@ -184,26 +191,31 @@ with the model its Gradle build exports (Gradle's own time is not counted):
 | Kind | Multiplatform library | Android app | Multiplatform app |
 | Kotlin files / modules | 2,344 / 137 | 281 / 45 | 260 / 10 |
 | Libraries indexed | 386 JARs, 100k names | 399 JARs, 72k names | 317 JARs, 28k names |
-| Workspace load (open to ready) | 2.3 s | 1.8 s | 0.5 s |
-| Memory after a session | 259 MB | 160 MB | 107 MB |
+| Workspace load (open to ready) | 2.6 s | 1.9 s | 0.5 s |
+| Memory after a session | 203 MB | 168 MB | 116 MB |
 | Type references resolved | 90.6% | 97.3% | 92.9% |
-| Checking every file (CLI) | 7.8 s, peak 430 MB | 2.4 s, peak 221 MB | 1.9 s, peak 152 MB |
-| Open a file → diagnostics, p50 / p95 | 4 / 128 ms | 7 / 111 ms | 4 / 81 ms |
-| Edit → fresh diagnostics, p50 / p95 | 1.3 / 17 ms | 1.4 / 4 ms | 1.3 / 7 ms |
-| Hover, p95 | 0.8 ms | 1.5 ms | 0.3 ms |
-| Go to definition, p95 | 0.1 ms | 1.2 ms | 0.1 ms |
-| Completion, p50 / p95 | 6 / 39 ms | 9 / 49 ms | 7 / 23 ms |
+| Values in bodies with a known type | 97.1% | 97.6% | 96.4% |
+| Checking every file (CLI) | 10.3 s, peak 545 MB | 4.1 s, peak 255 MB | 2.2 s, peak 170 MB |
+| Open a file → diagnostics, p50 / p95 | 5 / 130 ms | 6 / 91 ms | 5 / 82 ms |
+| Edit → fresh diagnostics, p50 / p95 | 2.0 / 20 ms | 1.9 / 6 ms | 2.1 / 13 ms |
+| Hover, p50 / p95 | 0.1 / 3.9 ms | 0.1 / 38 ms | 0.1 / 7.0 ms |
+| Go to definition, p50 / p95 | 0.1 / 2.3 ms | 0.1 / 19 ms | 0.1 / 4.1 ms |
+| Completion, p50 / p95 | 5 / 22 ms | 7 / 23 ms | 5 / 12 ms |
 
 How it was measured:
 - Machine: MacBook Pro (Mac16,8), Apple M4 Pro with 12 cores (8
-  performance, 4 efficiency), 24 GB RAM, macOS 27.2.
-- Build: a release build of `kotlin-analyzer` 1.0.0 (Rust 1.99), with a
+  performance, 4 efficiency), 24 GB RAM, macOS 27.2.1.
+- Build: a release build of `kotlin-analyzer` 1.1.0 (Rust 1.99.1), with a
   warm filesystem cache.
 - Latencies: over stdio, the way an editor talks to the server. 40 random
   files per project were each opened, then queried for hover and definition
   at 5 random names and for completion after 2 dots, then edited by adding a
   top-level declaration.
-- Workspace check: `kotlin-analyzer diagnostics`.
+- Workspace check: `kotlin-analyzer diagnostics`, its peak the maximum
+  resident set size `/usr/bin/time -l` reports.
+- Values in bodies: `kotlin-analyzer analysis-stats`, the names in function
+  bodies that are values (not classes or argument labels) and whose type
+  the inference knows.
 - Script: [`bench/lsp_latency.py`](bench/lsp_latency.py), run as
   `python3 -I bench/lsp_latency.py <root> --project-json <model>`.
 
