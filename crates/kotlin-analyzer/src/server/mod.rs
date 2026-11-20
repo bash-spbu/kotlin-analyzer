@@ -14,6 +14,7 @@ mod formatting;
 mod gradle_export;
 mod handlers;
 mod hierarchy;
+mod jdk_download;
 mod library_sources;
 mod progress;
 mod pull_diagnostics;
@@ -51,10 +52,15 @@ pub(crate) use library_sources::cache_directory;
 /// start while one is running).
 const LOADING_TOKEN: &str = "kotlin-analyzer/loading";
 const EXPORT_TOKEN: &str = "kotlin-analyzer/gradle";
+const JDK_TOKEN: &str = "kotlin-analyzer/jdk-download";
 
 /// `workspace/executeCommand`: reload the project model and re-read the
 /// workspace's files.
 pub const RELOAD_COMMAND: &str = "kotlin-analyzer.reloadWorkspace";
+
+/// `workspace/executeCommand`: download a JDK into `~/.jdks` — asking which,
+/// or, with arguments `[vendor, release]`, that one (`docs/spec/jdk.md`).
+pub const DOWNLOAD_JDK_COMMAND: &str = "kotlin-analyzer.downloadJdk";
 
 /// How a session ended. LSP: an `exit` not preceded by `shutdown` (or a
 /// client that just went away) ends with exit code 1.
@@ -75,6 +81,14 @@ pub fn run() -> Result<Ending, String> {
 
 /// Serves `connection` until the client says `exit` (or goes away).
 pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
+    run_on_with_java(connection, project_model::jdk::JavaEnvironment::current())
+}
+
+/// [`run_on`], with `java` for where the JDK is.
+pub(crate) fn run_on_with_java(
+    connection: &Connection,
+    java: project_model::jdk::JavaEnvironment,
+) -> Result<Ending, String> {
     let (initialize_id, initialize_params) = connection
         .initialize_start()
         .map_err(|error| error.to_string())?;
@@ -102,6 +116,12 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         .initialization_options
         .as_ref()
         .and_then(|options| options.get("gradleExport"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let offer_jdk_download = params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("offerJdkDownload"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     let log_level = settings::log_level(params.initialization_options.as_ref());
@@ -153,8 +173,13 @@ pub(crate) fn run_on(connection: &Connection) -> Result<Ending, String> {
         state.agent_sockets = agent::listen(&directory, &state.folders, &state.task_sender);
     }
     state.gradle_export = gradle_export;
+    state.jdk_missing = java.runtime().is_none();
+    state.java = java;
     state.start_loading();
     state.start_export();
+    if offer_jdk_download {
+        state.offer_jdk_download_if_missing();
+    }
     let ending = state.main_loop(&connection.receiver);
     Event::info("session-ended")
         .text(
@@ -291,7 +316,7 @@ fn capabilities() -> ServerCapabilities {
             }),
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
-            commands: vec![RELOAD_COMMAND.to_owned()],
+            commands: vec![RELOAD_COMMAND.to_owned(), DOWNLOAD_JDK_COMMAND.to_owned()],
             ..lsp_types::ExecuteCommandOptions::default()
         }),
         ..ServerCapabilities::default()
@@ -393,6 +418,11 @@ enum Task {
     Agent {
         request: crate::agent::protocol::AgentRequest,
         replier: agent::Replier,
+    },
+    /// A JDK download ended (see `jdk_download`).
+    JdkDownloaded {
+        installed: Result<jdk_download::InstalledJdk, jdk_download::Failure>,
+        took: Duration,
     },
     Diagnostics {
         file: FileId,
@@ -509,6 +539,13 @@ struct GlobalState {
     /// than being sent them; and whether it can be asked to ask again.
     pull_diagnostics: bool,
     diagnostics_refresh: bool,
+    /// Where the JDK is looked for.
+    java: project_model::jdk::JavaEnvironment,
+    /// No JDK runs programs: the server offers to download one.
+    jdk_missing: bool,
+    /// The questions about downloading a JDK the client hasn't answered.
+    jdk_questions: FxHashMap<RequestId, jdk_download::JdkQuestion>,
+    downloading_jdk: bool,
 }
 
 impl GlobalState {
@@ -567,6 +604,10 @@ impl GlobalState {
             revision: 0,
             pull_diagnostics: false,
             diagnostics_refresh: false,
+            java: project_model::jdk::JavaEnvironment::default(),
+            jdk_missing: false,
+            jdk_questions: FxHashMap::default(),
+            downloading_jdk: false,
         }
     }
 
@@ -614,7 +655,7 @@ impl GlobalState {
                             }
                             self.on_notification(notification);
                         }
-                        Message::Response(_) => {}
+                        Message::Response(response) => self.on_response(response),
                     }
                 }
                 recv(self.task_receiver) -> task => {
@@ -848,6 +889,7 @@ impl GlobalState {
                 }
                 self.on_loaded(loaded);
             }
+            Task::JdkDownloaded { installed, took } => self.on_jdk_downloaded(installed, took),
             Task::Diagnostics {
                 file,
                 version,
@@ -874,6 +916,166 @@ impl GlobalState {
                     },
                 );
             }
+        }
+    }
+
+    /// Asks which JDK to download when there's none — once a session.
+    fn offer_jdk_download_if_missing(&mut self) {
+        if !self.jdk_missing {
+            return;
+        }
+        Event::info("jdk-missing").emit();
+        self.ask_about_jdk(jdk_download::JdkQuestion::Vendor {
+            project_release: load::declared_jdk_release(&self.model),
+        });
+    }
+
+    fn ask_about_jdk(&mut self, question: jdk_download::JdkQuestion) {
+        let id = self.send_request::<request::ShowMessageRequest>(question.params());
+        self.jdk_questions.insert(id, question);
+    }
+
+    /// The client's answer to a request the server sent: a question about
+    /// downloading a JDK is followed up; other answers need nothing.
+    fn on_response(&mut self, response: Response) {
+        let Some(question) = self.jdk_questions.remove(&response.id) else {
+            return;
+        };
+        let chosen = response
+            .response_result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.get("title"))
+            .and_then(serde_json::Value::as_str);
+        match question.answer(chosen) {
+            jdk_download::JdkAnswer::Vendor(vendor) => {
+                let project_release = load::declared_jdk_release(&self.model);
+                self.ask_about_jdk(jdk_download::JdkQuestion::release_of(
+                    vendor,
+                    project_release,
+                ));
+            }
+            jdk_download::JdkAnswer::Release(vendor, release) => {
+                self.start_jdk_download(vendor, release);
+            }
+            jdk_download::JdkAnswer::Declined => Event::info("jdk-download-declined").emit(),
+        }
+    }
+
+    /// Downloads `release` of `vendor` into `~/.jdks` in the background,
+    /// its progress in the status bar.
+    fn start_jdk_download(&mut self, vendor: jdk_download::Vendor, release: u32) {
+        if self.downloading_jdk {
+            return;
+        }
+        let Some(jdks) = self.java.jdks_directory() else {
+            self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::ERROR,
+                message: "kotlin-analyzer can't download a JDK: HOME isn't set".to_owned(),
+            });
+            return;
+        };
+        self.downloading_jdk = true;
+        Event::info("jdk-download-started")
+            .text("vendor", vendor.name())
+            .count("release", release)
+            .emit();
+        self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+            token: lsp_types::NumberOrString::String(JDK_TOKEN.to_owned()),
+        });
+        self.progress_on(
+            JDK_TOKEN,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: progress::title("Downloading a JDK"),
+                cancellable: Some(false),
+                message: Some(format!("{} {release}", vendor.name())),
+                percentage: Some(0),
+            }),
+        );
+        let sender = self.task_sender.clone();
+        let progress = progress::Progress::begun(self.task_sender.clone(), JDK_TOKEN.to_owned());
+        std::thread::Builder::new()
+            .name("kotlin-analyzer-jdk-download".to_owned())
+            .spawn(move || {
+                let started = Instant::now();
+                let installed = crate::log::within(Context::JdkDownload, || {
+                    std::panic::catch_unwind(|| {
+                        jdk_download::install(vendor, release, &jdks, &|message, percentage| {
+                            progress.report(message, percentage);
+                        })
+                    })
+                })
+                .unwrap_or_else(|_| {
+                    Err(jdk_download::Failure {
+                        kind: jdk_download::FailureKind::Panicked,
+                        detail: "kotlin-analyzer failed while downloading; its log says where"
+                            .to_owned(),
+                    })
+                });
+                let took = started.elapsed();
+                let _ = sender.send(Task::JdkDownloaded { installed, took });
+            })
+            .expect("a thread can be spawned");
+    }
+
+    /// A JDK download ended: a JDK now there exports the model again and
+    /// reloads; a failure is shown.
+    fn on_jdk_downloaded(
+        &mut self,
+        installed: Result<jdk_download::InstalledJdk, jdk_download::Failure>,
+        took: Duration,
+    ) {
+        self.downloading_jdk = false;
+        let (summary, message) = match &installed {
+            Ok(jdk) => {
+                Event::info("jdk-download-finished")
+                    .flag("already-there", jdk.already_there)
+                    .duration("took", took)
+                    .emit();
+                let installed = if jdk.already_there {
+                    format!("the JDK {} was already in", jdk.name)
+                } else {
+                    format!("installed the JDK {} in", jdk.name)
+                };
+                (
+                    jdk.name.clone(),
+                    lsp_types::ShowMessageParams {
+                        typ: lsp_types::MessageType::INFO,
+                        message: format!(
+                            "kotlin-analyzer: {installed} {}; the workspace reloads with it.",
+                            jdk.home.display()
+                        ),
+                    },
+                )
+            }
+            Err(failure) => {
+                Event::warn("jdk-download-failed")
+                    .text("reason", failure.kind.name())
+                    .duration("took", took)
+                    .emit();
+                (
+                    "failed".to_owned(),
+                    lsp_types::ShowMessageParams {
+                        typ: lsp_types::MessageType::ERROR,
+                        message: format!(
+                            "kotlin-analyzer couldn't download a JDK: {}",
+                            failure.detail
+                        ),
+                    },
+                )
+            }
+        };
+        self.progress_on(
+            JDK_TOKEN,
+            WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: Some(summary),
+            }),
+        );
+        self.notify::<notification::ShowMessage>(message);
+        if installed.is_ok() {
+            self.jdk_missing = self.java.runtime().is_none();
+            self.start_loading();
+            self.start_export();
         }
     }
 
@@ -1337,6 +1539,7 @@ impl GlobalState {
             diagnostics_config: self.diagnostics_config.clone(),
             formatting: self.formatting.clone(),
             code_lens_config: self.code_lens_config,
+            jdk_missing: self.jdk_missing,
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
@@ -1487,10 +1690,19 @@ impl GlobalState {
                 self.start_loading();
                 self.start_export();
             }
+            Ok(params) if params.command == DOWNLOAD_JDK_COMMAND => {
+                self.respond(Response::new_ok(request.id, serde_json::Value::Null));
+                match chosen_jdk(&params.arguments) {
+                    Some((vendor, release)) => self.start_jdk_download(vendor, release),
+                    None => self.ask_about_jdk(jdk_download::JdkQuestion::Vendor {
+                        project_release: load::declared_jdk_release(&self.model),
+                    }),
+                }
+            }
             _ => self.respond(Response::new_err(
                 request.id,
                 lsp_server::ErrorCode::InvalidParams as i32,
-                format!("commands: {RELOAD_COMMAND}"),
+                format!("commands: {RELOAD_COMMAND}, {DOWNLOAD_JDK_COMMAND}"),
             )),
         }
     }
@@ -1786,14 +1998,12 @@ impl GlobalState {
         let _ = self.sender.send(Message::Notification(notification));
     }
 
-    fn send_request<R: lsp_types::request::Request>(&mut self, params: R::Params) {
+    fn send_request<R: lsp_types::request::Request>(&mut self, params: R::Params) -> RequestId {
         self.next_request += 1;
-        let request = Request::new(
-            RequestId::from(format!("kotlin-analyzer/{}", self.next_request)),
-            R::METHOD.to_owned(),
-            params,
-        );
+        let id = RequestId::from(format!("kotlin-analyzer/{}", self.next_request));
+        let request = Request::new(id.clone(), R::METHOD.to_owned(), params);
         let _ = self.sender.send(Message::Request(request));
+        id
     }
 
     fn progress_on(&self, token: &str, progress: WorkDoneProgress) {
@@ -1802,6 +2012,16 @@ impl GlobalState {
             value: lsp_types::ProgressParamsValue::WorkDone(progress),
         });
     }
+}
+
+/// The `[vendor, release]` a download command names (`["temurin", 21]`).
+fn chosen_jdk(arguments: &[serde_json::Value]) -> Option<(jdk_download::Vendor, u32)> {
+    let [vendor, release] = arguments else {
+        return None;
+    };
+    let vendor = jdk_download::Vendor::from_name(vendor.as_str()?)?;
+    let release = u32::try_from(release.as_u64()?).ok()?;
+    Some((vendor, release))
 }
 
 /// When the user is told everything is ready: after a load, once the work

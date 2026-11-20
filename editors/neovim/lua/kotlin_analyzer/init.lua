@@ -19,6 +19,7 @@ local kotlin_analyzer = {}
 
 local NAME = "kotlin_analyzer"
 local RELOAD_COMMAND = "kotlin-analyzer.reloadWorkspace"
+local DOWNLOAD_JDK_COMMAND = "kotlin-analyzer.downloadJdk"
 
 local defaults = {
   cmd = nil,
@@ -53,19 +54,24 @@ local function clients()
   return vim.lsp.get_clients({ name = NAME })
 end
 
-local function reload_workspace()
+--- Runs the server's `command` on every running client.
+local function execute(command, failure)
   local running = clients()
   if #running == 0 then
     notify("not running", vim.log.levels.WARN)
     return
   end
   for _, client in ipairs(running) do
-    client:request("workspace/executeCommand", { command = RELOAD_COMMAND, arguments = {} }, function(error)
+    client:request("workspace/executeCommand", { command = command, arguments = {} }, function(error)
       if error then
-        notify("reload failed: " .. error.message, vim.log.levels.ERROR)
+        notify(failure .. ": " .. error.message, vim.log.levels.ERROR)
       end
     end)
   end
+end
+
+local function reload_workspace()
+  execute(RELOAD_COMMAND, "reload failed")
 end
 
 --- The commands the server's code lenses carry, which the client runs.
@@ -112,6 +118,10 @@ local function create_commands(options)
   vim.api.nvim_create_user_command("KotlinAnalyzerReload", reload_workspace, {
     desc = "Export the Gradle model again if the build changed, and reload every file",
   })
+  vim.api.nvim_create_user_command("KotlinAnalyzerDownloadJdk", function()
+    -- The server asks which vendor and release.
+    execute(DOWNLOAD_JDK_COMMAND, "JDK download failed")
+  end, { desc = "Download a JDK into ~/.jdks" })
   require("kotlin_analyzer.gradle").create_command()
   vim.api.nvim_create_user_command("KotlinAnalyzerInstall", function()
     vim.fn.delete(release.binary(version))

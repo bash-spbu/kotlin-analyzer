@@ -58,6 +58,12 @@ The server binary is the first of:
    downloads are removed. Releases exist for macOS and Linux on arm64 and
    x86_64.
 
+Gradle and the analysis need a JDK: `JAVA_HOME`, `java` on `PATH`, or one in
+`~/.jdks`. With none, the server asks at startup which to download into
+`~/.jdks` — a vendor, then a version, as buttons in a notification — and
+the code action *Download a JDK…* asks again; then Gradle exports the
+project with it and the workspace reloads (`docs/spec/jdk.md`).
+
 ## Agents
 
 The extension adds an MCP server, `kotlin-analyzer` (*Settings → AI → MCP

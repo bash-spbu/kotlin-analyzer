@@ -232,7 +232,15 @@ fn export(root: &Path, output: &Path) -> Result<(), ExportFailure> {
     } else {
         PathBuf::from("gradle")
     };
-    let result = Command::new(&program)
+    let mut command = Command::new(&program);
+    let runtime = project_model::jdk::JavaEnvironment::current().runtime();
+    if let Some(java_home) = runtime
+        .as_ref()
+        .and_then(|runtime| runtime.java_home_to_set())
+    {
+        command.env("JAVA_HOME", java_home);
+    }
+    let result = command
         .current_dir(root)
         .args(EXPORT_ARGUMENTS)
         .arg("--init-script")

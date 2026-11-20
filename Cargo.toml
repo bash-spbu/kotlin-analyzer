@@ -43,6 +43,7 @@ expect-test = "1"
 memory-stats = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

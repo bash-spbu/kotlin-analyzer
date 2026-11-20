@@ -33,6 +33,7 @@ rayon.workspace = true
 walkdir.workspace = true
 memory-stats.workspace = true
 rustc-hash.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

@@ -26,6 +26,7 @@ pub(crate) enum Context {
         generation: u64,
     },
     GradleExport,
+    JdkDownload,
 }
 
 thread_local! {
@@ -106,6 +107,7 @@ fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
             .text("while", "loading")
             .count("generation", generation),
         Some(Context::GradleExport) => event.text("while", "gradle-export"),
+        Some(Context::JdkDownload) => event.text("while", "jdk-download"),
         None => event,
     };
     let frames = own_frames(&Backtrace::force_capture().to_string(), 40);

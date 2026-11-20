@@ -159,6 +159,8 @@ Commands:
 
 - *kotlin-analyzer: Reload Workspace* exports the model again if the build
   changed, then reloads every file.
+- *Download a JDK* downloads one into `~/.jdks`, asking which vendor and
+  release; without any JDK the server asks at startup.
 - *Restart Server*.
 - *Show Logs*.
 

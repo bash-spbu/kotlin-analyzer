@@ -31,6 +31,8 @@ pub(super) struct Snapshot {
     pub(super) diagnostics_config: Arc<ide::DiagnosticsConfig>,
     pub(super) formatting: Arc<super::formatting::FormattingConfig>,
     pub(super) code_lens_config: super::code_lens::CodeLensConfig,
+    /// No JDK runs programs: code actions offer to download one.
+    pub(super) jdk_missing: bool,
     /// What a position's column counts, as agreed with the client.
     pub(super) encoding: vfs::ColumnUnit,
     /// How many times the workspace has changed: a pull diagnostics
@@ -51,6 +53,7 @@ impl Snapshot {
             diagnostics_config: self.diagnostics_config.clone(),
             formatting: self.formatting.clone(),
             code_lens_config: self.code_lens_config,
+            jdk_missing: self.jdk_missing,
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
@@ -559,16 +562,39 @@ fn to_lsp(index: &LineIndex, text: &str, diagnostic: &ide::Diagnostic) -> Diagno
     }
 }
 
-/// The fixes of the diagnostics overlapping the requested range.
+/// The fixes of the diagnostics overlapping the requested range, and,
+/// while there's no JDK, downloading one.
 fn code_actions(
     snapshot: &Snapshot,
     params: lsp_types::CodeActionParams,
 ) -> Cancellable<serde_json::Value> {
+    let mut actions = diagnostic_fixes(snapshot, params)?;
+    if snapshot.jdk_missing {
+        actions.push(lsp_types::CodeActionOrCommand::CodeAction(
+            lsp_types::CodeAction {
+                title: "Download a JDK…".to_owned(),
+                command: Some(lsp_types::Command {
+                    title: "Download a JDK…".to_owned(),
+                    command: super::DOWNLOAD_JDK_COMMAND.to_owned(),
+                    arguments: None,
+                }),
+                ..lsp_types::CodeAction::default()
+            },
+        ));
+    }
+    Ok(serde_json::to_value(actions).unwrap_or_default())
+}
+
+/// The fixes of the diagnostics overlapping the requested range.
+fn diagnostic_fixes(
+    snapshot: &Snapshot,
+    params: lsp_types::CodeActionParams,
+) -> Cancellable<Vec<lsp_types::CodeActionOrCommand>> {
     let Some(file) = snapshot.request_file.filter(|_| snapshot.loaded) else {
-        return Ok(serde_json::Value::Null);
+        return Ok(Vec::new());
     };
     let Some(text) = snapshot.analysis.file_text(file)? else {
-        return Ok(serde_json::Value::Null);
+        return Ok(Vec::new());
     };
     let index = LineIndex::with_unit(&text, snapshot.encoding);
     let start = convert::offset(&text, params.range.start, snapshot.encoding) as u32;
@@ -617,7 +643,7 @@ fn code_actions(
             ));
         }
     }
-    Ok(serde_json::to_value(actions).unwrap_or_default())
+    Ok(actions)
 }
 
 pub(super) fn symbol_kind(kind: SymbolKind) -> lsp_types::SymbolKind {

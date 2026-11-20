@@ -10,6 +10,7 @@ description = "A JVM debugger for Kotlin and Java over JDWP"
 
 [dependencies]
 jdwp.workspace = true
+project-model.workspace = true
 walkdir.workspace = true
 
 [lints]

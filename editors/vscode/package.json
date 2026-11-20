@@ -172,6 +172,11 @@
         "category": "kotlin-analyzer"
       },
       {
+        "command": "kotlin-analyzer.downloadJdk",
+        "title": "Download a JDK",
+        "category": "kotlin-analyzer"
+      },
+      {
         "command": "kotlin-analyzer.restartServer",
         "title": "Restart Server",
         "category": "kotlin-analyzer"

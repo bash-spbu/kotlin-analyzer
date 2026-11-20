@@ -7,6 +7,7 @@
 //! missing. See `docs/spec/project-model.md`.
 
 mod convention;
+pub mod jdk;
 mod project_json;
 
 use std::path::{Path, PathBuf};

@@ -183,12 +183,12 @@ impl FormatterSetup {
     }
 }
 
-/// `$JAVA_HOME/bin/java` when there is one, else `java` on `PATH`.
+/// `$JAVA_HOME/bin/java` when there is one, else `java` on `PATH`, else
+/// a JDK's in `~/.jdks`.
 fn java() -> PathBuf {
-    let from_java_home = std::env::var_os("JAVA_HOME")
-        .map(|home| Path::new(&home).join("bin").join("java"))
-        .filter(|java| java.is_file());
-    from_java_home.unwrap_or_else(|| PathBuf::from("java"))
+    project_model::jdk::JavaEnvironment::current()
+        .runtime()
+        .map_or_else(|| PathBuf::from("java"), |runtime| runtime.java())
 }
 
 /// Why a formatter gave no text.

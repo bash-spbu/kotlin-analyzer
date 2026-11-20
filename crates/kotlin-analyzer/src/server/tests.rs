@@ -39,13 +39,24 @@ impl Client {
         initialization_options: Value,
         offered: Value,
     ) -> (Client, Value) {
+        let java = project_model::jdk::JavaEnvironment::current();
+        Client::start_with_java(root, initialization_options, offered, java)
+    }
+
+    /// A client whose server looks for the JDK in `java`.
+    fn start_with_java(
+        root: &Path,
+        initialization_options: Value,
+        offered: Value,
+        java: project_model::jdk::JavaEnvironment,
+    ) -> (Client, Value) {
         // Agents' sockets only where a test asks for them.
         let mut initialization_options = initialization_options;
         if let Some(options) = initialization_options.as_object_mut() {
             options.entry("agentSockets").or_insert(Value::Bool(false));
         }
         let (server, connection) = Connection::memory();
-        let thread = std::thread::spawn(move || super::run_on(&server));
+        let thread = std::thread::spawn(move || super::run_on_with_java(&server, java));
         let mut client = Client {
             connection,
             server: Some(thread),
@@ -214,6 +225,30 @@ impl Client {
     fn shut_down(mut self) {
         self.request("shutdown", Value::Null);
         assert_eq!(self.exit(), super::Ending::AfterShutdown);
+    }
+
+    /// The server's next request with `method`, left for the test to
+    /// answer (`reply`); its other requests get an empty answer.
+    fn take_server_request(&mut self, method: &str) -> Request {
+        loop {
+            match self.receive() {
+                Message::Request(request) if request.method == method => {
+                    self.server_requests.push(request.method.clone());
+                    return request;
+                }
+                Message::Request(request) => self.answer(request),
+                Message::Notification(notification) => self.unread.push(notification),
+                Message::Response(_) => {}
+            }
+        }
+    }
+
+    fn reply(&self, request: Request, result: Value) {
+        let response = Response::new_ok(request.id, result);
+        self.connection
+            .sender
+            .send(Message::Response(response))
+            .unwrap();
     }
 
     /// Waits until the server has sent a request with `method`.
@@ -1332,4 +1367,178 @@ fn once_loading_and_checking_are_over_the_status_bar_says_all_is_set_for_a_momen
     );
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A machine without a JDK: no `JAVA_HOME`, no `java` on `PATH`, an empty
+/// home.
+fn no_jdk(root: &Path) -> project_model::jdk::JavaEnvironment {
+    project_model::jdk::JavaEnvironment {
+        java_home: None,
+        path: Vec::new(),
+        home: Some(root.join("home")),
+        macos_stub: None,
+    }
+}
+
+/// The titles of a `window/showMessageRequest`'s buttons.
+fn button_titles(request: &Request) -> Vec<String> {
+    request.params["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|action| action["title"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn without_a_jdk_the_server_asks_which_vendor_then_which_release() {
+    let root = workspace("no-jdk");
+    std::fs::write(root.join("Main.kt"), "fun main() {}\n").unwrap();
+    let (mut client, _) = Client::start_with_java(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({}),
+        no_jdk(&root),
+    );
+    let vendors = client.take_server_request("window/showMessageRequest");
+    assert!(
+        vendors.params["message"]
+            .as_str()
+            .unwrap()
+            .contains("found no JDK"),
+        "{}",
+        vendors.params
+    );
+    assert_eq!(
+        button_titles(&vendors),
+        [
+            "Eclipse Temurin",
+            "Azul Zulu",
+            "GraalVM Community",
+            "Microsoft",
+            "Not now"
+        ]
+    );
+    client.reply(vendors, json!({ "title": "Azul Zulu" }));
+    let releases = client.take_server_request("window/showMessageRequest");
+    assert_eq!(
+        releases.params["message"],
+        "Which Java version of Azul Zulu?"
+    );
+    assert_eq!(
+        button_titles(&releases),
+        ["21 (LTS)", "25 (LTS)", "17 (LTS)", "Cancel"]
+    );
+    client.reply(releases, json!({ "title": "Cancel" }));
+    client.wait_for_load(1);
+
+    // Code actions offer it anywhere while there's no JDK.
+    let file = root.join("Main.kt");
+    client.open(&file, "fun main() {}\n");
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    assert_eq!(actions[0]["title"], "Download a JDK…");
+    assert_eq!(
+        actions[0]["command"]["command"],
+        super::DOWNLOAD_JDK_COMMAND
+    );
+
+    // The command asks again, from the start.
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": super::DOWNLOAD_JDK_COMMAND, "arguments": [] }),
+    );
+    let again = client.take_server_request("window/showMessageRequest");
+    assert_eq!(button_titles(&again)[0], "Eclipse Temurin");
+    client.reply(again, Value::Null);
+    // Declined twice: nothing downloads.
+    client.request("workspace/symbol", json!({ "query": "x" }));
+    let downloading = client
+        .unread
+        .iter()
+        .any(|notification| notification.params["token"] == "kotlin-analyzer/jdk-download");
+    assert!(!downloading);
+    client.shut_down();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn with_a_jdk_the_server_asks_nothing_and_offers_no_download() {
+    let root = workspace("has-jdk");
+    let java_home = root.join("jdk");
+    std::fs::create_dir_all(java_home.join("bin")).unwrap();
+    std::fs::write(java_home.join("bin/java"), "").unwrap();
+    let java = project_model::jdk::JavaEnvironment {
+        java_home: Some(java_home),
+        ..no_jdk(&root)
+    };
+    let (mut client, _) =
+        Client::start_with_java(&root, json!({ "gradleExport": false }), json!({}), java);
+    client.wait_for_load(1);
+    let file = root.join("Main.kt");
+    client.open(&file, "fun main() {}\n");
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri(&file) },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+            "context": { "diagnostics": [] },
+        }),
+    );
+    assert_eq!(actions, json!([]));
+    assert!(
+        !client
+            .server_requests
+            .iter()
+            .any(|method| method == "window/showMessageRequest"),
+        "{:?}",
+        client.server_requests
+    );
+    client.shut_down();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn offer_jdk_download_false_asks_nothing_at_startup() {
+    let root = workspace("no-jdk-quiet");
+    let (mut client, _) = Client::start_with_java(
+        &root,
+        json!({ "gradleExport": false, "offerJdkDownload": false }),
+        json!({}),
+        no_jdk(&root),
+    );
+    client.wait_for_load(1);
+    client.request("workspace/symbol", json!({ "query": "x" }));
+    assert!(
+        !client
+            .server_requests
+            .iter()
+            .any(|method| method == "window/showMessageRequest"),
+        "{:?}",
+        client.server_requests
+    );
+    client.shut_down();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_download_command_names_a_vendor_and_a_release_or_asks() {
+    use super::jdk_download::Vendor;
+    assert_eq!(
+        super::chosen_jdk(&[json!("temurin"), json!(21)]),
+        Some((Vendor::Temurin, 21))
+    );
+    assert_eq!(
+        super::chosen_jdk(&[json!("graalvm_community"), json!(25)]),
+        Some((Vendor::GraalVmCommunity, 25))
+    );
+    assert_eq!(super::chosen_jdk(&[]), None);
+    assert_eq!(super::chosen_jdk(&[json!("corretto"), json!(21)]), None);
+    assert_eq!(super::chosen_jdk(&[json!("temurin"), json!("21")]), None);
 }

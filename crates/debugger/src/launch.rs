@@ -14,6 +14,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use project_model::jdk::JavaEnvironment;
+
 /// How long a JVM may take to connect: Gradle builds first.
 const CONNECT_PATIENCE: Duration = Duration::from_secs(15 * 60);
 /// The most output lines kept.
@@ -253,6 +255,13 @@ fn gradle(root: &Path, arguments: &[String], agent: &str) -> Result<Command, Str
     } else {
         Command::new("gradle")
     };
+    let runtime = JavaEnvironment::current().runtime();
+    if let Some(java_home) = runtime
+        .as_ref()
+        .and_then(|runtime| runtime.java_home_to_set())
+    {
+        command.env("JAVA_HOME", java_home);
+    }
     command
         .args(arguments)
         .args(["--console=plain", "-I"])
@@ -281,11 +290,11 @@ fn init_script(agent: &str) -> String {
     )
 }
 
+/// `$JAVA_HOME/bin/java`, else `java` on `PATH`, else a JDK's in `~/.jdks`.
 fn java() -> PathBuf {
-    std::env::var_os("JAVA_HOME")
-        .map(|home| Path::new(&home).join("bin").join("java"))
-        .filter(|java| java.is_file())
-        .unwrap_or_else(|| PathBuf::from("java"))
+    JavaEnvironment::current()
+        .runtime()
+        .map_or_else(|| PathBuf::from("java"), |runtime| runtime.java())
 }
 
 fn keep_lines(

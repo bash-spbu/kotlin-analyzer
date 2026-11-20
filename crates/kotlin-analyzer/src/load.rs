@@ -167,22 +167,17 @@ pub fn index_libraries(
 }
 
 /// The JDK's API (`lib/ct.sym`, for the project's release) and sources
-/// (`lib/src.zip`): from the model, or `JAVA_HOME`.
+/// (`lib/src.zip`): from the model, `JAVA_HOME`, or a JDK in `~/.jdks`.
 fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
-    let home = model
-        .jdk
-        .as_ref()
-        .map(|jdk| jdk.home.clone())
-        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
+    let home = model.jdk.as_ref().map(|jdk| jdk.home.clone()).or_else(|| {
+        let runtime = project_model::jdk::JavaEnvironment::current().runtime()?;
+        runtime.home().map(Path::to_path_buf)
+    })?;
     let symbols = home.join("lib/ct.sym");
     if !symbols.is_file() {
         return None;
     }
-    let declared = model
-        .jdk
-        .as_ref()
-        .and_then(|jdk| jdk.release)
-        .or_else(|| agreed_jdk_release(model));
+    let declared = declared_jdk_release(model);
     let (release, known) = match declared {
         Some(release) => (release, hir::JdkRelease::Declared),
         None => (java_version(&home)?, hir::JdkRelease::RunningJdk),
@@ -197,6 +192,16 @@ fn jdk_library(model: &ProjectModel) -> Option<hir::LibrarySource> {
         },
         sources: source_archive.is_file().then_some(source_archive),
     })
+}
+
+/// The JDK release the project compiles against: the model's, else the one
+/// every JVM source set agrees on.
+pub(crate) fn declared_jdk_release(model: &ProjectModel) -> Option<u32> {
+    model
+        .jdk
+        .as_ref()
+        .and_then(|jdk| jdk.release)
+        .or_else(|| agreed_jdk_release(model))
 }
 
 /// The JDK release every JVM source set compiles against, when they all
