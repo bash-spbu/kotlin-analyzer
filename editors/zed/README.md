@@ -22,10 +22,11 @@ Also:
   INTO`, `UPDATE name SET`, `DELETE FROM`, `MERGE INTO`, in any case) —
   `jdbc.sql("""…""")`, `jdbcTemplate.query("…")` — in one after a
   `// language=SQL` comment, as IntelliJ marks it, and in Spring Data's
-  `@Query("…")`; a string's pieces between templates (`$table`) are one SQL
-  text. Regular expressions in `Regex("…")`, `"…".toRegex()` and
-  `Pattern.compile("…")`, `TODO`/`FIXME` in comments
-  (`languages/kotlin/injections.scm`);
+  `@Query("…")`. JSON and YAML (Zed's own) in a string after a
+  `// language=JSON` or `// language=YAML` comment. A string's pieces
+  between templates (`$table`) are one SQL, JSON or YAML text. Regular
+  expressions in `Regex("…")`, `"…".toRegex()` and `Pattern.compile("…")`,
+  `TODO`/`FIXME` in comments (`languages/kotlin/injections.scm`);
 - Enter inside a KDoc or block comment starts the line with `* `;
 - quotes, backticks and `/*` don't close themselves inside strings and
   comments (`languages/kotlin/overrides.scm`).

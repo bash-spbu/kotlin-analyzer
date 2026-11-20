@@ -10,7 +10,10 @@ Kotlin support in one extension:
   AS`, `INSERT INTO`, `UPDATE name SET`, `DELETE FROM`, `MERGE INTO`, in
   any case), in a `"` string that starts so (`SELECT … FROM` on its line),
   and in the string after a `// language=SQL` comment, as IntelliJ marks
-  it; templates (`$table`) stay Kotlin.
+  it. JSON and YAML (VS Code's grammars) in the `"""` string after a
+  `// language=JSON` or `// language=YAML` comment; a `"` string stays a
+  string, its `\"` escapes being no JSON. Templates (`$table`, `${id}`)
+  stay Kotlin, inside a JSON value too.
 - **the kotlin-analyzer language server**, for Kotlin and (read-only) Java:
   - definition into sources and libraries, hover, completion with
     auto-import, signature help;

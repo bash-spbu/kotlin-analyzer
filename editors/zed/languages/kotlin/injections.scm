@@ -1,10 +1,11 @@
 ; Languages inside Kotlin: TODO/FIXME and the like in comments; SQL in a
 ; string that reads as SQL, one a `// language=SQL` comment marks, and
-; Spring Data's `@Query`; regular expressions in `Regex(…)`, `toRegex()`
-; and `Pattern.compile(…)`.
+; Spring Data's `@Query`; JSON and YAML in a string a `// language=JSON`
+; or `// language=YAML` comment marks; regular expressions in `Regex(…)`,
+; `toRegex()` and `Pattern.compile(…)`.
 ;
-; A SQL string's pieces between templates (`$table`, `${id}`) are one
-; match, so Zed parses them as one SQL text, the templates left out. Its
+; An injected string's pieces between templates (`$table`, `${id}`) are one
+; match, so Zed parses them as one text, the templates left out. Its
 ; patterns repeat the same string shape: `.` then the pieces, templates
 ; between them.
 
@@ -34,15 +35,38 @@
   (#set! injection.language "sql"))
 
 ; Any other a `// language=SQL` (or `/* language=SQL */`) comment marks,
-; as IntelliJ reads it: on the line before a property or an argument.
+; as IntelliJ reads it: on the line before a property, an argument or an
+; assignment, the string or `"…".trimIndent()`. The comment and the
+; string's holder are a pattern's top level, not one alternation: a
+; quantifier under an alternation stops at the first template.
 ([
   (line_comment)
   (multiline_comment)
 ] @_marker
   .
-  [
-    (property_declaration
+  (_
+    (string_literal
+      .
       [
+        (string_content) @injection.content
+        (interpolation_identifier_start)
+        (interpolated_identifier)
+        (interpolation_expression_start)
+        (interpolated_expression)
+        (interpolation_expression_end)
+      ]+) @_literal)
+  (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:sql)\\b")
+  (#not-match? @_literal "^\"+\\s*(?is:select\\s.+?\\sfrom\\b|with\\s+(recursive\\s+)?\\w+\\s+as\\s*\\(|insert\\s+into\\b|update\\s+\\S+\\s+set\\b|delete\\s+from\\b|merge\\s+into\\b)")
+  (#set! injection.language "sql"))
+
+([
+  (line_comment)
+  (multiline_comment)
+] @_marker
+  .
+  (_
+    (call_expression
+      (navigation_expression
         (string_literal
           .
           [
@@ -52,46 +76,7 @@
             (interpolation_expression_start)
             (interpolated_expression)
             (interpolation_expression_end)
-          ]+) @_literal
-        (call_expression
-          (navigation_expression
-            (string_literal
-              .
-              [
-                (string_content) @injection.content
-                (interpolation_identifier_start)
-                (interpolated_identifier)
-                (interpolation_expression_start)
-                (interpolated_expression)
-                (interpolation_expression_end)
-              ]+) @_literal))
-      ])
-    (value_argument
-      [
-        (string_literal
-          .
-          [
-            (string_content) @injection.content
-            (interpolation_identifier_start)
-            (interpolated_identifier)
-            (interpolation_expression_start)
-            (interpolated_expression)
-            (interpolation_expression_end)
-          ]+) @_literal
-        (call_expression
-          (navigation_expression
-            (string_literal
-              .
-              [
-                (string_content) @injection.content
-                (interpolation_identifier_start)
-                (interpolated_identifier)
-                (interpolation_expression_start)
-                (interpolated_expression)
-                (interpolation_expression_end)
-              ]+) @_literal))
-      ])
-  ]
+          ]+) @_literal)))
   (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:sql)\\b")
   (#not-match? @_literal "^\"+\\s*(?is:select\\s.+?\\sfrom\\b|with\\s+(recursive\\s+)?\\w+\\s+as\\s*\\(|insert\\s+into\\b|update\\s+\\S+\\s+set\\b|delete\\s+from\\b|merge\\s+into\\b)")
   (#set! injection.language "sql"))
@@ -119,6 +104,90 @@
   (#eq? @_argument "value")
   (#not-match? @_literal "^\"+\\s*(?is:select\\s.+?\\sfrom\\b|with\\s+(recursive\\s+)?\\w+\\s+as\\s*\\(|insert\\s+into\\b|update\\s+\\S+\\s+set\\b|delete\\s+from\\b|merge\\s+into\\b)")
   (#set! injection.language "sql"))
+
+;; JSON and YAML
+
+; A string a `// language=JSON` or `// language=YAML` comment (or its
+; `/* … */` form) marks, as for SQL above.
+([
+  (line_comment)
+  (multiline_comment)
+] @_marker
+  .
+  (_
+    (string_literal
+      .
+      [
+        (string_content) @injection.content
+        (interpolation_identifier_start)
+        (interpolated_identifier)
+        (interpolation_expression_start)
+        (interpolated_expression)
+        (interpolation_expression_end)
+      ]+) @_literal)
+  (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:json)\\b")
+  (#set! injection.language "json"))
+
+([
+  (line_comment)
+  (multiline_comment)
+] @_marker
+  .
+  (_
+    (call_expression
+      (navigation_expression
+        (string_literal
+          .
+          [
+            (string_content) @injection.content
+            (interpolation_identifier_start)
+            (interpolated_identifier)
+            (interpolation_expression_start)
+            (interpolated_expression)
+            (interpolation_expression_end)
+          ]+) @_literal)))
+  (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:json)\\b")
+  (#set! injection.language "json"))
+
+([
+  (line_comment)
+  (multiline_comment)
+] @_marker
+  .
+  (_
+    (string_literal
+      .
+      [
+        (string_content) @injection.content
+        (interpolation_identifier_start)
+        (interpolated_identifier)
+        (interpolation_expression_start)
+        (interpolated_expression)
+        (interpolation_expression_end)
+      ]+) @_literal)
+  (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:yaml)\\b")
+  (#set! injection.language "yaml"))
+
+([
+  (line_comment)
+  (multiline_comment)
+] @_marker
+  .
+  (_
+    (call_expression
+      (navigation_expression
+        (string_literal
+          .
+          [
+            (string_content) @injection.content
+            (interpolation_identifier_start)
+            (interpolated_identifier)
+            (interpolation_expression_start)
+            (interpolated_expression)
+            (interpolation_expression_end)
+          ]+) @_literal)))
+  (#match? @_marker "^(//|/\\*)\\s*language\\s*=\\s*(?i:yaml)\\b")
+  (#set! injection.language "yaml"))
 
 ; Regex("…"), Pattern.compile("…")
 (call_expression

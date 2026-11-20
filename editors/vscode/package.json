@@ -40,7 +40,9 @@
         "path": "./syntaxes/kotlin.tmLanguage.json",
         "embeddedLanguages": {
           "meta.embedded.block.sql": "sql",
-          "meta.embedded.line.sql": "sql"
+          "meta.embedded.line.sql": "sql",
+          "meta.embedded.block.json": "json",
+          "meta.embedded.block.yaml": "yaml"
         }
       }
     ],
@@ -304,7 +306,7 @@
     "compile-tests": "tsc -p .",
     "check": "tsc -p . --noEmit && npm run test:unit && npm run test:grammar",
     "test:unit": "tsc -p . && node --test 'out/test/unit/**/*.test.js'",
-    "test:grammar": "vscode-tmgrammar-test --grammar syntaxes/kotlin.tmLanguage.json 'test/grammar/*.kt'",
+    "test:grammar": "vscode-tmgrammar-test --grammar syntaxes/kotlin.tmLanguage.json --grammar test/grammar/nested-json.tmLanguage.json 'test/grammar/*.kt'",
     "test:integration": "npm run build && tsc -p . && node out/test/integration/run.js",
     "package": "cp ../../LICENSE LICENSE && vsce package --no-dependencies",
     "vscode:prepublish": "npm run build"

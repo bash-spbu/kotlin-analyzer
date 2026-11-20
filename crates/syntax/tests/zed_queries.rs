@@ -348,8 +348,8 @@ class Repository(private val jdbc: JdbcClient) {
 
     val failure = "Update failed for $id"
     val prompt = "select one of: a, b"
-    // language=JSON
-    val json = "{}"
+    // language=SQL
+    var filter = "id = $id and code = ${code.name}"
 }
 "#;
     assert_eq!(
@@ -364,6 +364,45 @@ class Repository(private val jdbc: JdbcClient) {
             "sql: select 1 from t",
             "sql: ALTER TABLE t ADD c int",
             "sql: from Markup m",
+            // Marked, with templates: all its pieces.
+            "sql: id = | and code = ",
+        ]
+    );
+}
+
+#[test]
+fn json_and_yaml_are_injected_where_a_comment_marks_them() {
+    let sample = r#"
+class Fixtures {
+    // language=JSON
+    val body = """{"id": $id, "name": "${name}"}"""
+
+    fun send() = client.post(
+        /* language=json */
+        """{"ok": true}""".trimIndent()
+    )
+
+    // language=YAML
+    val config = """
+        server:
+          port: 8080
+        """.trimIndent()
+
+    // language=JSONata
+    val expression = "$.id"
+    // language=SQL
+    val ddl = "CREATE TABLE t (id int)"
+    val unmarked = """{"id": 1}"""
+}
+"#;
+    assert_eq!(
+        injected_texts(sample),
+        [
+            // All the pieces between the templates (a `"` starts one).
+            r#"json: {"|id"|: |, "|name"|: "|"|}"#,
+            r#"json: {"|ok"|: true}"#,
+            "yaml: \n        server:\n          port: 8080\n        ",
+            "sql: CREATE TABLE t (id int)",
         ]
     );
 }

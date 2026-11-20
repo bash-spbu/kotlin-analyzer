@@ -10,11 +10,27 @@
       "include": "#code"
     }
   ],
+  "injections": {
+    "L:meta.embedded.block.sql, L:meta.embedded.line.sql, L:meta.embedded.block.json, L:meta.embedded.block.yaml": {
+      "comment": "Templates inside an embedded language's own nested rules (a JSON value, a SQL string): `$id`, `${id}` stay Kotlin.",
+      "patterns": [
+        {
+          "include": "#string-templates"
+        }
+      ]
+    }
+  },
   "repository": {
     "code": {
       "patterns": [
         {
           "include": "#sql-marked"
+        },
+        {
+          "include": "#json-marked"
+        },
+        {
+          "include": "#yaml-marked"
         },
         {
           "include": "#comments"
@@ -724,6 +740,90 @@
             },
             {
               "include": "source.sql"
+            }
+          ]
+        },
+        {
+          "include": "#code"
+        }
+      ]
+    },
+    "json-marked": {
+      "comment": "A `// language=JSON` (or `/* language=JSON */`) comment: the next `\"\"\"` string is JSON, up to a blank line. A `\"…\"` string stays a plain string: its `\\\"` escapes would leave a JSON string open past the line.",
+      "begin": "(?i)(//\\s*language\\s*=\\s*json\\b.*$|/\\*\\s*language\\s*=\\s*json\\b.*?\\*/)",
+      "beginCaptures": {
+        "1": {
+          "name": "comment.line.double-slash.kotlin"
+        }
+      },
+      "end": "(?<=\")|^(?=\\s*$)",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "begin": "\"\"\"",
+          "end": "\"\"\"(?!\")",
+          "name": "string.quoted.triple.kotlin",
+          "contentName": "meta.embedded.block.json",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.kotlin"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.kotlin"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#string-templates"
+            },
+            {
+              "include": "source.json"
+            }
+          ]
+        },
+        {
+          "include": "#code"
+        }
+      ]
+    },
+    "yaml-marked": {
+      "comment": "A `// language=YAML` (or `/* language=YAML */`) comment: the next `\"\"\"` string is YAML, up to a blank line. A `\"…\"` string stays a plain string: its `\\\"` escapes would leave a YAML string open past the line.",
+      "begin": "(?i)(//\\s*language\\s*=\\s*yaml\\b.*$|/\\*\\s*language\\s*=\\s*yaml\\b.*?\\*/)",
+      "beginCaptures": {
+        "1": {
+          "name": "comment.line.double-slash.kotlin"
+        }
+      },
+      "end": "(?<=\")|^(?=\\s*$)",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "begin": "\"\"\"",
+          "end": "\"\"\"(?!\")",
+          "name": "string.quoted.triple.kotlin",
+          "contentName": "meta.embedded.block.yaml",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.kotlin"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.kotlin"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#string-templates"
+            },
+            {
+              "include": "source.yaml"
             }
           ]
         },

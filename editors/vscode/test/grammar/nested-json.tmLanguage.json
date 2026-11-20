@@ -1,0 +1,18 @@
+{
+  "comment": "A stand-in for VS Code's JSON grammar in the grammar tests: a dictionary is a rule of its own, so a template inside it is the Kotlin grammar's injection's.",
+  "name": "JSON (test stand-in)",
+  "scopeName": "source.json",
+  "patterns": [
+    {
+      "begin": "\\{",
+      "end": "\\}",
+      "name": "meta.structure.dictionary.json",
+      "patterns": [
+        {
+          "match": "\"[^\"]*\"",
+          "name": "string.json"
+        }
+      ]
+    }
+  ]
+}
