@@ -135,8 +135,8 @@ or set `sdk.dir` in `local.properties`.
 **VS Code**
 
 ```bash
-curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v1.1.1/kotlin-analyzer-1.1.1.vsix
-code --install-extension kotlin-analyzer-1.1.1.vsix
+curl -LO https://github.com/bash-spbu/kotlin-analyzer/releases/download/v1.1.2/kotlin-analyzer-1.1.2.vsix
+code --install-extension kotlin-analyzer-1.1.2.vsix
 ```
 
 **Neovim** (0.11+, with [lazy.nvim](https://github.com/folke/lazy.nvim))

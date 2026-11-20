@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "base-db"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "intern",
  "project-model",
@@ -105,7 +105,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "classfile"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "intern",
  "rustc-hash",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "debugger"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "jdwp",
  "project-model",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "hir"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base-db",
  "hir-def",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "hir-def"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base-db",
  "classfile",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "hir-ty"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base-db",
  "expect-test",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "ide"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base-db",
  "expect-test",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "intern"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "boxcar",
  "rustc-hash",
@@ -397,11 +397,11 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jdwp"
-version = "1.1.1"
+version = "1.1.2"
 
 [[package]]
 name = "kotlin-analyzer"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base-db",
  "classfile",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "project-model"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "intern",
  "rustc-hash",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "brokk-tree-sitter-kotlin",
  "expect-test",
@@ -890,7 +890,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vfs"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "rustc-hash",
 ]
@@ -1004,7 +1004,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "xtask"
-version = "1.1.1"
+version = "1.1.2"
 
 [[package]]
 name = "zip"
