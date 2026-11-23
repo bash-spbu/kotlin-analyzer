@@ -45,6 +45,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 sha2 = "0.10"
 tracing = "0.1"
+backtrace = "0.3"
+smallvec = "1"
 
 [workspace.lints.rust]
 # Allowed in one file only, the profiling allocator (`cargo xtask check`).

@@ -3,10 +3,13 @@
 //! cost of a header per block and a few percent of time — not the
 //! backtrace per allocation a heap profiler takes.
 
+mod allocation_sites;
 mod allocator;
 mod query_scopes;
 
 pub use allocator::ScopedAllocator;
+
+pub use allocation_sites::sites;
 
 use crate::memory_report::QueryAllocations;
 
@@ -34,6 +37,7 @@ pub fn allocations() -> Vec<QueryAllocations> {
                 live_bytes: counts.live_bytes,
                 live_blocks: counts.live_blocks,
                 allocated_bytes: counts.allocated_bytes,
+                allocations: counts.allocations,
             }
         })
         .collect()

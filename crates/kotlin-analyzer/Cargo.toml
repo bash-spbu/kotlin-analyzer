@@ -39,9 +39,10 @@ sha2.workspace = true
 # tells the allocator which query it counts for.
 salsa = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+backtrace = { workspace = true, optional = true }
 
 [features]
-memory-profile = ["dep:salsa", "salsa/detailed-trace", "dep:tracing"]
+memory-profile = ["dep:salsa", "salsa/detailed-trace", "dep:tracing", "dep:backtrace"]
 
 [dev-dependencies]
 zip.workspace = true

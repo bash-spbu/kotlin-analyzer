@@ -15,6 +15,49 @@ pub struct QueryAllocations {
     pub live_blocks: i64,
     /// Everything it allocated, freed or not.
     pub allocated_bytes: u64,
+    /// How many times it called the allocator for a block.
+    pub allocations: u64,
+}
+
+/// A place in the workspace's code that allocates, as sampling estimates it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllocationSite {
+    /// The function (`hir_ty::infer::Inferrer::expr`).
+    pub site: String,
+    /// What it called that allocated (`alloc::vec::Vec<T,A>::push`).
+    pub via: String,
+    /// The workspace's function that called it (empty when none did).
+    pub caller: String,
+    pub allocations: u64,
+    pub bytes: u64,
+}
+
+/// The `limit` sites that allocate most often, and their share of all.
+#[cfg_attr(not(feature = "memory-profile"), allow(dead_code))]
+pub fn render_sites(sites: &[AllocationSite], limit: usize) -> String {
+    let all: u64 = sites
+        .iter()
+        .map(|site| site.allocations)
+        .sum::<u64>()
+        .max(1);
+    let mut output = format!(
+        "allocation sites (sampled; {:.1} M allocator calls in all):\n  millions  share     MB  site  <- via\n",
+        all as f64 / 1e6
+    );
+    for site in sites.iter().take(limit) {
+        output.push_str(&format!(
+            "{:>10.2} {:>5.1}% {:>6.0}  {}  <- {}\n",
+            site.allocations as f64 / 1e6,
+            site.allocations as f64 * 100.0 / all as f64,
+            site.bytes as f64 / 1e6,
+            site.site,
+            site.via
+        ));
+        if !site.caller.is_empty() {
+            output.push_str(&format!("{:>27}in {}\n", "", site.caller));
+        }
+    }
+    output
 }
 
 /// The row of what was allocated outside every query.
@@ -26,7 +69,7 @@ pub const OUTSIDE_QUERIES: &str = "(outside queries)";
 pub fn render(stored: &[StoredMemory], allocations: Option<&[QueryAllocations]>) -> String {
     let rows = rows(stored, allocations.unwrap_or_default());
     let mut output = String::new();
-    output.push_str("      live MB   blocks  allocated MB   results  salsa MB  name\n");
+    output.push_str("      live MB   blocks  allocated MB  allocs (M)   results  salsa MB  name\n");
     let megabytes = |bytes: f64| bytes / 1_000_000.0;
     for row in &rows {
         let counted = |text: String| {
@@ -37,10 +80,11 @@ pub fn render(stored: &[StoredMemory], allocations: Option<&[QueryAllocations]>)
             }
         };
         output.push_str(&format!(
-            "{:>13} {:>8} {:>13} {:>9} {:>9.1}  {}\n",
+            "{:>13} {:>8} {:>13} {:>11} {:>9} {:>9.1}  {}\n",
             counted(format!("{:.1}", megabytes(row.live_bytes as f64))),
             counted(row.live_blocks.to_string()),
             counted(format!("{:.0}", megabytes(row.allocated_bytes as f64))),
+            counted(format!("{:.2}", row.allocations as f64 / 1e6)),
             row.results
                 .map_or("-".to_owned(), |count| count.to_string()),
             megabytes(row.salsa_bytes as f64),
@@ -49,13 +93,20 @@ pub fn render(stored: &[StoredMemory], allocations: Option<&[QueryAllocations]>)
     }
     let live: i64 = rows.iter().map(|row| row.live_bytes).sum();
     let salsa: usize = rows.iter().map(|row| row.salsa_bytes).sum();
-    let total_live = if allocations.is_some() {
+    let allocations_counted = allocations.is_some();
+    let total_live = if allocations_counted {
         format!("{:.1}", megabytes(live as f64))
     } else {
         "-".to_owned()
     };
+    let calls: u64 = rows.iter().map(|row| row.allocations).sum();
+    let total_allocations = if allocations_counted {
+        format!("{:.2}", calls as f64 / 1e6)
+    } else {
+        "-".to_owned()
+    };
     output.push_str(&format!(
-        "{total_live:>13} {:>8} {:>13} {:>9} {:>9.1}  total\n",
+        "{total_live:>13} {:>8} {:>13} {total_allocations:>11} {:>9} {:>9.1}  total\n",
         "",
         "",
         "",
@@ -74,6 +125,7 @@ struct Row {
     live_bytes: i64,
     live_blocks: i64,
     allocated_bytes: u64,
+    allocations: u64,
     /// How many results a query has (kept or evicted), or values of a kind.
     results: Option<usize>,
     /// What Salsa keeps of them: the records and their metadata.
@@ -88,6 +140,7 @@ fn rows(stored: &[StoredMemory], allocations: &[QueryAllocations]) -> Vec<Row> {
             live_bytes: allocation.live_bytes,
             live_blocks: allocation.live_blocks,
             allocated_bytes: allocation.allocated_bytes,
+            allocations: allocation.allocations,
             results: None,
             salsa_bytes: 0,
         })
@@ -108,6 +161,7 @@ fn rows(stored: &[StoredMemory], allocations: &[QueryAllocations]) -> Vec<Row> {
                 live_bytes: 0,
                 live_blocks: 0,
                 allocated_bytes: 0,
+                allocations: 0,
                 results: Some(entry.count),
                 salsa_bytes,
             }),
@@ -144,12 +198,14 @@ mod tests {
                 live_bytes: 5_000_000,
                 live_blocks: 10,
                 allocated_bytes: 9_000_000,
+                allocations: 1_000,
             },
             QueryAllocations {
                 query: "infer_body".to_owned(),
                 live_bytes: 30_000_000,
                 live_blocks: 1000,
                 allocated_bytes: 400_000_000,
+                allocations: 2_000_000,
             },
         ];
         let table = render(&stored, Some(&allocations));
@@ -164,6 +220,46 @@ mod tests {
         assert!(
             lines[5].ends_with("total") && lines[5].contains("35.0"),
             "{table}"
+        );
+        assert!(lines[5].contains("2.00"), "allocator calls summed: {table}");
+    }
+
+    #[test]
+    fn sites_come_most_frequent_first_with_their_share() {
+        let sites = [
+            AllocationSite {
+                site: "hir_ty::infer::Inferrer::expr".to_owned(),
+                via: "alloc::vec::Vec<T,A>::push".to_owned(),
+                caller: String::new(),
+                allocations: 3_000_000,
+                bytes: 96_000_000,
+            },
+            AllocationSite {
+                site: "hir_def::item_tree::lower".to_owned(),
+                via: "<alloc::string::String as core::clone::Clone>::clone".to_owned(),
+                caller: "hir_def::lower_file (hir-def/src/lib.rs:90)".to_owned(),
+                allocations: 1_000_000,
+                bytes: 24_000_000,
+            },
+        ];
+        let table = render_sites(&sites, 1);
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines[0].contains("4.0 M"), "{table}");
+        assert!(
+            lines[2].contains("3.00") && lines[2].contains("75.0%"),
+            "{table}"
+        );
+        assert!(
+            lines[2].ends_with("Inferrer::expr  <- alloc::vec::Vec<T,A>::push"),
+            "{table}"
+        );
+        assert_eq!(lines.len(), 3, "only the first: {table}");
+        let both = render_sites(&sites, 2);
+        assert!(
+            both.lines().nth(4).is_some_and(
+                |line| line.trim_start() == "in hir_def::lower_file (hir-def/src/lib.rs:90)"
+            ),
+            "the caller under its site: {both}"
         );
     }
 

@@ -45,6 +45,9 @@ pub(super) struct ScopeCounts {
     pub(super) live_bytes: i64,
     pub(super) live_blocks: i64,
     pub(super) allocated_bytes: u64,
+    /// How many times it called the allocator for a block (allocations
+    /// and resizes).
+    pub(super) allocations: u64,
 }
 
 pub(super) fn counts(scope: ScopeId) -> ScopeCounts {
@@ -56,6 +59,7 @@ pub(super) fn counts(scope: ScopeId) -> ScopeCounts {
             live_blocks: total.live_blocks + stripe.live_blocks[index].load(Ordering::Relaxed),
             allocated_bytes: total.allocated_bytes
                 + stripe.allocated_bytes[index].load(Ordering::Relaxed),
+            allocations: total.allocations + stripe.allocations[index].load(Ordering::Relaxed),
         })
 }
 
@@ -66,6 +70,7 @@ struct Stripe {
     live_bytes: [AtomicI64; SCOPES],
     live_blocks: [AtomicI64; SCOPES],
     allocated_bytes: [AtomicU64; SCOPES],
+    allocations: [AtomicU64; SCOPES],
 }
 
 const STRIPE_COUNT: usize = 16;
@@ -75,6 +80,7 @@ static STRIPES: [Stripe; STRIPE_COUNT] = [const {
         live_bytes: [const { AtomicI64::new(0) }; SCOPES],
         live_blocks: [const { AtomicI64::new(0) }; SCOPES],
         allocated_bytes: [const { AtomicU64::new(0) }; SCOPES],
+        allocations: [const { AtomicU64::new(0) }; SCOPES],
     }
 }; STRIPE_COUNT];
 
@@ -105,6 +111,8 @@ fn count_allocated(scope: ScopeId, size: usize) {
     stripe.live_bytes[index].fetch_add(size as i64, Ordering::Relaxed);
     stripe.live_blocks[index].fetch_add(1, Ordering::Relaxed);
     stripe.allocated_bytes[index].fetch_add(size as u64, Ordering::Relaxed);
+    stripe.allocations[index].fetch_add(1, Ordering::Relaxed);
+    super::allocation_sites::sample(size);
 }
 
 fn count_freed(scope: ScopeId, size: usize) {
@@ -120,6 +128,8 @@ fn count_resized(scope: ScopeId, old_size: usize, new_size: usize) {
     stripe.live_bytes[index].fetch_add(new_size as i64 - old_size as i64, Ordering::Relaxed);
     let grown = new_size.saturating_sub(old_size);
     stripe.allocated_bytes[index].fetch_add(grown as u64, Ordering::Relaxed);
+    stripe.allocations[index].fetch_add(1, Ordering::Relaxed);
+    super::allocation_sites::sample(grown);
 }
 
 /// The header's size for a block aligned to `align`: at least 16 bytes,
@@ -247,6 +257,11 @@ mod tests {
         assert_eq!(freed.live_bytes, before.live_bytes);
         assert_eq!(freed.live_blocks, before.live_blocks);
         assert!(freed.allocated_bytes - before.allocated_bytes >= 8000);
+        assert_eq!(
+            freed.allocations - before.allocations,
+            2,
+            "allocated, then grown"
+        );
     }
 
     #[test]

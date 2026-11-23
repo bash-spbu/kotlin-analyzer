@@ -162,6 +162,11 @@ fn print_memory(host: &mut AnalysisHost) {
         "{}",
         crate::memory_report::render(&stored, allocations.as_deref())
     );
+    #[cfg(feature = "memory-profile")]
+    print!(
+        "{}",
+        crate::memory_report::render_sites(&crate::memory_profile::sites(), 40)
+    );
 }
 
 fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
