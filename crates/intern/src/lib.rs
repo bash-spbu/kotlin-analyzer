@@ -20,34 +20,70 @@ struct Interner {
     /// Spellings by id. Append-only and read without a lock.
     spellings: boxcar::Vec<&'static str>,
     /// Ids by spelling, split by the spelling's hash.
-    ids: [RwLock<FxHashMap<&'static str, u32>>; SHARDS],
+    shards: [RwLock<NameShard>; SHARDS],
+}
+
+#[derive(Default)]
+struct NameShard {
+    ids: FxHashMap<&'static str, u32>,
+    spellings: SpellingArena,
+}
+
+/// Where a shard's spellings are kept: back to back in chunks that live as
+/// long as the process — an allocation per chunk, not per name.
+#[derive(Default)]
+struct SpellingArena {
+    /// What is left of the current chunk.
+    free: &'static mut [u8],
+}
+
+impl SpellingArena {
+    const CHUNK: usize = 8 * 1024;
+    /// Longer spellings get an allocation of their own, so a chunk's unused
+    /// end stays small.
+    const LONGEST_IN_CHUNK: usize = 1024;
+
+    fn store(&mut self, text: &str) -> &'static str {
+        let length = text.len();
+        if length > Self::LONGEST_IN_CHUNK {
+            return Box::leak(text.into());
+        }
+        if self.free.len() < length {
+            self.free = Box::leak(vec![0; Self::CHUNK].into_boxed_slice());
+        }
+        let (stored, rest) = std::mem::take(&mut self.free).split_at_mut(length);
+        self.free = rest;
+        stored.copy_from_slice(text.as_bytes());
+        let stored: &'static [u8] = stored;
+        std::str::from_utf8(stored).expect("the bytes of a `str`")
+    }
 }
 
 fn interner() -> &'static Interner {
     static INTERNER: OnceLock<Interner> = OnceLock::new();
     INTERNER.get_or_init(|| Interner {
         spellings: boxcar::Vec::new(),
-        ids: std::array::from_fn(|_| RwLock::default()),
+        shards: std::array::from_fn(|_| RwLock::default()),
     })
 }
 
 impl Name {
     pub fn new(text: &str) -> Name {
         let interner = interner();
-        let shard = &interner.ids
+        let shard = &interner.shards
             [BuildHasherDefault::<FxHasher>::default().hash_one(text) as usize % SHARDS];
         let lock_held = "interner lock is never poisoned: no code panics while holding it";
-        if let Some(id) = shard.read().expect(lock_held).get(text) {
+        if let Some(id) = shard.read().expect(lock_held).ids.get(text) {
             return Name(*id);
         }
-        let mut ids = shard.write().expect(lock_held);
-        if let Some(id) = ids.get(text) {
+        let mut shard = shard.write().expect(lock_held);
+        if let Some(id) = shard.ids.get(text) {
             return Name(*id);
         }
         // Names live as long as the process: a bounded set of identifiers.
-        let spelling: &'static str = Box::leak(text.to_owned().into_boxed_str());
+        let spelling = shard.spellings.store(text);
         let id = interner.spellings.push(spelling) as u32;
-        ids.insert(spelling, id);
+        shard.ids.insert(spelling, id);
         Name(id)
     }
 
@@ -79,15 +115,19 @@ pub trait Internable: Eq + std::hash::Hash + Send + Sync + Sized + 'static {
     fn storage() -> &'static InternStorage<Self>;
 }
 
-/// Where a type's interned values are, split like names' ids so threads
-/// interning at once rarely meet at one lock.
+/// Where a type's interned values are: side by side in an append-only
+/// vector whose elements never move (an allocation per bucket, not per
+/// value), found through sets split like names' ids so threads interning at
+/// once rarely meet at one lock.
 pub struct InternStorage<T: 'static> {
+    values: boxcar::Vec<T>,
     shards: [RwLock<rustc_hash::FxHashSet<&'static T>>; SHARDS],
 }
 
 impl<T> Default for InternStorage<T> {
     fn default() -> InternStorage<T> {
         InternStorage {
+            values: boxcar::Vec::new(),
             shards: std::array::from_fn(|_| RwLock::default()),
         }
     }
@@ -106,7 +146,8 @@ impl<T: Internable> Interned<T> {
         if let Some(found) = values.get(&value) {
             return Interned(found);
         }
-        let stored: &'static T = Box::leak(Box::new(value));
+        let index = storage.values.push(value);
+        let stored: &'static T = &storage.values[index];
         values.insert(stored);
         Interned(stored)
     }
@@ -270,6 +311,19 @@ mod tests {
             static STORAGE: OnceLock<InternStorage<Shape>> = OnceLock::new();
             STORAGE.get_or_init(InternStorage::default)
         }
+    }
+
+    #[test]
+    fn spellings_are_kept_whole_across_chunks() {
+        let mut arena = SpellingArena::default();
+        let texts: Vec<String> = (0..5000).map(|index| format!("name_{index}_ä")).collect();
+        let stored: Vec<&'static str> = texts.iter().map(|text| arena.store(text)).collect();
+        assert_eq!(stored, texts);
+        let long = "x".repeat(SpellingArena::LONGEST_IN_CHUNK + 1);
+        assert_eq!(arena.store(&long), long);
+        assert_eq!(arena.store(""), "");
+        let spelled: Vec<&str> = texts.iter().map(|text| Name::new(text).as_str()).collect();
+        assert_eq!(spelled, texts);
     }
 
     #[test]
