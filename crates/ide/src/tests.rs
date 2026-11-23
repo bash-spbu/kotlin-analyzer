@@ -4697,3 +4697,12 @@ fn a_files_interface_changes_with_its_declarations_and_inferred_types_only() {
         assert_ne!(interface_of(text), base, "{text}");
     }
 }
+
+#[test]
+fn a_files_interface_holds_no_part_of_the_analysis() {
+    // Kept for every workspace file between checks: anything it held (an
+    // item tree) would never leave memory. A fingerprint is `Copy`.
+    fn is_a_fingerprint<Interface: Copy + Eq + std::hash::Hash>() {}
+    is_a_fingerprint::<crate::FileInterface>();
+    assert!(std::mem::size_of::<crate::FileInterface>() <= 16);
+}

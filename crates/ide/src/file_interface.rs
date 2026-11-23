@@ -4,19 +4,35 @@
 //! file's diagnostics as they were (`workspace/diagnostic` reports them
 //! "unchanged").
 
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 
-use hir::{FileId, ItemTree, RootDatabase, Signature, SourceDatabase};
+use hir::{FileId, RootDatabase, Signature, SourceDatabase};
+use rustc_hash::FxHasher;
 use syntax::{Parse, TextRange};
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A file's interface as a fingerprint: kept for every workspace file, so
+/// it holds no part of the analysis (an item tree kept here would never be
+/// dropped from memory).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FileInterface {
-    /// The declarations, positions left out (see `ItemTree`).
-    declarations: Arc<ItemTree>,
+    /// The declarations, positions left out (see `ItemTree`), hashed.
+    declarations: u64,
     /// Without whitespace, the text of each function written without a
     /// return type and with an expression body, and of each property
-    /// written without a type: their types are inferred from it.
-    inferred_from: Vec<String>,
+    /// written without a type — their types are inferred from it — hashed.
+    inferred_from: u64,
+}
+
+/// A hasher written to as text: what `Debug` shows is hashed as it's
+/// written, never held whole.
+struct HashingWriter(FxHasher);
+
+impl std::fmt::Write for HashingWriter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        text.hash(&mut self.0);
+        Ok(())
+    }
 }
 
 pub(crate) fn file_interface(db: &RootDatabase, file: FileId) -> Option<FileInterface> {
@@ -24,7 +40,7 @@ pub(crate) fn file_interface(db: &RootDatabase, file: FileId) -> Option<FileInte
     let declarations = hir::file_item_tree(db, source);
     let source_map = hir::file_item_source_map(db, source);
     let parse = hir::parse(db, source);
-    let inferred_from = declarations
+    let inferred_from: Vec<String> = declarations
         .indexed_items()
         .filter_map(|(item_id, item)| {
             let range = source_map.ranges(item_id).range;
@@ -38,9 +54,15 @@ pub(crate) fn file_interface(db: &RootDatabase, file: FileId) -> Option<FileInte
             inferred.then(|| without_whitespace(parse.text().get(range.as_range()).unwrap_or("")))
         })
         .collect();
+    // Two equal trees write the same text: what was built from the same
+    // declarations in the same order.
+    let mut writer = HashingWriter(FxHasher::default());
+    let _ = write!(writer, "{:?}", *declarations);
+    let mut inferred = FxHasher::default();
+    inferred_from.hash(&mut inferred);
     Some(FileInterface {
-        declarations,
-        inferred_from,
+        declarations: writer.0.finish(),
+        inferred_from: inferred.finish(),
     })
 }
 
