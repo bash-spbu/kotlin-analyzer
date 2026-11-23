@@ -15,7 +15,14 @@ Each archive is indexed once at load: per package, its top-level names and
 which entries hold its declarations. A reload (the model exported again, a
 library added) indexes again only the archives whose modification time or
 length changed since they were indexed, and new ones: the others keep their
-index, and what was read and inferred from them stays. A package's
+index, and what was read and inferred from them stays. Indexes are kept
+on disk too, in `$XDG_CACHE_HOME/kotlin-analyzer/library-index/` (one file
+per archive, named by a hash of its path): a load — the first after a
+restart included — takes an archive's index from there when it was made
+for the same archive, kind and sources, with the same modification time
+and length, by the same version of the server; else it indexes the archive
+and writes the file (written whole or not at all). A file that can't be
+read is ignored. A package's
 declarations are read when a query first needs them and kept while
 recently used. Nothing runs on a JVM.
 

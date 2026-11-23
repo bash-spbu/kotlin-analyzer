@@ -95,7 +95,13 @@ pub fn read_workspaces_reporting(
     let read_time = started.elapsed();
 
     let started = Instant::now();
-    let libraries = index_libraries(&model, indexed, report);
+    // Tests leave the user's cache alone.
+    let index_cache = if cfg!(test) {
+        None
+    } else {
+        crate::server::cache_directory().map(|cache| crate::library_index_cache::directory(&cache))
+    };
+    let libraries = index_libraries(&model, indexed, index_cache.as_deref(), report);
     let library_time = started.elapsed();
     Ok(LoadedFiles {
         model: Arc::new(model),
@@ -109,10 +115,12 @@ pub fn read_workspaces_reporting(
 }
 
 /// Indexes the JDK and every distinct JAR of the model's classpaths, in
-/// parallel — but for those `indexed` already, unchanged since.
+/// parallel — but for those `indexed` already, unchanged since, and those
+/// whose index `index_cache` (the on-disk one) has.
 pub fn index_libraries(
     model: &ProjectModel,
     indexed: &IndexedStamps,
+    index_cache: Option<&Path>,
     report: &(dyn Fn(LoadStep) + Sync),
 ) -> LoadedLibraries {
     let mut sources: Vec<hir::LibrarySource> = Vec::new();
@@ -145,13 +153,23 @@ pub fn index_libraries(
     let read: Vec<Result<hir::LibraryIndex, String>> = sources
         .par_iter()
         .map(|source| {
-            let unchanged = indexed
-                .get(source)
-                .is_some_and(|stamp| *stamp == hir::ArchiveStamp::of(&source.archive));
+            let stamp = hir::ArchiveStamp::of(&source.archive);
+            let unchanged = indexed.get(source).is_some_and(|known| *known == stamp);
+            let cached = || {
+                index_cache.and_then(|directory| {
+                    crate::library_index_cache::read(directory, source, stamp)
+                })
+            };
             let index = if unchanged {
                 Ok(hir::LibraryIndex::Kept)
+            } else if let Some(cached) = cached() {
+                Ok(hir::LibraryIndex::Read(cached))
             } else {
-                hir::index_library(source).map(hir::LibraryIndex::Read)
+                let read = hir::index_library(source);
+                if let (Ok(read), Some(directory)) = (&read, index_cache) {
+                    crate::library_index_cache::write(directory, source, read);
+                }
+                read.map(hir::LibraryIndex::Read)
             };
             let count = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             report(LoadStep::IndexingLibraries {
@@ -457,7 +475,7 @@ mod tests {
                 })
                 .collect()
         };
-        let first = index_libraries(&model, &IndexedStamps::default(), &|_| {});
+        let first = index_libraries(&model, &IndexedStamps::default(), None, &|_| {});
         assert_eq!(
             kinds(&first),
             [
@@ -469,13 +487,84 @@ mod tests {
         apply_libraries(&mut host, first);
         // One archive rebuilt in place: longer.
         write_jar("changed.jar", &["b/B.txt", "b/C.txt"]);
-        let second = index_libraries(&model, &host.library_stamps(), &|_| {});
+        let second = index_libraries(&model, &host.library_stamps(), None, &|_| {});
         assert_eq!(
             kinds(&second),
             [
                 ("kept.jar".to_owned(), "kept"),
                 ("changed.jar".to_owned(), "read")
             ]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn after_a_restart_an_unchanged_archives_index_comes_from_the_disk() {
+        let directory =
+            std::env::temp_dir().join(format!("kotlin-analyzer-disk-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let jar = directory.join("client.jar");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        writer
+            .start_file(
+                "com/example/Client.txt",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"not a class").unwrap();
+        writer.finish().unwrap();
+        let mut model = model_with_releases(&[(project_model::Platform::Jvm, None)]);
+        model.source_sets[0].libraries = vec![project_model::Library {
+            coordinates: None,
+            jar: jar.clone(),
+            sources_jar: None,
+        }];
+        let cache = directory.join("library-index");
+        let jar_index = |loaded: LoadedLibraries| {
+            loaded
+                .libraries
+                .into_iter()
+                .find(|(source, _)| source.archive == jar)
+                .map(|(_, index)| index)
+                .unwrap()
+        };
+        let first = jar_index(index_libraries(
+            &model,
+            &IndexedStamps::default(),
+            Some(&cache),
+            &|_| {},
+        ));
+        let hir::LibraryIndex::Read(indexed) = first else {
+            panic!("read the first time");
+        };
+        // The archive's bytes replaced, its length and time kept: read again
+        // it would index as nothing; from the disk, it's what it was.
+        let modified = std::fs::metadata(&jar).unwrap().modified().unwrap();
+        let length = std::fs::metadata(&jar).unwrap().len() as usize;
+        std::fs::write(&jar, vec![b'x'; length]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&jar)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        // A restart: nothing known in memory.
+        let again = jar_index(index_libraries(
+            &model,
+            &IndexedStamps::default(),
+            Some(&cache),
+            &|_| {},
+        ));
+        let hir::LibraryIndex::Read(from_disk) = again else {
+            panic!("read from the disk");
+        };
+        assert_eq!(from_disk, indexed);
+        // Without the cache the garbage is what's read.
+        let uncached = index_libraries(&model, &IndexedStamps::default(), None, &|_| {});
+        assert!(
+            uncached.failures.iter().any(|(archive, _)| *archive == jar),
+            "the replaced archive can't be read"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

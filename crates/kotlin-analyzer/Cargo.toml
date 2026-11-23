@@ -29,6 +29,7 @@ lsp-types.workspace = true
 crossbeam-channel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+postcard.workspace = true
 rayon.workspace = true
 walkdir.workspace = true
 memory-stats.workspace = true

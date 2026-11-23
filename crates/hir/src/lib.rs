@@ -2,8 +2,8 @@
 //! declaration is and where — one API in front of `hir-def` and `hir-ty`, so features never depend on how the layers below are split.
 
 pub use base_db::{
-    ArchiveKind, ArchiveStamp, CompilerOptions, FileChange, FileId, IndexedLibrary, JdkRelease,
-    KotlinVersion, Language, LibraryIndex, LibrarySource, ProjectModel, RootDatabase,
+    ArchiveKind, ArchiveStamp, CompilerOptions, FileChange, FileId, IndexedLibrary, IndexedPackage,
+    JdkRelease, KotlinVersion, Language, LibraryIndex, LibrarySource, ProjectModel, RootDatabase,
     SourceDatabase, SourceFile, SourceSetId, WarningLevel, parse, salsa,
 };
 pub use hir_def::decompiled::MissingSources;

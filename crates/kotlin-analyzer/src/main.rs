@@ -6,6 +6,7 @@ mod analysis_stats;
 mod anonymize;
 mod dap;
 mod diagnostics;
+mod library_index_cache;
 mod load;
 mod log;
 mod server;
