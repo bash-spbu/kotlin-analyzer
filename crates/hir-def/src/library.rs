@@ -139,14 +139,37 @@ pub fn index_library(source: &LibrarySource) -> Result<IndexedLibrary, String> {
     })
 }
 
+/// How many library package trees stay in memory between revisions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LibraryTreesKept {
+    /// Every tree read, for the session: no tree is read twice, and no
+    /// lookup pays for keeping count.
+    All,
+    /// The trees used last; the others are read again from their archive
+    /// when asked for. Every lookup of a library name records its use
+    /// under one lock all analysis threads meet at.
+    MostRecent(std::num::NonZeroUsize),
+}
+
+/// Sets how many library package trees stay in memory: from the next
+/// eviction on (a new revision, or `trigger_lru_eviction`).
+pub fn keep_library_trees(db: &mut dyn SourceDatabase, kept: LibraryTreesKept) {
+    let capacity = match kept {
+        LibraryTreesKept::All => 0,
+        LibraryTreesKept::MostRecent(count) => count.get(),
+    };
+    library_package_tree::set_lru_capacity(db, capacity);
+}
+
 /// A library package's declarations.
 ///
-/// Kept for the session, not evicted: every lookup of a library name asks
-/// for one, from every analysis thread, and an LRU's bookkeeping is one
-/// lock they all meet at (half the time of a workspace pass went to it).
-/// What it costs: the trees of the packages the workspace uses stay in
-/// memory (about 40 MB on a 600-library workspace).
-#[salsa::tracked(returns(clone))]
+/// Kept for the session unless [`keep_library_trees`] says otherwise:
+/// every lookup of a library name asks for one, from every analysis
+/// thread, and counting uses for an LRU is one lock they all meet at (half
+/// the time of a workspace pass went to it). What keeping them costs: the
+/// trees of the packages the workspace uses (tens of MB on a 600-library
+/// workspace).
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) -> Arc<ItemTree> {
     let library = package.library(db);
     // Ties the tree to the archive as indexed: one rewritten in place gets

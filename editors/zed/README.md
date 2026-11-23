@@ -212,7 +212,12 @@ Under `lsp.kotlin-analyzer`:
 - `binary.path` (and `arguments`, `env`): a binary instead of the one on
   the PATH or the download;
 - `initialization_options`: `{ "diagnostics": { "disabled": ["unused-import"], "experimental": false }, "gradleExport": true, "projectJson": "/path/to/project.json" }`;
-- `settings` (applied without a restart): `{ "diagnostics": { … }, "formatting": { "formatter": "ktfmt", "style": "google" } }`.
+- `settings` (applied without a restart): `{ "diagnostics": { … }, "formatting": { "formatter": "ktfmt", "style": "google" }, "memory": "economical" }`.
+
+`memory`: `balanced` (the default) keeps libraries' declarations, once
+read, for the session; `economical` keeps only the 128 library packages
+used last and reads the others again when needed — less memory, slower
+checks of the whole workspace.
 
 ## Formatting
 

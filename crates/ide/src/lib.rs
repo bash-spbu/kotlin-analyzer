@@ -50,6 +50,48 @@ pub use semantic_tokens::{SemanticToken, TokenKind, TokenModifiers};
 pub use signature_help::{SignatureHelp, SignatureInformation};
 pub use statistics::{BodyStatistics, DeclarationStatistics, UnsettledName};
 
+/// How the server trades memory for time (`memory` in the settings).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MemoryMode {
+    /// Libraries' declarations, once read, stay for the session.
+    #[default]
+    Balanced,
+    /// Only the libraries' packages used last stay; the others are read
+    /// from their archives again when needed: less memory, slower passes
+    /// over the whole workspace.
+    Economical,
+}
+
+impl MemoryMode {
+    /// How many library package trees the economical mode keeps.
+    const ECONOMICAL_LIBRARY_TREES: std::num::NonZeroUsize =
+        std::num::NonZeroUsize::new(128).unwrap();
+
+    pub fn from_setting(setting: &str) -> Option<MemoryMode> {
+        match setting {
+            "balanced" => Some(MemoryMode::Balanced),
+            "economical" => Some(MemoryMode::Economical),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            MemoryMode::Balanced => "balanced",
+            MemoryMode::Economical => "economical",
+        }
+    }
+
+    fn library_trees_kept(self) -> hir::LibraryTreesKept {
+        match self {
+            MemoryMode::Balanced => hir::LibraryTreesKept::All,
+            MemoryMode::Economical => {
+                hir::LibraryTreesKept::MostRecent(MemoryMode::ECONOMICAL_LIBRARY_TREES)
+            }
+        }
+    }
+}
+
 /// A result that a newer change may have cancelled.
 pub type Cancellable<T> = Result<T, Cancelled>;
 
@@ -92,6 +134,13 @@ impl AnalysisHost {
     pub fn trigger_lru_eviction(&mut self) {
         use hir::salsa::Database;
         self.db.trigger_lru_eviction();
+    }
+
+    /// Keeps as much in memory as `mode` says, dropping now what it
+    /// doesn't keep. Waits for snapshots to be dropped.
+    pub fn set_memory_mode(&mut self, mode: MemoryMode) {
+        hir::keep_library_trees(&mut self.db, mode.library_trees_kept());
+        self.trigger_lru_eviction();
     }
 
     /// A snapshot to answer questions with, possibly on another thread.

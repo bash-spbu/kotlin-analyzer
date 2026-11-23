@@ -5,13 +5,14 @@
 //! {
 //!   "diagnostics": { "disabled": ["unused-import"], "experimental": false },
 //!   "formatting": { "formatter": "ktrs", "style": "kotlinlang", "path": "/path/to/ktrs" },
-//!   "codeLens": { "references": true, "tests": true }
+//!   "codeLens": { "references": true, "tests": true },
+//!   "memory": "economical"
 //! }
 //! ```
 
 use std::path::PathBuf;
 
-use ide::{Check, DiagnosticsConfig};
+use ide::{Check, DiagnosticsConfig, MemoryMode};
 use serde_json::Value;
 
 use super::code_lens::{CodeLensConfig, LocationsCommand};
@@ -64,6 +65,30 @@ pub(super) fn agent_socket_directory(options: Option<&Value>) -> Option<PathBuf>
         Some(Value::String(directory)) if !directory.is_empty() => Some(PathBuf::from(directory)),
         _ => crate::agent::protocol::default_socket_directory(),
     }
+}
+
+/// How the server trades memory for time: `memory` in
+/// `initializationOptions`.
+pub(super) fn memory_mode(options: Option<&Value>) -> MemoryMode {
+    options
+        .and_then(|options| options.get("memory"))
+        .map(read_memory_mode)
+        .unwrap_or_default()
+}
+
+/// The memory mode in a configuration change, if it has one.
+pub(super) fn changed_memory_mode(settings: &Value) -> Option<MemoryMode> {
+    let ours = settings.get("kotlin-analyzer").unwrap_or(settings);
+    ours.get("memory").map(read_memory_mode)
+}
+
+/// `balanced` (the default) or `economical`; a value not understood is the
+/// default.
+fn read_memory_mode(memory: &Value) -> MemoryMode {
+    memory
+        .as_str()
+        .and_then(MemoryMode::from_setting)
+        .unwrap_or_default()
 }
 
 /// The code lens settings in `initializationOptions`.
@@ -177,6 +202,20 @@ mod tests {
             vec![Check::Syntax]
         );
         assert!(changed_diagnostics_config(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn memory_is_balanced_unless_economical_is_asked_for() {
+        assert_eq!(memory_mode(None), MemoryMode::Balanced);
+        let economical = serde_json::json!({ "memory": "economical" });
+        assert_eq!(memory_mode(Some(&economical)), MemoryMode::Economical);
+        let unknown = serde_json::json!({ "memory": "frugal" });
+        assert_eq!(memory_mode(Some(&unknown)), MemoryMode::Balanced);
+        let nested = serde_json::json!({ "kotlin-analyzer": { "memory": "economical" } });
+        assert_eq!(changed_memory_mode(&nested), Some(MemoryMode::Economical));
+        let back = serde_json::json!({ "memory": "balanced" });
+        assert_eq!(changed_memory_mode(&back), Some(MemoryMode::Balanced));
+        assert_eq!(changed_memory_mode(&serde_json::json!({})), None);
     }
 
     #[test]

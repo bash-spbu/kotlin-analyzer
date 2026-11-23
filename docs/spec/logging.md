@@ -31,7 +31,8 @@ tells the user, on their machine, which file a hash stands for.
   libraries and those that failed; the time of each phase; memory), each
   Gradle export (the tool, how it ended, how long it took; on failure its
   kind and Gradle's exit code), settings changes (`formatting-changed`: the
-  formatter; `code-lens-changed`: which lenses), a reload, the shutdown and
+  formatter; `code-lens-changed`: which lenses; `memory-mode-changed`: the
+  mode), a reload, the shutdown and
   the session's end (how it ended, requests received, panics).
 - **warn**: a request slower than 1 s, diagnostics slower than 2 s — counting
   the time they waited for a free worker (`waited`) and the time they took

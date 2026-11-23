@@ -859,6 +859,79 @@ fun fourth(): Map<String, List<Long>>? = null
 }
 
 #[test]
+fn kept_library_trees_are_the_most_recent_ones_or_all() {
+    use std::sync::Arc;
+
+    use base_db::{ArchiveKind, ArchiveStamp, Library, LibraryPackage, LibrarySource};
+    use salsa::Database;
+
+    use crate::library::{LibraryTreesKept, keep_library_trees, library_package_tree};
+
+    let mut db = base_db::RootDatabase::default();
+    let library = Library::new(
+        &db,
+        Arc::new(LibrarySource {
+            archive: std::path::PathBuf::from("/nowhere/client.jar"),
+            kind: ArchiveKind::Jar,
+            sources: None,
+        }),
+        Arc::default(),
+        ArchiveStamp {
+            modified: None,
+            length: 0,
+        },
+    );
+    let packages: Vec<LibraryPackage> = ["a", "b", "c"]
+        .iter()
+        .map(|package| {
+            LibraryPackage::new(
+                &db,
+                library,
+                Path::parse(package),
+                Arc::new([]),
+                Arc::new([]),
+                None,
+            )
+        })
+        .collect();
+    let read_all = |db: &base_db::RootDatabase| -> Vec<Arc<crate::item_tree::ItemTree>> {
+        packages
+            .iter()
+            .map(|package| library_package_tree(db, *package))
+            .collect()
+    };
+    let is_the_same = |first: &Arc<_>, again: &Arc<_>| Arc::ptr_eq(first, again);
+
+    let before = read_all(&db);
+    db.trigger_lru_eviction();
+    let after = read_all(&db);
+    assert!(
+        before
+            .iter()
+            .zip(&after)
+            .all(|(first, again)| is_the_same(first, again)),
+        "all kept by default"
+    );
+
+    keep_library_trees(
+        &mut db,
+        LibraryTreesKept::MostRecent(std::num::NonZeroUsize::new(1).unwrap()),
+    );
+    let before = read_all(&db);
+    db.trigger_lru_eviction();
+    let last = library_package_tree(&db, packages[2]);
+    let first = library_package_tree(&db, packages[0]);
+    assert!(
+        is_the_same(&before[2], &last),
+        "the most recent one is kept"
+    );
+    assert!(
+        !is_the_same(&before[0], &first),
+        "an older one is read again"
+    );
+}
+
+#[test]
 fn which_files_can_name_a_declaration() {
     let fixture = Fixture::parse(
         r#"

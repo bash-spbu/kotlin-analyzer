@@ -22,7 +22,8 @@ pub use hir_def::item_tree::{
 };
 pub use hir_def::item_tree::{Deprecation, DeprecationLevel};
 pub use hir_def::library::{
-    LibrarySourceLocation, SourceOrigin, index_library, library_declaration_source, release_letter,
+    LibrarySourceLocation, LibraryTreesKept, SourceOrigin, index_library, keep_library_trees,
+    library_declaration_source, release_letter,
 };
 pub use hir_def::resolver::{
     DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES, Resolution, default_imports_visible,

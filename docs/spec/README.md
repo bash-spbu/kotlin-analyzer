@@ -26,7 +26,8 @@ rust-analyzer's architecture — never from another implementation's source.
 3. **Incremental.** An edit invalidates only what depends on it: changing a
    function body re-analyses that body — not the file's other bodies, nor the
    declarations of the module.
-4. **Low memory.** Declarations are stored compactly with interned names;
-   source text of libraries is read on demand; caches can be evicted.
+4. **Low memory.** Declarations are stored compactly with interned names
+   and types; source text of libraries is read on demand; caches can be
+   evicted, libraries' declarations too in the economical memory mode.
 5. **No external tools.** No `rg`, `fd`, IDE exports or JVM: compiled classes
    are read in-process.
