@@ -12,8 +12,12 @@ with a sources JAR, or the JDK.
 | sources JAR / JDK `src.zip` | one entry at a time, parsed like a workspace file | where a declaration is written (navigation) and its documentation (hover) |
 
 Each archive is indexed once at load: per package, its top-level names and
-which entries hold its declarations. A package's declarations are read when a
-query first needs them and kept while recently used. Nothing runs on a JVM.
+which entries hold its declarations. A reload (the model exported again, a
+library added) indexes again only the archives whose modification time or
+length changed since they were indexed, and new ones: the others keep their
+index, and what was read and inferred from them stays. A package's
+declarations are read when a query first needs them and kept while
+recently used. Nothing runs on a JVM.
 
 ## Which library a name comes from
 

@@ -68,15 +68,21 @@ impl AnalysisHost {
         self.db.apply_change(changes);
     }
 
-    /// Sets the indexed libraries, which of them each source set sees, and
+    /// Sets the libraries' indexes, which of them each source set sees, and
     /// which one is the JDK.
-    pub fn set_libraries(
+    pub fn set_libraries<Index: Into<hir::LibraryIndex>>(
         &mut self,
-        libraries: Vec<(hir::LibrarySource, hir::IndexedLibrary)>,
+        libraries: Vec<(hir::LibrarySource, Index)>,
         by_source_set: Vec<Vec<usize>>,
         jdk: Option<usize>,
     ) {
         self.db.set_libraries(libraries, by_source_set, jdk);
+    }
+
+    /// Each archive indexed, with its stamp when read: what a reload needn't
+    /// read again.
+    pub fn library_stamps(&self) -> rustc_hash::FxHashMap<hir::LibrarySource, hir::ArchiveStamp> {
+        self.db.library_stamps()
     }
 
     /// Drops results beyond each query's limit. Salsa does so only between

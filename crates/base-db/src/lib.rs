@@ -23,6 +23,21 @@ pub use salsa;
 pub use syntax::{Language, Parse};
 pub use vfs::FileId;
 
+/// A library's index for a load: read from its archive now, or kept — the
+/// one the database has, its archive unchanged since it was read (see
+/// [`RootDatabase::library_stamps`]).
+#[derive(Clone, Debug)]
+pub enum LibraryIndex {
+    Read(IndexedLibrary),
+    Kept,
+}
+
+impl From<IndexedLibrary> for LibraryIndex {
+    fn from(indexed: IndexedLibrary) -> LibraryIndex {
+        LibraryIndex::Read(indexed)
+    }
+}
+
 /// One source file's input: its text and where it belongs.
 #[salsa::input(debug)]
 pub struct SourceFile {
@@ -284,18 +299,36 @@ impl RootDatabase {
         }
     }
 
-    /// Sets the libraries: each indexed archive, which of them each source
+    /// Each archive indexed, with its stamp as it was when read: one with
+    /// the same stamp now needn't be read again ([`LibraryIndex::Kept`]).
+    pub fn library_stamps(&self) -> FxHashMap<LibrarySource, ArchiveStamp> {
+        self.libraries
+            .iter()
+            .map(|(source, known)| (source.clone(), known.input.stamp(self)))
+            .collect()
+    }
+
+    /// Sets the libraries: each archive's index, which of them each source
     /// set sees (indices into `libraries`), and which one is the JDK.
-    pub fn set_libraries(
+    pub fn set_libraries<Index: Into<LibraryIndex>>(
         &mut self,
-        libraries: Vec<(LibrarySource, IndexedLibrary)>,
+        libraries: Vec<(LibrarySource, Index)>,
         by_source_set: Vec<Vec<usize>>,
         jdk: Option<usize>,
     ) {
         use salsa::Setter;
         let mut inputs: Vec<Library> = Vec::with_capacity(libraries.len());
-        for (source, indexed) in libraries {
-            inputs.push(self.library_input(source, indexed));
+        for (source, index) in libraries {
+            let index: LibraryIndex = index.into();
+            let known = self.libraries.get(&source).map(|known| known.input);
+            let input = match (index, known) {
+                (LibraryIndex::Kept, Some(known)) => known,
+                (LibraryIndex::Read(indexed), _) => self.library_input(source, indexed),
+                // Kept by a load that started from other stamps than these:
+                // nothing to keep — empty until the next load reads it.
+                (LibraryIndex::Kept, None) => self.library_input(source, IndexedLibrary::default()),
+            };
+            inputs.push(input);
         }
         let by_source_set: Arc<[Arc<[Library]>]> = by_source_set
             .into_iter()
@@ -455,5 +488,39 @@ mod tests {
         assert_eq!(library.packages(&db)[&Path::parse("a")], package);
         assert_eq!(package.names(&db).len(), 2);
         assert_eq!(library.stamp(&db).length, 2);
+    }
+
+    #[test]
+    fn a_kept_index_is_the_known_librarys_and_its_stamp_is_told() {
+        let mut db = RootDatabase::default();
+        let source = LibrarySource {
+            archive: PathBuf::from("/nowhere/a.jar"),
+            kind: ArchiveKind::Jar,
+            sources: None,
+        };
+        let library_of = |db: &RootDatabase| db.classpaths().by_source_set(db)[0][0];
+        db.set_libraries(
+            vec![(source.clone(), indexed(&["A"], 7))],
+            vec![vec![0]],
+            None,
+        );
+        let first = library_of(&db);
+        assert_eq!(db.library_stamps()[&source].length, 7);
+
+        db.set_libraries(
+            vec![(source.clone(), LibraryIndex::Kept)],
+            vec![vec![0]],
+            None,
+        );
+        assert_eq!(library_of(&db), first, "kept: the same input");
+        assert_eq!(first.packages(&db)[&Path::parse("a")].names(&db).len(), 1);
+
+        // Kept but never read (stamps of another database): empty, not wrong.
+        let other = LibrarySource {
+            archive: PathBuf::from("/nowhere/b.jar"),
+            ..source
+        };
+        db.set_libraries(vec![(other, LibraryIndex::Kept)], vec![vec![0]], None);
+        assert!(library_of(&db).packages(&db).is_empty());
     }
 }

@@ -35,5 +35,8 @@ memory-stats.workspace = true
 rustc-hash.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+zip.workspace = true
+
 [lints]
 workspace = true

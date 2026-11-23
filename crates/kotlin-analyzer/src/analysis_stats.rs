@@ -40,7 +40,11 @@ pub fn run(root: &Path, project_json: Option<&Path>) -> ExitCode {
         .libraries
         .libraries
         .iter()
-        .flat_map(|(_, indexed)| indexed.packages.iter())
+        .filter_map(|(_, index)| match index {
+            hir::LibraryIndex::Read(indexed) => Some(indexed),
+            hir::LibraryIndex::Kept => None,
+        })
+        .flat_map(|indexed| indexed.packages.iter())
         .map(|package| package.names.len())
         .sum();
     println!(

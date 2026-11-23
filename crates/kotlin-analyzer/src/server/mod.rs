@@ -689,6 +689,8 @@ impl GlobalState {
             }),
         );
         let project_json = self.model_file();
+        // What the last load indexed: unchanged archives aren't read again.
+        let indexed = self.host.library_stamps();
         let folders: Vec<(PathBuf, Option<PathBuf>)> = self
             .folders
             .iter()
@@ -712,7 +714,7 @@ impl GlobalState {
                         if folders[0].0.join("panic-while-loading").exists() {
                             panic!("a test panic while loading");
                         }
-                        load::read_workspaces_reporting(&folders, &|step| {
+                        load::read_workspaces_reporting(&folders, &indexed, &|step| {
                             let (message, percentage) = match step {
                                 load::LoadStep::ReadingModel => {
                                     ("Reading the project model".to_owned(), None)
@@ -2257,6 +2259,8 @@ struct LoadSummary {
     kotlin_files: usize,
     java_files: usize,
     libraries: usize,
+    /// Libraries whose index the last load's was, their archives unchanged.
+    libraries_kept: usize,
     library_failures: usize,
     model_time: Duration,
     read_time: Duration,
@@ -2278,6 +2282,12 @@ impl LoadSummary {
             kotlin_files: language_count("kt") + language_count("kts"),
             java_files: language_count("java"),
             libraries: loaded.libraries.libraries.len(),
+            libraries_kept: loaded
+                .libraries
+                .libraries
+                .iter()
+                .filter(|(_, index)| matches!(index, hir::LibraryIndex::Kept))
+                .count(),
             library_failures: loaded.libraries.failures.len(),
             model_time: loaded.model_time,
             read_time: loaded.discovery_time + loaded.read_time,
@@ -2295,6 +2305,7 @@ impl LoadSummary {
             .count("kotlin-files", self.kotlin_files)
             .count("java-files", self.java_files)
             .count("libraries", self.libraries)
+            .count("libraries-kept", self.libraries_kept)
             .count("library-failures", self.library_failures)
             .duration("model-time", self.model_time)
             .duration("read-time", self.read_time)

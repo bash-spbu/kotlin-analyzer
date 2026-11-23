@@ -26,7 +26,8 @@ pub struct LoadedFiles {
 /// Every library archive the workspace compiles against, indexed.
 #[derive(Default)]
 pub struct LoadedLibraries {
-    pub libraries: Vec<(hir::LibrarySource, hir::IndexedLibrary)>,
+    /// Each archive's index: read now, or kept from the last load.
+    pub libraries: Vec<(hir::LibrarySource, hir::LibraryIndex)>,
     /// Per source set (by id), indices into `libraries`, in classpath order.
     pub by_source_set: Vec<Vec<usize>>,
     pub jdk: Option<usize>,
@@ -54,12 +55,18 @@ pub enum LoadStep {
 pub fn read_workspaces(
     folders: &[(PathBuf, Option<PathBuf>)],
 ) -> Result<LoadedFiles, project_model::LoadError> {
-    read_workspaces_reporting(folders, &|_| {})
+    read_workspaces_reporting(folders, &IndexedStamps::default(), &|_| {})
 }
 
 /// [`read_workspaces`], telling `report` each step as it comes.
+/// The archives indexed by an earlier load, with their stamps then.
+pub type IndexedStamps = rustc_hash::FxHashMap<hir::LibrarySource, hir::ArchiveStamp>;
+
+/// The workspace of `folders`, reporting its steps; an archive in `indexed`
+/// with the same stamp now isn't read again.
 pub fn read_workspaces_reporting(
     folders: &[(PathBuf, Option<PathBuf>)],
+    indexed: &IndexedStamps,
     report: &(dyn Fn(LoadStep) + Sync),
 ) -> Result<LoadedFiles, project_model::LoadError> {
     report(LoadStep::ReadingModel);
@@ -88,7 +95,7 @@ pub fn read_workspaces_reporting(
     let read_time = started.elapsed();
 
     let started = Instant::now();
-    let libraries = index_libraries(&model, report);
+    let libraries = index_libraries(&model, indexed, report);
     let library_time = started.elapsed();
     Ok(LoadedFiles {
         model: Arc::new(model),
@@ -102,9 +109,10 @@ pub fn read_workspaces_reporting(
 }
 
 /// Indexes the JDK and every distinct JAR of the model's classpaths, in
-/// parallel.
+/// parallel — but for those `indexed` already, unchanged since.
 pub fn index_libraries(
     model: &ProjectModel,
+    indexed: &IndexedStamps,
     report: &(dyn Fn(LoadStep) + Sync),
 ) -> LoadedLibraries {
     let mut sources: Vec<hir::LibrarySource> = Vec::new();
@@ -134,27 +142,35 @@ pub fn index_libraries(
     if total > 0 {
         report(LoadStep::IndexingLibraries { indexed: 0, total });
     }
-    let indexed: Vec<Result<hir::IndexedLibrary, String>> = sources
+    let read: Vec<Result<hir::LibraryIndex, String>> = sources
         .par_iter()
         .map(|source| {
-            let indexed = hir::index_library(source);
+            let unchanged = indexed
+                .get(source)
+                .is_some_and(|stamp| *stamp == hir::ArchiveStamp::of(&source.archive));
+            let index = if unchanged {
+                Ok(hir::LibraryIndex::Kept)
+            } else {
+                hir::index_library(source).map(hir::LibraryIndex::Read)
+            };
             let count = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             report(LoadStep::IndexingLibraries {
                 indexed: count,
                 total,
             });
-            indexed
+            index
         })
         .collect();
     let mut libraries = Vec::with_capacity(sources.len());
     let mut failures = Vec::new();
-    for (source, result) in sources.into_iter().zip(indexed) {
+    for (source, result) in sources.into_iter().zip(read) {
         match result {
-            Ok(indexed) => libraries.push((source, indexed)),
+            Ok(index) => libraries.push((source, index)),
             Err(error) => {
                 failures.push((source.archive.clone(), error));
                 // Keep the position, so indices stay valid.
-                libraries.push((source, hir::IndexedLibrary::default()));
+                let empty = hir::LibraryIndex::Read(hir::IndexedLibrary::default());
+                libraries.push((source, empty));
             }
         }
     }
@@ -389,5 +405,78 @@ mod tests {
             None
         );
         assert_eq!(agreed_jdk_release(&model_with_releases(&[])), None);
+    }
+
+    #[test]
+    fn a_reload_reads_again_only_the_archives_that_changed() {
+        let directory =
+            std::env::temp_dir().join(format!("kotlin-analyzer-reindex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let write_jar = |name: &str, entries: &[&str]| -> PathBuf {
+            let path = directory.join(name);
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            for entry in entries {
+                writer
+                    .start_file(*entry, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                std::io::Write::write_all(&mut writer, b"not a class").unwrap();
+            }
+            writer.finish().unwrap();
+            path
+        };
+        let kept = write_jar("kept.jar", &["a/A.txt"]);
+        let changed = write_jar("changed.jar", &["b/B.txt"]);
+        let mut model = model_with_releases(&[(project_model::Platform::Jvm, None)]);
+        model.source_sets[0].libraries = [&kept, &changed]
+            .into_iter()
+            .map(|jar| project_model::Library {
+                coordinates: None,
+                jar: jar.clone(),
+                sources_jar: None,
+            })
+            .collect();
+        model.jdk = None;
+        let kinds = |loaded: &LoadedLibraries| -> Vec<(String, &'static str)> {
+            loaded
+                .libraries
+                .iter()
+                .filter(|(source, _)| source.kind == hir::ArchiveKind::Jar)
+                .map(|(source, index)| {
+                    let name = source
+                        .archive
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    let kind = match index {
+                        hir::LibraryIndex::Read(_) => "read",
+                        hir::LibraryIndex::Kept => "kept",
+                    };
+                    (name, kind)
+                })
+                .collect()
+        };
+        let first = index_libraries(&model, &IndexedStamps::default(), &|_| {});
+        assert_eq!(
+            kinds(&first),
+            [
+                ("kept.jar".to_owned(), "read"),
+                ("changed.jar".to_owned(), "read")
+            ]
+        );
+        let mut host = ide::AnalysisHost::default();
+        apply_libraries(&mut host, first);
+        // One archive rebuilt in place: longer.
+        write_jar("changed.jar", &["b/B.txt", "b/C.txt"]);
+        let second = index_libraries(&model, &host.library_stamps(), &|_| {});
+        assert_eq!(
+            kinds(&second),
+            [
+                ("kept.jar".to_owned(), "kept"),
+                ("changed.jar".to_owned(), "read")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
