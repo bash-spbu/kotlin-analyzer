@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 /// The server release this extension downloads; `cargo xtask versions`
 /// keeps it the server's own version.
-pub const SERVER_VERSION: &str = "1.1.2";
+pub const SERVER_VERSION: &str = "1.2.0";
 
 /// Where releases are downloaded from: `<base>/v<version>/<asset>`. A build
 /// with `KOTLIN_ANALYZER_DOWNLOADS` set points elsewhere (the Zed test does).
