@@ -401,7 +401,14 @@ impl RootDatabase {
         let known = library.packages(self).clone();
         let mut inputs = FxHashMap::default();
         for package in packages {
-            let names: Arc<[intern::Name]> = package.names.into();
+            // Sorted here, for `declares`' binary search: a `Name` orders by
+            // when this process interned it, so an index read back from the
+            // disk — its names interned anew, while other threads intern
+            // theirs — is in no order of this process's.
+            let mut names = package.names;
+            names.sort_unstable();
+            names.dedup();
+            let names: Arc<[intern::Name]> = names.into();
             let entries: Arc<[u32]> = package.entries.into();
             let input = match known.get(&package.package).copied() {
                 Some(input) => {
@@ -452,6 +459,41 @@ mod tests {
     use intern::{Name, Path};
 
     use super::*;
+
+    #[test]
+    fn a_package_declares_its_names_whatever_order_they_came_in() {
+        // Interned in this order, so their `Name`s ascend; given descending,
+        // as an index read back in another process may give them.
+        let interned: Vec<Name> = ["declares-order-a", "declares-order-b", "declares-order-c"]
+            .iter()
+            .map(|name| Name::new(name))
+            .collect();
+        let mut db = RootDatabase::default();
+        let source = LibrarySource {
+            archive: PathBuf::from("/m2/order.jar"),
+            kind: ArchiveKind::Jar,
+            sources: None,
+        };
+        let library = IndexedLibrary {
+            packages: vec![IndexedPackage {
+                package: Path::parse("a"),
+                names: interned.iter().rev().copied().collect(),
+                entries: vec![0],
+                module: None,
+            }],
+            stamp: ArchiveStamp {
+                modified: None,
+                length: 1,
+            },
+        };
+        db.set_libraries(vec![(source, library)], vec![], None);
+        let input = db.libraries.values().next().unwrap().input;
+        let package = input.packages(&db)[&Path::parse("a")];
+        for name in &interned {
+            assert!(package.declares(&db, *name), "{name}");
+        }
+        assert!(!package.declares(&db, Name::new("declares-order-other")));
+    }
 
     fn indexed(names: &[&str], length: u64) -> IndexedLibrary {
         IndexedLibrary {
