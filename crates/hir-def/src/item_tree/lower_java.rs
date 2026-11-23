@@ -1,7 +1,7 @@
 //! Java syntax → [`ItemTree`]. Java is read for its declarations only: the
 //! types Kotlin code can name and the members it can call.
 
-use intern::{Name, Path};
+use intern::{Interned, Name, Path};
 use syntax::{Parse, SyntaxNode, TextRange, named_children};
 
 use super::{
@@ -127,7 +127,8 @@ impl<'parse> Lowering<'parse> {
         let name_node = node.child_by_field_name("name")?;
         let mut supertypes = Vec::new();
         if let Some(superclass) = node.child_by_field_name("superclass") {
-            supertypes.extend(named_children(superclass).map(|type_node| self.type_ref(type_node)));
+            supertypes
+                .extend(named_children(superclass).map(|type_node| self.interned_type(type_node)));
         }
         let interface_lists = node
             .child_by_field_name("interfaces")
@@ -135,8 +136,9 @@ impl<'parse> Lowering<'parse> {
             .chain(named_children(node).filter(|child| child.kind() == "extends_interfaces"));
         for list in interface_lists {
             for type_list in named_children(list).filter(|child| child.kind() == "type_list") {
-                supertypes
-                    .extend(named_children(type_list).map(|type_node| self.type_ref(type_node)));
+                supertypes.extend(
+                    named_children(type_list).map(|type_node| self.interned_type(type_node)),
+                );
             }
         }
         let primary_constructor = (node.kind() == "record_declaration")
@@ -202,7 +204,7 @@ impl<'parse> Lowering<'parse> {
                         .unwrap_or_default();
                     let return_type = member
                         .child_by_field_name("type")
-                        .map(|node| self.type_ref(node));
+                        .map(|node| self.interned_type(node));
                     let type_parameters =
                         self.type_parameters(member.child_by_field_name("type_parameters"));
                     let (visibility, mut kept) = self.modifiers(member, in_interface);
@@ -255,7 +257,7 @@ impl<'parse> Lowering<'parse> {
                 "field_declaration" | "constant_declaration" => {
                     let type_ref = member
                         .child_by_field_name("type")
-                        .map(|node| self.type_ref(node));
+                        .map(|node| self.interned_type(node));
                     let (visibility, mut modifiers) = self.modifiers(member, in_interface);
                     // Interface fields are implicitly `public static final`.
                     if in_interface {
@@ -281,7 +283,7 @@ impl<'parse> Lowering<'parse> {
                             Box::new([]),
                             Signature::Property {
                                 receiver: None,
-                                type_ref: type_ref.clone(),
+                                type_ref,
                             },
                         ));
                     }
@@ -300,7 +302,7 @@ impl<'parse> Lowering<'parse> {
                     name: self.name(parameter.child_by_field_name("name")?),
                     type_ref: parameter
                         .child_by_field_name("type")
-                        .map(|node| self.type_ref(node)),
+                        .map(|node| self.interned_type(node)),
                     has_default: false,
                     vararg: false,
                 }),
@@ -313,7 +315,7 @@ impl<'parse> Lowering<'parse> {
                     });
                     Some(Parameter {
                         name: self.name(declarator.child_by_field_name("name")?),
-                        type_ref: type_node.map(|node| self.type_ref(node)),
+                        type_ref: type_node.map(|node| self.interned_type(node)),
                         has_default: false,
                         vararg: true,
                     })
@@ -335,7 +337,7 @@ impl<'parse> Lowering<'parse> {
                 let bounds = named_children(parameter)
                     .filter(|child| child.kind() == "type_bound")
                     .flat_map(named_children)
-                    .map(|bound| self.type_ref(bound))
+                    .map(|bound| self.interned_type(bound))
                     .collect();
                 Some(TypeParameter {
                     name: self.name(name),
@@ -388,6 +390,10 @@ impl<'parse> Lowering<'parse> {
             .ends_with("Deprecated")
     }
 
+    fn interned_type(&self, node: SyntaxNode<'_>) -> Interned<TypeRef> {
+        self.type_ref(node).interned()
+    }
+
     fn type_ref(&self, node: SyntaxNode<'_>) -> TypeRef {
         match node.kind() {
             "type_identifier" => TypeRef::Named {
@@ -406,11 +412,10 @@ impl<'parse> Lowering<'parse> {
                 }
             }
             "array_type" => TypeRef::Array {
-                element: Box::new(
-                    node.child_by_field_name("element")
-                        .map(|element| self.type_ref(element))
-                        .unwrap_or(TypeRef::Unreadable),
-                ),
+                element: node
+                    .child_by_field_name("element")
+                    .map(|element| self.interned_type(element))
+                    .unwrap_or_else(|| TypeRef::Unreadable.interned()),
             },
             "integral_type" | "floating_point_type" | "boolean_type" | "void_type" => {
                 TypeRef::Primitive {
@@ -438,7 +443,7 @@ impl<'parse> Lowering<'parse> {
                             }
                             TypeArgument::Type {
                                 variance: Variance::Invariant,
-                                type_ref: self.type_ref(argument),
+                                type_ref: self.interned_type(argument),
                             }
                         })
                         .collect();
@@ -468,7 +473,7 @@ impl<'parse> Lowering<'parse> {
             } else {
                 Variance::Out
             },
-            type_ref: self.type_ref(bound),
+            type_ref: self.interned_type(bound),
         }
     }
 }

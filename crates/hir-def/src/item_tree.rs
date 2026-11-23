@@ -11,7 +11,7 @@ pub(crate) mod pretty;
 mod written_annotations;
 mod written_contract;
 
-use intern::{Name, Path};
+use intern::{InternStorage, Internable, Interned, Name, Path};
 use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -343,7 +343,7 @@ impl std::fmt::Debug for Modifiers {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TypeParameter {
     pub name: Name,
-    pub bounds: Box<[TypeRef]>,
+    pub bounds: Box<[Interned<TypeRef>]>,
     /// `reified T` of an inline function: its type is known at run time.
     pub reified: bool,
     /// `out T`, `in T` of a class: what a type argument for it may be.
@@ -354,25 +354,25 @@ pub struct TypeParameter {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Signature {
     Class {
-        supertypes: Box<[TypeRef]>,
+        supertypes: Box<[Interned<TypeRef>]>,
         /// The primary constructor's parameters (Kotlin), or the record
         /// components (Java); `None` without a primary constructor.
         primary_constructor: Option<Box<[Parameter]>>,
     },
     Function {
-        receiver: Option<TypeRef>,
+        receiver: Option<Interned<TypeRef>>,
         parameters: Box<[Parameter]>,
         /// `None` when not written (`Unit` for a block body, inferred for an
         /// expression body).
-        return_type: Option<TypeRef>,
+        return_type: Option<Interned<TypeRef>>,
     },
     Property {
-        receiver: Option<TypeRef>,
+        receiver: Option<Interned<TypeRef>>,
         /// `None` when not written (inferred from the initializer).
-        type_ref: Option<TypeRef>,
+        type_ref: Option<Interned<TypeRef>>,
     },
     TypeAlias {
-        target: TypeRef,
+        target: Interned<TypeRef>,
     },
     /// Enum entries carry nothing beyond their name.
     None,
@@ -381,12 +381,14 @@ pub enum Signature {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Parameter {
     pub name: Name,
-    pub type_ref: Option<TypeRef>,
+    pub type_ref: Option<Interned<TypeRef>>,
     pub has_default: bool,
     pub vararg: bool,
 }
 
-/// A type as written.
+/// A type as written. Declarations hold it interned (`Interned<TypeRef>`):
+/// the same type, written in a thousand signatures — library ones above
+/// all — is stored once.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TypeRef {
     /// `a.b.Outer<X>.Inner<Y>?`
@@ -396,9 +398,9 @@ pub enum TypeRef {
     },
     /// `suspend R.(A, B) -> C`
     Function {
-        receiver: Option<Box<TypeRef>>,
-        parameters: Box<[TypeRef]>,
-        result: Box<TypeRef>,
+        receiver: Option<Interned<TypeRef>>,
+        parameters: Box<[Interned<TypeRef>]>,
+        result: Interned<TypeRef>,
         suspend: bool,
         nullable: bool,
     },
@@ -414,12 +416,24 @@ pub enum TypeRef {
     /// A Java primitive or `void`: `int`, `boolean`.
     Primitive { name: Name },
     /// A Java array: `String[]`.
-    Array { element: Box<TypeRef> },
+    Array { element: Interned<TypeRef> },
     /// Something this tree doesn't read (intersection types, errors).
     Unreadable,
 }
 
+impl Internable for TypeRef {
+    fn storage() -> &'static InternStorage<TypeRef> {
+        static STORAGE: std::sync::OnceLock<InternStorage<TypeRef>> = std::sync::OnceLock::new();
+        STORAGE.get_or_init(InternStorage::default)
+    }
+}
+
 impl TypeRef {
+    /// This type, interned.
+    pub fn interned(self) -> Interned<TypeRef> {
+        Interned::new(self)
+    }
+
     /// The names of a named type's segments: `a`, `b`, `C`.
     pub fn path(&self) -> Option<Path> {
         match self {
@@ -442,7 +456,7 @@ pub enum TypeArgument {
     Star,
     Type {
         variance: Variance,
-        type_ref: TypeRef,
+        type_ref: Interned<TypeRef>,
     },
 }
 

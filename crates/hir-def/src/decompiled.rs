@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use intern::{Name, Path};
+use intern::{Interned, Name, Path};
 
 use crate::ItemId;
 use crate::item_tree::pretty::{java_type, type_text};
@@ -264,18 +264,18 @@ fn name_ordinal_cases(tree: &ItemTree, method: &Item, body: &mut MethodBody) {
     let Signature::Function { parameters, .. } = &method.signature else {
         return;
     };
-    let mut types: Vec<(String, TypeRef)> = body
+    let mut types: Vec<(String, Interned<TypeRef>)> = body
         .parameter_names
         .iter()
         .zip(parameters.iter())
-        .filter_map(|(name, parameter)| Some((name.clone(), parameter.type_ref.clone()?)))
+        .filter_map(|(name, parameter)| Some((name.clone(), parameter.type_ref?)))
         .collect();
     declared_types(&body.body.statements, &mut types);
     rewrite_ordinal_switches(tree, &mut body.body.statements, &types);
 }
 
 /// The variables `statements` declare with a type.
-fn declared_types(statements: &[Statement], types: &mut Vec<(String, TypeRef)>) {
+fn declared_types(statements: &[Statement], types: &mut Vec<(String, Interned<TypeRef>)>) {
     for statement in statements {
         if let Statement::Declare {
             name,
@@ -330,7 +330,7 @@ fn enum_constants(tree: &ItemTree, type_ref: &TypeRef) -> Option<Vec<String>> {
 fn rewrite_ordinal_switches(
     tree: &ItemTree,
     statements: &mut [Statement],
-    types: &[(String, TypeRef)],
+    types: &[(String, Interned<TypeRef>)],
 ) {
     for statement in statements.iter_mut() {
         if let Statement::Switch { value, cases } = statement
@@ -599,7 +599,7 @@ fn matching_body(item: &Item, methods: &[DecompiledMethod]) -> Option<MethodBody
             let simple = parameter
                 .type_ref
                 .as_ref()
-                .map_or("*".to_owned(), simple_type_name);
+                .map_or("*".to_owned(), |type_ref| simple_type_name(type_ref));
             if parameter.vararg {
                 format!("{simple}[]")
             } else {
@@ -1270,7 +1270,7 @@ impl Renderer<'_> {
     /// `extends Base implements A, B` (an interface's: `extends A, B`):
     /// the class file lists the superclass first; `Object`, `Enum` and
     /// `Annotation`, implied, left out.
-    fn java_supertypes(&self, kind: ClassKind, supertypes: &[TypeRef]) -> Vec<String> {
+    fn java_supertypes(&self, kind: ClassKind, supertypes: &[Interned<TypeRef>]) -> Vec<String> {
         let is_interface = matches!(kind, ClassKind::Interface | ClassKind::Annotation);
         let mut superclass: Option<&TypeRef> = None;
         let mut interfaces: Vec<&TypeRef> = Vec::new();
@@ -2672,17 +2672,17 @@ impl Imports {
             } => TypeRef::Function {
                 receiver: receiver
                     .as_ref()
-                    .map(|receiver| Box::new(self.shortened(receiver))),
+                    .map(|receiver| self.shortened(receiver).interned()),
                 parameters: parameters
                     .iter()
-                    .map(|parameter| self.shortened(parameter))
+                    .map(|parameter| self.shortened(parameter).interned())
                     .collect(),
-                result: Box::new(self.shortened(result)),
+                result: self.shortened(result).interned(),
                 suspend: *suspend,
                 nullable: *nullable,
             },
             TypeRef::Array { element } => TypeRef::Array {
-                element: Box::new(self.shortened(element)),
+                element: self.shortened(element).interned(),
             },
             other => other.clone(),
         }
@@ -2695,7 +2695,7 @@ impl Imports {
                 TypeArgument::Star => TypeArgument::Star,
                 TypeArgument::Type { variance, type_ref } => TypeArgument::Type {
                     variance: *variance,
-                    type_ref: self.shortened(type_ref),
+                    type_ref: self.shortened(type_ref).interned(),
                 },
             })
             .collect()

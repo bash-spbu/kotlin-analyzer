@@ -1,6 +1,6 @@
 //! Kotlin syntax → [`ItemTree`].
 
-use intern::{Name, Path};
+use intern::{Interned, Name, Path};
 use syntax::ast::AstNode;
 use syntax::ast::kotlin::{
     ClassDeclaration, ClassKeyword, CompanionObject, Declaration, FunctionDeclaration,
@@ -198,7 +198,9 @@ impl<'parse> Lowering<'parse> {
                     visibility,
                     modifiers,
                     type_parameters: self.type_parameters(alias.type_parameters(), alias.syntax()),
-                    signature: Signature::TypeAlias { target },
+                    signature: Signature::TypeAlias {
+                        target: target.interned(),
+                    },
                 };
                 Some(self.push(item, parent))
             }
@@ -272,7 +274,7 @@ impl<'parse> Lowering<'parse> {
                 .filter_map(|parameter| {
                     Some(Parameter {
                         name: self.name(parameter.name()?),
-                        type_ref: parameter.type_node().map(|node| self.type_ref(node)),
+                        type_ref: parameter.type_node().map(|node| self.interned_type(node)),
                         has_default: parameter.has_default(),
                         vararg: parameter.is_vararg(),
                     })
@@ -317,7 +319,7 @@ impl<'parse> Lowering<'parse> {
                     type_parameters: Box::new([]),
                     signature: Signature::Property {
                         receiver: None,
-                        type_ref: parameter.type_node().map(|node| self.type_ref(node)),
+                        type_ref: parameter.type_node().map(|node| self.interned_type(node)),
                     },
                 };
                 children.push(self.push(property, Some(index)));
@@ -429,9 +431,9 @@ impl<'parse> Lowering<'parse> {
             modifiers,
             type_parameters: self.type_parameters(function.type_parameters(), function.syntax()),
             signature: Signature::Function {
-                receiver: function.receiver().map(|node| self.type_ref(node)),
+                receiver: function.receiver().map(|node| self.interned_type(node)),
                 parameters: self.parameters(function.parameters()),
-                return_type: function.return_type().map(|node| self.type_ref(node)),
+                return_type: function.return_type().map(|node| self.interned_type(node)),
             },
         };
         Some(self.push(item, parent))
@@ -468,8 +470,8 @@ impl<'parse> Lowering<'parse> {
             modifiers,
             type_parameters: self.type_parameters(property.type_parameters(), property.syntax()),
             signature: Signature::Property {
-                receiver: property.receiver().map(|node| self.type_ref(node)),
-                type_ref: variable.type_node().map(|node| self.type_ref(node)),
+                receiver: property.receiver().map(|node| self.interned_type(node)),
+                type_ref: variable.type_node().map(|node| self.interned_type(node)),
             },
         };
         Some(self.push(item, parent))
@@ -485,7 +487,10 @@ impl<'parse> Lowering<'parse> {
             .filter_map(|entry| {
                 Some(Parameter {
                     name: self.name(entry.parameter.name()?),
-                    type_ref: entry.parameter.type_node().map(|node| self.type_ref(node)),
+                    type_ref: entry
+                        .parameter
+                        .type_node()
+                        .map(|node| self.interned_type(node)),
                     has_default: entry.has_default,
                     vararg: entry.vararg,
                 })
@@ -509,11 +514,11 @@ impl<'parse> Lowering<'parse> {
             .parameters()
             .filter_map(|parameter| {
                 let name = self.name(parameter.name()?);
-                let written_beside = parameter.bound().map(|bound| self.type_ref(bound));
+                let written_beside = parameter.bound().map(|bound| self.interned_type(bound));
                 let from_where = constraints
                     .iter()
                     .filter(|(constrained, _)| *constrained == name)
-                    .map(|(_, bound)| bound.clone());
+                    .map(|(_, bound)| *bound);
                 let variance = match parameter
                     .variance_modifier()
                     .map(|modifier| self.text(modifier))
@@ -533,7 +538,7 @@ impl<'parse> Lowering<'parse> {
     }
 
     /// `where T : Bound` pairs of a declaration.
-    fn where_constraints(&self, declaration: SyntaxNode<'_>) -> Vec<(Name, TypeRef)> {
+    fn where_constraints(&self, declaration: SyntaxNode<'_>) -> Vec<(Name, Interned<TypeRef>)> {
         let Some(clause) =
             syntax::named_children(declaration).find(|child| child.kind() == "type_constraints")
         else {
@@ -548,7 +553,7 @@ impl<'parse> Lowering<'parse> {
                     .next()
                     .filter(|part| part.kind() == "type_identifier")?;
                 let bound = parts.next()?;
-                Some((self.name(constrained), self.type_ref(bound)))
+                Some((self.name(constrained), self.interned_type(bound)))
             })
             .collect()
     }
@@ -556,10 +561,10 @@ impl<'parse> Lowering<'parse> {
     fn supertypes<'tree>(
         &self,
         specifiers: impl Iterator<Item = syntax::ast::kotlin::DelegationSpecifier<'tree>>,
-    ) -> Box<[TypeRef]> {
+    ) -> Box<[Interned<TypeRef>]> {
         specifiers
             .filter_map(|specifier| specifier.type_node())
-            .map(|node| self.type_ref(node))
+            .map(|node| self.interned_type(node))
             .collect()
     }
 
@@ -603,6 +608,10 @@ impl<'parse> Lowering<'parse> {
         (visibility, kept)
     }
 
+    fn interned_type(&self, node: SyntaxNode<'_>) -> Interned<TypeRef> {
+        self.type_ref(node).interned()
+    }
+
     fn type_ref(&self, node: SyntaxNode<'_>) -> TypeRef {
         match node.kind() {
             "user_type" => {
@@ -624,7 +633,7 @@ impl<'parse> Lowering<'parse> {
                                                 SyntaxVariance::In => Variance::In,
                                                 SyntaxVariance::Out => Variance::Out,
                                             },
-                                            type_ref: self.type_ref(type_node),
+                                            type_ref: self.interned_type(type_node),
                                         },
                                     })
                                     .collect()
@@ -670,18 +679,16 @@ impl<'parse> Lowering<'parse> {
                 TypeRef::Function {
                     receiver: function
                         .receiver()
-                        .map(|receiver| Box::new(self.type_ref(receiver))),
+                        .map(|receiver| self.interned_type(receiver)),
                     parameters: function
                         .parameters()
                         .into_iter()
-                        .map(|parameter| self.type_ref(parameter))
+                        .map(|parameter| self.interned_type(parameter))
                         .collect(),
-                    result: Box::new(
-                        function
-                            .result()
-                            .map(|result| self.type_ref(result))
-                            .unwrap_or(TypeRef::Unreadable),
-                    ),
+                    result: function
+                        .result()
+                        .map(|result| self.interned_type(result))
+                        .unwrap_or_else(|| TypeRef::Unreadable.interned()),
                     suspend: function.is_suspend() || preceded_by_suspend(node),
                     nullable: false,
                 }

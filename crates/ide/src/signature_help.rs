@@ -248,7 +248,7 @@ fn signatures_of(db: &RootDatabase, location: ItemLocation) -> Vec<SignatureInfo
         ) => {
             let result = return_type
                 .as_ref()
-                .map(hir::type_ref_text)
+                .map(|type_ref| hir::type_ref_text(type_ref))
                 .map(|text| shorten(&text));
             vec![signature(&name, parameters, result.as_deref())]
         }
@@ -296,7 +296,7 @@ fn signature(name: &str, parameters: &[Parameter], result: Option<&str>) -> Sign
         let written = parameter
             .type_ref
             .as_ref()
-            .map(hir::type_ref_text)
+            .map(|type_ref| hir::type_ref_text(type_ref))
             .map(|text| shorten(&text))
             .unwrap_or_else(|| "?".to_owned());
         label.push_str(&format!("{}: {written}", parameter.name));

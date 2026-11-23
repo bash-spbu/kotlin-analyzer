@@ -68,6 +68,93 @@ impl std::fmt::Display for Name {
     }
 }
 
+/// A value interned once per process: equal values are one value, so an
+/// `Interned` is a pointer — compared and hashed as one — and the value is
+/// stored once however many declarations name it (`String`, `List<T>`).
+/// Like names, interned values live as long as the process.
+pub struct Interned<T: 'static>(&'static T);
+
+/// A type whose values can be interned: it says where they're kept.
+pub trait Internable: Eq + std::hash::Hash + Send + Sync + Sized + 'static {
+    fn storage() -> &'static InternStorage<Self>;
+}
+
+/// Where a type's interned values are, split like names' ids so threads
+/// interning at once rarely meet at one lock.
+pub struct InternStorage<T: 'static> {
+    shards: [RwLock<rustc_hash::FxHashSet<&'static T>>; SHARDS],
+}
+
+impl<T> Default for InternStorage<T> {
+    fn default() -> InternStorage<T> {
+        InternStorage {
+            shards: std::array::from_fn(|_| RwLock::default()),
+        }
+    }
+}
+
+impl<T: Internable> Interned<T> {
+    pub fn new(value: T) -> Interned<T> {
+        let storage = T::storage();
+        let shard = &storage.shards
+            [BuildHasherDefault::<FxHasher>::default().hash_one(&value) as usize % SHARDS];
+        let lock_held = "interner lock is never poisoned: no code panics while holding it";
+        if let Some(found) = shard.read().expect(lock_held).get(&value) {
+            return Interned(found);
+        }
+        let mut values = shard.write().expect(lock_held);
+        if let Some(found) = values.get(&value) {
+            return Interned(found);
+        }
+        let stored: &'static T = Box::leak(Box::new(value));
+        values.insert(stored);
+        Interned(stored)
+    }
+}
+
+impl<T> std::ops::Deref for Interned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.0
+    }
+}
+
+impl<T> AsRef<T> for Interned<T> {
+    fn as_ref(&self) -> &T {
+        self.0
+    }
+}
+
+impl<T> Clone for Interned<T> {
+    fn clone(&self) -> Interned<T> {
+        *self
+    }
+}
+
+impl<T> Copy for Interned<T> {}
+
+/// One value per content: the same address is the same value.
+impl<T> PartialEq for Interned<T> {
+    fn eq(&self, other: &Interned<T>) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl<T> Eq for Interned<T> {}
+
+impl<T> std::hash::Hash for Interned<T> {
+    fn hash<State: std::hash::Hasher>(&self, state: &mut State) {
+        std::ptr::hash(self.0, state);
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Interned<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// A dotted name: a package (`kotlin.collections`) or a qualified
 /// declaration (`java.util.Map.Entry`).
 #[derive(Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -133,6 +220,37 @@ impl std::fmt::Debug for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(PartialEq, Eq, Hash, Debug)]
+    struct Shape(Vec<u32>);
+
+    impl Internable for Shape {
+        fn storage() -> &'static InternStorage<Shape> {
+            static STORAGE: OnceLock<InternStorage<Shape>> = OnceLock::new();
+            STORAGE.get_or_init(InternStorage::default)
+        }
+    }
+
+    #[test]
+    fn equal_values_intern_to_one_and_unequal_ones_to_two() {
+        let first = Interned::new(Shape(vec![1, 2]));
+        let again = Interned::new(Shape(vec![1, 2]));
+        let other = Interned::new(Shape(vec![2, 1]));
+        assert!(std::ptr::eq(&*first, &*again), "stored once");
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(first.0.0, vec![1, 2], "read through the pointer");
+        let across_threads: Vec<Interned<Shape>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| Interned::new(Shape(vec![7]))))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        assert!(across_threads.windows(2).all(|pair| pair[0] == pair[1]));
+    }
 
     #[test]
     fn threads_interning_the_same_spellings_agree() {

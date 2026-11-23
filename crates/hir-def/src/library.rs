@@ -8,7 +8,7 @@ use base_db::{
     SourceDatabase,
 };
 use classfile::{ClassContents, LibraryClass, LibraryType, MemberKind, PackageMembers};
-use intern::{Name, Path};
+use intern::{Interned, Name, Path};
 use rustc_hash::FxHashMap;
 use syntax::TextRange;
 
@@ -359,7 +359,7 @@ impl Builder {
         let contract = member
             .contract
             .as_deref()
-            .map(|contract| contract.map(&type_ref));
+            .map(|contract| contract.map(&lowered_type));
         if is_java && member.modifiers.is_static {
             kept.insert(Modifiers::STATIC);
         }
@@ -490,7 +490,12 @@ fn parameters(parameters: &[classfile::ValueParameter]) -> Box<[Parameter]> {
         .collect()
 }
 
-pub(crate) fn type_ref(library_type: &LibraryType) -> TypeRef {
+/// `library_type` as declarations hold it: interned.
+pub(crate) fn type_ref(library_type: &LibraryType) -> Interned<TypeRef> {
+    lowered_type(library_type).interned()
+}
+
+fn lowered_type(library_type: &LibraryType) -> TypeRef {
     match library_type {
         LibraryType::Class {
             name,
@@ -528,17 +533,15 @@ pub(crate) fn type_ref(library_type: &LibraryType) -> TypeRef {
             suspend,
             nullable,
         } => TypeRef::Function {
-            receiver: receiver
-                .as_ref()
-                .map(|receiver| Box::new(type_ref(receiver))),
+            receiver: receiver.as_ref().map(|receiver| type_ref(receiver)),
             parameters: parameters.iter().map(type_ref).collect(),
-            result: Box::new(type_ref(result)),
+            result: type_ref(result),
             suspend: *suspend,
             nullable: *nullable,
         },
         LibraryType::Primitive(name) => TypeRef::Primitive { name: *name },
         LibraryType::Array(element) => TypeRef::Array {
-            element: Box::new(type_ref(element)),
+            element: type_ref(element),
         },
         LibraryType::Unreadable => TypeRef::Unreadable,
     }

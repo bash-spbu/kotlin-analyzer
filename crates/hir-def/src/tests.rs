@@ -821,6 +821,44 @@ class Pay { fun pay() {} }
 }
 
 #[test]
+fn equal_types_written_anywhere_are_one_shared_value() {
+    let fixture = Fixture::parse(
+        r#"
+//- /app/x/A.kt
+package x
+fun first(): Map<String, List<Int>>? = null
+//- /app/x/C.kt
+package x
+fun third(): Map<String, List<Int>>? = null
+fun fourth(): Map<String, List<Long>>? = null
+"#,
+    );
+    let db = &fixture.database;
+    let return_types: Vec<intern::Interned<crate::item_tree::TypeRef>> =
+        ["/app/x/A.kt", "/app/x/C.kt"]
+            .iter()
+            .flat_map(|path| {
+                let file = db.source_file(fixture.file(path)).unwrap();
+                let tree = file_item_tree(db, file);
+                tree.indexed_items()
+                    .filter_map(|(_, item)| match &item.signature {
+                        crate::item_tree::Signature::Function { return_type, .. } => *return_type,
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    let [first, third, fourth] = return_types[..] else {
+        panic!("three functions, got {return_types:?}");
+    };
+    assert!(
+        std::ptr::eq(&*first, &*third),
+        "one value for equal types in two files"
+    );
+    assert!(!std::ptr::eq(&*first, &*fourth), "unequal types stay apart");
+}
+
+#[test]
 fn which_files_can_name_a_declaration() {
     let fixture = Fixture::parse(
         r#"

@@ -94,7 +94,10 @@ pub(crate) fn header(item: &Item) -> String {
                 let _ = write!(declaration, "({})", parameter_list(parameters));
             }
             if !supertypes.is_empty() {
-                let supertypes: Vec<String> = supertypes.iter().map(type_text).collect();
+                let supertypes: Vec<String> = supertypes
+                    .iter()
+                    .map(|type_ref| type_text(type_ref))
+                    .collect();
                 let _ = write!(declaration, " : {}", supertypes.join(", "));
             }
         }
@@ -129,7 +132,11 @@ fn type_parameters(parameters: &[TypeParameter]) -> String {
     let parameters: Vec<String> = parameters
         .iter()
         .map(|parameter| {
-            let bounds: Vec<String> = parameter.bounds.iter().map(type_text).collect();
+            let bounds: Vec<String> = parameter
+                .bounds
+                .iter()
+                .map(|type_ref| type_text(type_ref))
+                .collect();
             if bounds.is_empty() {
                 parameter.name.to_string()
             } else {
@@ -200,7 +207,10 @@ pub fn type_text(type_ref: &TypeRef) -> String {
             suspend,
             nullable,
         } => {
-            let parameters: Vec<String> = parameters.iter().map(type_text).collect();
+            let parameters: Vec<String> = parameters
+                .iter()
+                .map(|type_ref| type_text(type_ref))
+                .collect();
             let receiver = receiver
                 .as_ref()
                 .map(|receiver| format!("{}.", type_text(receiver)))
@@ -293,7 +303,9 @@ pub(crate) fn java_header(
             let name = match (item.kind, item.parent) {
                 (ItemKind::Constructor, Some(class)) => tree.item(class).name.to_string(),
                 _ => {
-                    let returned = return_type.as_ref().map_or("void".to_owned(), java_type);
+                    let returned = return_type
+                        .as_ref()
+                        .map_or("void".to_owned(), |type_ref| java_type(type_ref));
                     words.push(returned);
                     item.name.to_string()
                 }
@@ -321,7 +333,11 @@ fn java_type_parameters(parameters: &[TypeParameter]) -> String {
     let parameters: Vec<String> = parameters
         .iter()
         .map(|parameter| {
-            let bounds: Vec<String> = parameter.bounds.iter().map(java_type).collect();
+            let bounds: Vec<String> = parameter
+                .bounds
+                .iter()
+                .map(|type_ref| java_type(type_ref))
+                .collect();
             if bounds.is_empty() {
                 parameter.name.to_string()
             } else {
@@ -343,7 +359,7 @@ fn java_parameters(parameters: &[Parameter], names: Option<&[String]>) -> String
             let written = parameter
                 .type_ref
                 .as_ref()
-                .map_or("?".to_owned(), java_type);
+                .map_or("?".to_owned(), |type_ref| java_type(type_ref));
             let written = match (parameter.vararg, written.strip_suffix("[]")) {
                 (true, Some(element)) => format!("{element}..."),
                 (true, None) => format!("{written}..."),
@@ -444,19 +460,20 @@ mod tests {
             vec![
                 TypeArgument::Type {
                     variance: Variance::Invariant,
-                    type_ref: string.clone(),
+                    type_ref: string.clone().interned(),
                 },
                 TypeArgument::Type {
                     variance: Variance::Out,
-                    type_ref: class("java.lang", &["Number"], Vec::new()),
+                    type_ref: class("java.lang", &["Number"], Vec::new()).interned(),
                 },
             ],
         );
         assert_eq!(java_type(&entry), "Map.Entry<String, ? extends Number>");
         let longs = TypeRef::Array {
-            element: Box::new(TypeRef::Primitive {
+            element: TypeRef::Primitive {
                 name: Name::new("long"),
-            }),
+            }
+            .interned(),
         };
         assert_eq!(java_type(&longs), "long[]");
         let wildcard = class("java.util", &["List"], vec![TypeArgument::Star]);
@@ -466,17 +483,23 @@ mod tests {
         let parameters = [
             Parameter {
                 name: Name::new("p0"),
-                type_ref: Some(TypeRef::Primitive {
-                    name: Name::new("long"),
-                }),
+                type_ref: Some(
+                    TypeRef::Primitive {
+                        name: Name::new("long"),
+                    }
+                    .interned(),
+                ),
                 has_default: false,
                 vararg: false,
             },
             Parameter {
                 name: Name::new("p1"),
-                type_ref: Some(TypeRef::Array {
-                    element: Box::new(string),
-                }),
+                type_ref: Some(
+                    TypeRef::Array {
+                        element: string.interned(),
+                    }
+                    .interned(),
+                ),
                 has_default: false,
                 vararg: true,
             },
