@@ -25,6 +25,7 @@ mod selection_range;
 mod semantic_tokens;
 mod signature_help;
 mod statistics;
+mod stored_memory;
 mod workspace_symbols;
 
 use std::panic::AssertUnwindSafe;
@@ -49,6 +50,7 @@ pub use references::{Access, FileRange, Highlight, RenameError, SourceChange};
 pub use semantic_tokens::{SemanticToken, TokenKind, TokenModifiers};
 pub use signature_help::{SignatureHelp, SignatureInformation};
 pub use statistics::{BodyStatistics, DeclarationStatistics, UnsettledName};
+pub use stored_memory::{StoredKind, StoredMemory};
 
 /// How the server trades memory for time (`memory` in the settings).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -141,6 +143,12 @@ impl AnalysisHost {
     pub fn set_memory_mode(&mut self, mode: MemoryMode) {
         hir::keep_library_trees(&mut self.db, mode.library_trees_kept());
         self.trigger_lru_eviction();
+    }
+
+    /// What the database keeps, by query and by kind of value, the largest
+    /// first. Waits for snapshots to be dropped.
+    pub fn stored_memory(&mut self) -> Vec<StoredMemory> {
+        stored_memory::stored_memory(&mut self.db)
     }
 
     /// A snapshot to answer questions with, possibly on another thread.

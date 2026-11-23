@@ -22,6 +22,8 @@ struct Options<'arguments> {
     config: DiagnosticsConfig,
     /// How many findings are printed (all are counted).
     limit: usize,
+    /// Whether what is kept by query is printed at the end.
+    memory: bool,
 }
 
 pub fn command(arguments: &[String]) -> ExitCode {
@@ -39,6 +41,10 @@ pub fn command(arguments: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    #[cfg(feature = "memory-profile")]
+    if options.memory {
+        crate::memory_profile::start();
+    }
     let model = loaded.model.clone();
     let mut host = AnalysisHost::default();
     let mut vfs = Vfs::default();
@@ -106,6 +112,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
         }
     }
 
+    if options.memory {
+        print_memory(&mut host);
+    }
     println!("files           : {}", files.len());
     println!("time            : {:?}", started.elapsed());
     let mut sorted: Vec<Duration> = durations.iter().map(|(_, duration)| *duration).collect();
@@ -140,17 +149,34 @@ pub fn command(arguments: &[String]) -> ExitCode {
     }
 }
 
+/// What the database keeps by query as the pass leaves it (evicted between
+/// batches, as the server's pass does), and in the profiling build what
+/// each query allocated.
+fn print_memory(host: &mut AnalysisHost) {
+    let stored = host.stored_memory();
+    #[cfg(feature = "memory-profile")]
+    let allocations = Some(crate::memory_profile::allocations());
+    #[cfg(not(feature = "memory-profile"))]
+    let allocations: Option<Vec<crate::memory_report::QueryAllocations>> = None;
+    print!(
+        "{}",
+        crate::memory_report::render(&stored, allocations.as_deref())
+    );
+}
+
 fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
-    const USAGE: &str = "usage: kotlin-analyzer diagnostics <root> [--project-json <file>] [--only <check,…>] [--experimental] [--limit <n>]";
+    const USAGE: &str = "usage: kotlin-analyzer diagnostics <root> [--project-json <file>] [--only <check,…>] [--experimental] [--limit <n>] [--memory]";
     let mut root = None;
     let mut project_json = None;
     let mut config = DiagnosticsConfig::default();
     let mut limit = 200;
+    let mut memory = false;
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
         match argument.as_str() {
             "--project-json" => project_json = remaining.next().map(Path::new),
             "--experimental" => config.experimental = true,
+            "--memory" => memory = true,
             "--limit" => {
                 limit = remaining
                     .next()
@@ -173,5 +199,6 @@ fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
         project_json,
         config,
         limit,
+        memory,
     })
 }

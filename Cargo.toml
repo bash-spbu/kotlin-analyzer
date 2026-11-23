@@ -44,9 +44,11 @@ memory-stats = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 sha2 = "0.10"
+tracing = "0.1"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Allowed in one file only, the profiling allocator (`cargo xtask check`).
+unsafe_code = "deny"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]

@@ -6,7 +6,9 @@
 //!   [`check_versions`]); `cargo xtask versions` runs only this;
 //! - the Zed and VS Code extensions pin the same formatter releases (see
 //!   [`check_formatter_pins`]);
-//! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`;
+//! - `unsafe` only where [`UNSAFE_ALLOWED`] says (see [`check_unsafe`]);
+//! - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, and
+//!   clippy and the profiling tests of the `memory-profile` build;
 //! - the editors' Gradle tasks: `editors/gradle/test_gradle_task.py`.
 
 use std::path::{Path, PathBuf};
@@ -71,6 +73,10 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The only files that may allow `unsafe_code` (denied in the workspace):
+/// the profiling build's allocator.
+const UNSAFE_ALLOWED: &[&str] = &["crates/kotlin-analyzer/src/memory_profile/allocator.rs"];
+
 fn main() -> ExitCode {
     let task = std::env::args().nth(1);
     match task.as_deref() {
@@ -95,7 +101,10 @@ fn run_check() -> ExitCode {
     if let ExitCode::FAILURE = report(check_formatter_pins(&root)) {
         return ExitCode::FAILURE;
     }
-    let steps: [&[&str]; 4] = [
+    if let ExitCode::FAILURE = report(check_unsafe(&root)) {
+        return ExitCode::FAILURE;
+    }
+    let steps: [&[&str]; 6] = [
         &["fmt", "--all", "--check"],
         &[
             "clippy",
@@ -106,6 +115,27 @@ fn run_check() -> ExitCode {
             "warnings",
         ],
         &["test", "--workspace", "--quiet"],
+        // The profiling build: its allocator and query scopes.
+        &[
+            "clippy",
+            "--package",
+            "kotlin-analyzer",
+            "--all-targets",
+            "--features",
+            "memory-profile",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        &[
+            "test",
+            "--package",
+            "kotlin-analyzer",
+            "--features",
+            "memory-profile",
+            "--quiet",
+            "memory_",
+        ],
         // The Zed extension is a crate of its own (built for wasm); its
         // tests run on the host.
         &[
@@ -173,6 +203,44 @@ fn check_layers(root: &Path) -> Vec<String> {
             if is_internal && !allowed.contains(&dependency.as_str()) {
                 violations.push(format!(
                     "`{crate_name}` depends on `{dependency}`, which its layer doesn't allow"
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// Every Rust file under `crates/` that allows `unsafe_code` but isn't in
+/// [`UNSAFE_ALLOWED`].
+fn check_unsafe(root: &Path) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut directories = vec![root.join("crates")];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let is_rust = path.extension().is_some_and(|extension| extension == "rs");
+            if !is_rust {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            if !text.contains("allow(unsafe_code)") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !UNSAFE_ALLOWED.contains(&relative.as_str()) {
+                violations.push(format!(
+                    "{relative} allows `unsafe_code`; only {UNSAFE_ALLOWED:?} may"
                 ));
             }
         }
@@ -422,6 +490,27 @@ version = \"0.3.1\"
             "ab".repeat(31)
         );
         assert_eq!(sha256_digests(&text), vec![digest]);
+    }
+
+    #[test]
+    fn unsafe_is_allowed_only_in_the_profiling_allocator() {
+        assert_eq!(check_unsafe(&workspace_root()), Vec::<String>::new());
+        let scratch = std::env::temp_dir().join(format!("xtask-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(scratch.join("crates/x/src")).unwrap();
+        std::fs::write(
+            scratch.join("crates/x/src/lib.rs"),
+            "#![allow(unsafe_code)]\n",
+        )
+        .unwrap();
+        std::fs::write(scratch.join("crates/x/src/safe.rs"), "fn f() {}\n").unwrap();
+        assert_eq!(
+            check_unsafe(&scratch),
+            vec![format!(
+                "crates/x/src/lib.rs allows `unsafe_code`; only {UNSAFE_ALLOWED:?} may"
+            )]
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

@@ -35,6 +35,13 @@ walkdir.workspace = true
 memory-stats.workspace = true
 rustc-hash.workspace = true
 sha2.workspace = true
+# The profiling build (`memory-profile`): Salsa's span around each query
+# tells the allocator which query it counts for.
+salsa = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[features]
+memory-profile = ["dep:salsa", "salsa/detailed-trace", "dep:tracing"]
 
 [dev-dependencies]
 zip.workspace = true

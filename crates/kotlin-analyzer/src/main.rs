@@ -9,7 +9,14 @@ mod diagnostics;
 mod library_index_cache;
 mod load;
 mod log;
+#[cfg(feature = "memory-profile")]
+mod memory_profile;
+mod memory_report;
 mod server;
+
+#[cfg(feature = "memory-profile")]
+#[global_allocator]
+static ALLOCATOR: memory_profile::ScopedAllocator = memory_profile::ScopedAllocator;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -23,9 +30,10 @@ USAGE:
                                 load a workspace and report sizes, times, memory
                                 and how many type names resolve
     kotlin-analyzer diagnostics <root> [--project-json <file>] [--only <check,…>]
-                                [--experimental] [--limit <n>]
+                                [--experimental] [--limit <n>] [--memory]
                                 run every check over every workspace file; exits 1
-                                on any error or warning
+                                on any error or warning; --memory: what is kept,
+                                by query, at the end
     kotlin-analyzer mcp [--socket-directory <dir>]
                                 an MCP server on stdin/stdout for coding agents:
                                 definitions, references, types, outlines and
