@@ -28,6 +28,6 @@ rust-analyzer's architecture — never from another implementation's source.
    declarations of the module.
 4. **Low memory.** Declarations are stored compactly with interned names
    and types; source text of libraries is read on demand; caches can be
-   evicted, libraries' declarations too in the economical memory mode.
+   evicted; libraries' declarations, once read, are kept on disk too.
 5. **No external tools.** No `rg`, `fd`, IDE exports or JVM: compiled classes
    are read in-process.

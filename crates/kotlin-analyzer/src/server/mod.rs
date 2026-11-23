@@ -116,7 +116,6 @@ pub(crate) fn run_on_with_java(
     let diagnostics_config = settings::diagnostics_config(params.initialization_options.as_ref());
     let formatting = settings::formatting_config(params.initialization_options.as_ref());
     let code_lens_config = settings::code_lens_config(params.initialization_options.as_ref());
-    let memory_mode = settings::memory_mode(params.initialization_options.as_ref());
     let agent_sockets = settings::agent_socket_directory(params.initialization_options.as_ref());
     let gradle_export = params
         .initialization_options
@@ -137,7 +136,6 @@ pub(crate) fn run_on_with_java(
         &root,
         &diagnostics_config,
         &formatting,
-        memory_mode,
         gradle_export,
     );
     let encoding = position_encoding(&params.capabilities);
@@ -176,7 +174,6 @@ pub(crate) fn run_on_with_java(
     state.diagnostics_config = Arc::new(diagnostics_config);
     state.formatting = Arc::new(formatting);
     state.code_lens_config = code_lens_config;
-    state.set_memory_mode(memory_mode);
     if let Some(directory) = agent_sockets {
         state.agent_sockets = agent::listen(&directory, &state.folders, &state.task_sender);
     }
@@ -211,7 +208,6 @@ fn log_session_start(
     root: &std::path::Path,
     diagnostics: &ide::DiagnosticsConfig,
     formatting: &formatting::FormattingConfig,
-    memory: ide::MemoryMode,
     gradle_export: bool,
 ) {
     let client = params.client_info.as_ref();
@@ -243,7 +239,6 @@ fn log_session_start(
         .flag("experimental-checks", diagnostics.experimental)
         .texts("disabled-checks", disabled)
         .text("formatter", formatting.formatter_name())
-        .text("memory", memory.name())
         .emit();
     if let Some(location) = crate::log::file_location() {
         use std::io::Write as _;
@@ -534,9 +529,6 @@ struct GlobalState {
     formatting: Arc<formatting::FormattingConfig>,
     /// Which code lenses the client wants.
     code_lens_config: code_lens::CodeLensConfig,
-    /// How much the analysis keeps in memory, from the client's settings;
-    /// a fresh analysis gets it too.
-    memory_mode: ide::MemoryMode,
     /// The sockets agents ask on, one per workspace folder no other host
     /// listens for.
     agent_sockets: Vec<agent::ListeningSocket>,
@@ -625,7 +617,6 @@ impl GlobalState {
             diagnostics_config: Arc::default(),
             formatting: Arc::default(),
             code_lens_config: code_lens::CodeLensConfig::default(),
-            memory_mode: ide::MemoryMode::default(),
             agent_sockets: Vec::new(),
             pending_agent_requests: Vec::new(),
             gradle_export: true,
@@ -1137,13 +1128,6 @@ impl GlobalState {
         }
     }
 
-    /// Keeps as much in memory as `mode` says, now and in a fresh
-    /// analysis. A change cancels what runs: it's the client's, and rare.
-    fn set_memory_mode(&mut self, mode: ide::MemoryMode) {
-        self.memory_mode = mode;
-        self.host.set_memory_mode(mode);
-    }
-
     /// Drops what the database holds beyond each cache's limit, when no
     /// batch is being checked and no other request is being answered —
     /// dropping cancels what runs, and a user's request mustn't be.
@@ -1444,7 +1428,6 @@ impl GlobalState {
             })
         {
             self.host = AnalysisHost::default();
-            self.host.set_memory_mode(self.memory_mode);
             self.fresh_load = FreshLoad::None;
             Event::info("analysis-replaced").emit();
         }
@@ -2098,12 +2081,6 @@ impl GlobalState {
                             .emit();
                         self.code_lens_config = config;
                         self.refresh_code_lenses();
-                    }
-                    if let Some(mode) = settings::changed_memory_mode(&params.settings) {
-                        Event::info("memory-mode-changed")
-                            .text("memory", mode.name())
-                            .emit();
-                        self.set_memory_mode(mode);
                     }
                     if let Some(config) = settings::changed_formatting_config(&params.settings) {
                         Event::info("formatting-changed")

@@ -97,13 +97,9 @@ Settings in `initializationOptions`: `diagnostics.disabled`,
 `true` by default), `codeLens.locationsCommand`,
 `agentSockets` (`false`, or the directory of the sockets agents ask on —
 see agents.md),
-`memory` (`"balanced"`, the default: libraries' declarations, once read,
-stay for the session; `"economical"`: only the 128 library packages used
-last stay, the others are read from their archives again when needed —
-less memory, slower passes over the whole workspace),
 `gradleExport`, `projectJson`, and `log` (`"info"`, `"debug"`; see
 logging.md). A value not understood is the default. `diagnostics`,
-`formatting`, `codeLens`, `memory` and `log` may also change in `workspace/didChangeConfiguration`
+`formatting`, `codeLens` and `log` may also change in `workspace/didChangeConfiguration`
 (under `kotlin-analyzer`, or at the top); a `formatting` there replaces the
 one before as a whole.
 

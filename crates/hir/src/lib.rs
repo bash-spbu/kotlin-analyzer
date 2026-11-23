@@ -22,8 +22,7 @@ pub use hir_def::item_tree::{
 };
 pub use hir_def::item_tree::{Deprecation, DeprecationLevel};
 pub use hir_def::library::{
-    LibrarySourceLocation, LibraryTreesKept, SourceOrigin, index_library, keep_library_trees,
-    library_declaration_source, release_letter,
+    LibrarySourceLocation, SourceOrigin, index_library, library_declaration_source, release_letter,
 };
 pub use hir_def::library_tree_store::archive_directory as library_tree_directory;
 pub use hir_def::resolver::{
