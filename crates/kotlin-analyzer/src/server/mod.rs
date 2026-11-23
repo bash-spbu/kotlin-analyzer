@@ -14,6 +14,7 @@ mod formatting;
 mod gradle_export;
 mod handlers;
 mod hierarchy;
+mod invalidate;
 mod jdk_download;
 mod library_sources;
 mod progress;
@@ -61,6 +62,10 @@ pub const RELOAD_COMMAND: &str = "kotlin-analyzer.reloadWorkspace";
 /// `workspace/executeCommand`: download a JDK into `~/.jdks` — asking which,
 /// or, with arguments `[vendor, release]`, that one (`docs/spec/jdk.md`).
 pub const DOWNLOAD_JDK_COMMAND: &str = "kotlin-analyzer.downloadJdk";
+
+/// `workspace/executeCommand`: delete the project's caches and read it as
+/// for the first time (`invalidate`).
+pub const INVALIDATE_COMMAND: &str = "kotlin-analyzer.invalidateCachesAndRestart";
 
 /// How a session ended. LSP: an `exit` not preceded by `shutdown` (or a
 /// client that just went away) ends with exit code 1.
@@ -316,7 +321,11 @@ fn capabilities() -> ServerCapabilities {
             }),
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
-            commands: vec![RELOAD_COMMAND.to_owned(), DOWNLOAD_JDK_COMMAND.to_owned()],
+            commands: vec![
+                RELOAD_COMMAND.to_owned(),
+                DOWNLOAD_JDK_COMMAND.to_owned(),
+                INVALIDATE_COMMAND.to_owned(),
+            ],
             ..lsp_types::ExecuteCommandOptions::default()
         }),
         ..ServerCapabilities::default()
@@ -546,6 +555,8 @@ struct GlobalState {
     java: project_model::jdk::JavaEnvironment,
     /// No JDK runs programs: the server offers to download one.
     jdk_missing: bool,
+    /// Where a load from scratch (after the caches were invalidated) is.
+    fresh_load: FreshLoad,
     /// The questions about downloading a JDK the client hasn't answered.
     jdk_questions: FxHashMap<RequestId, jdk_download::JdkQuestion>,
     downloading_jdk: bool,
@@ -611,6 +622,7 @@ impl GlobalState {
             java: project_model::jdk::JavaEnvironment::default(),
             jdk_missing: false,
             jdk_questions: FxHashMap::default(),
+            fresh_load: FreshLoad::None,
             downloading_jdk: false,
         }
     }
@@ -675,6 +687,11 @@ impl GlobalState {
     fn start_loading(&mut self) {
         self.load_generation += 1;
         let generation = self.load_generation;
+        // A load from scratch knows of no library indexed before.
+        let fresh = self.fresh_load != FreshLoad::None;
+        if fresh {
+            self.fresh_load = FreshLoad::Loading { generation };
+        }
         let token = loading_token(generation);
         self.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
             token: lsp_types::NumberOrString::String(token.clone()),
@@ -690,7 +707,11 @@ impl GlobalState {
         );
         let project_json = self.model_file();
         // What the last load indexed: unchanged archives aren't read again.
-        let indexed = self.host.library_stamps();
+        let indexed = if fresh {
+            load::IndexedStamps::default()
+        } else {
+            self.host.library_stamps()
+        };
         let folders: Vec<(PathBuf, Option<PathBuf>)> = self
             .folders
             .iter()
@@ -925,6 +946,42 @@ impl GlobalState {
         }
     }
 
+    /// *Invalidate caches and restart*: deletes the project's caches, then
+    /// exports the model again and loads the workspace from scratch — the
+    /// analysis there is answers until that load replaces it.
+    fn invalidate_caches(&mut self) {
+        let exported_models: Vec<PathBuf> = self
+            .folders
+            .iter()
+            .filter_map(|folder| gradle_export::cached_model(folder))
+            .collect();
+        let libraries: Vec<hir::LibrarySource> = self.host.library_stamps().into_keys().collect();
+        let caches = cache_directory()
+            .map(|cache| invalidate::project_caches(&cache, &exported_models, &libraries))
+            .unwrap_or_default();
+        let removed = invalidate::delete(&caches);
+        Event::info("caches-invalidated")
+            .count("caches", caches.len())
+            .count("removed", removed)
+            .emit();
+        *self
+            .report_basis
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            pull_diagnostics::ReportBasis::default();
+        self.notify::<notification::ShowMessage>(lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::INFO,
+            message: "kotlin-analyzer: caches invalidated; reading the project again from scratch."
+                .to_owned(),
+        });
+        self.fresh_load = FreshLoad::Pending;
+        // With an export to wait for, its end starts the load (`on_exports`).
+        self.start_export();
+        if !self.exporting {
+            self.start_loading();
+        }
+    }
+
     /// Asks which JDK to download when there's none — once a session.
     fn offer_jdk_download_if_missing(&mut self) {
         if !self.jdk_missing {
@@ -1095,7 +1152,9 @@ impl GlobalState {
         for export in exports {
             self.on_export(export, took);
         }
-        if any_exported {
+        // A load from scratch waits for the export, whatever came of it.
+        let fresh_load_waits = self.fresh_load == FreshLoad::Pending;
+        if any_exported || fresh_load_waits {
             self.start_loading();
         }
     }
@@ -1165,6 +1224,17 @@ impl GlobalState {
         let started = Instant::now();
         let files = loaded.files.len();
         let summary = LoadSummary::of(&loaded);
+        // A load from scratch replaces the analysis whole: nothing of the
+        // last one stays.
+        if self.fresh_load
+            == (FreshLoad::Loading {
+                generation: self.load_generation,
+            })
+        {
+            self.host = AnalysisHost::default();
+            self.fresh_load = FreshLoad::None;
+            Event::info("analysis-replaced").emit();
+        }
         self.model = loaded.model.clone();
         let open: Vec<PathBuf> = self
             .open_documents
@@ -1697,6 +1767,10 @@ impl GlobalState {
                 self.start_loading();
                 self.start_export();
             }
+            Ok(params) if params.command == INVALIDATE_COMMAND => {
+                self.respond(Response::new_ok(request.id, serde_json::Value::Null));
+                self.invalidate_caches();
+            }
             Ok(params) if params.command == DOWNLOAD_JDK_COMMAND => {
                 self.respond(Response::new_ok(request.id, serde_json::Value::Null));
                 match chosen_jdk(&params.arguments) {
@@ -1709,7 +1783,7 @@ impl GlobalState {
             _ => self.respond(Response::new_err(
                 request.id,
                 lsp_server::ErrorCode::InvalidParams as i32,
-                format!("commands: {RELOAD_COMMAND}, {DOWNLOAD_JDK_COMMAND}"),
+                format!("commands: {RELOAD_COMMAND}, {DOWNLOAD_JDK_COMMAND}, {INVALIDATE_COMMAND}"),
             )),
         }
     }
@@ -2030,6 +2104,18 @@ fn chosen_jdk(arguments: &[serde_json::Value]) -> Option<(jdk_download::Vendor, 
     let vendor = jdk_download::Vendor::from_name(vendor.as_str()?)?;
     let release = u32::try_from(release.as_u64()?).ok()?;
     Some((vendor, release))
+}
+
+/// A load from scratch, after *Invalidate caches and restart*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FreshLoad {
+    None,
+    /// The next load starts from scratch.
+    Pending,
+    /// This load started from scratch: its result replaces the analysis.
+    Loading {
+        generation: u64,
+    },
 }
 
 /// When the user is told everything is ready: after a load, once the work

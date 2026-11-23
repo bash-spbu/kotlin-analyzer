@@ -194,6 +194,17 @@ arguments into the shell's command line unquoted. The command isn't shown
 (`show_command: false`); the script prints the Gradle command it runs. `editors/gradle/zed_tasks.py`
 writes that file, and `editors/gradle/test_gradle_task.py` checks it.
 
+## Invalidating caches
+
+*Invalidate caches and restart kotlin-analyzer* in the code actions menu
+(`cmd-.`), offered anywhere in a Kotlin file, is IntelliJ's *Invalidate
+Caches and Restart*: the server deletes the project's caches — the exported
+Gradle model, its libraries' indexes and extracted sources — exports the
+model again and reads the project as for the first time. It keeps
+answering from what it had until the new analysis is ready. *editor:
+restart language server* restarts the process alone; the caches on disk
+stay.
+
 ## Settings
 
 Under `lsp.kotlin-analyzer`:

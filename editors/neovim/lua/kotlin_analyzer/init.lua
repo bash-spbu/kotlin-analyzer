@@ -20,6 +20,7 @@ local kotlin_analyzer = {}
 local NAME = "kotlin_analyzer"
 local RELOAD_COMMAND = "kotlin-analyzer.reloadWorkspace"
 local DOWNLOAD_JDK_COMMAND = "kotlin-analyzer.downloadJdk"
+local INVALIDATE_COMMAND = "kotlin-analyzer.invalidateCachesAndRestart"
 
 local defaults = {
   cmd = nil,
@@ -118,6 +119,9 @@ local function create_commands(options)
   vim.api.nvim_create_user_command("KotlinAnalyzerReload", reload_workspace, {
     desc = "Export the Gradle model again if the build changed, and reload every file",
   })
+  vim.api.nvim_create_user_command("KotlinAnalyzerInvalidateCaches", function()
+    execute(INVALIDATE_COMMAND, "invalidating the caches failed")
+  end, { desc = "Delete the project's caches and read it again from scratch" })
   vim.api.nvim_create_user_command("KotlinAnalyzerDownloadJdk", function()
     -- The server asks which vendor and release.
     execute(DOWNLOAD_JDK_COMMAND, "JDK download failed")

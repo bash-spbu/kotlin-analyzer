@@ -200,6 +200,11 @@
         "category": "kotlin-analyzer"
       },
       {
+        "command": "kotlin-analyzer.invalidateCachesAndRestart",
+        "title": "Invalidate Caches and Restart",
+        "category": "kotlin-analyzer"
+      },
+      {
         "command": "kotlin-analyzer.downloadJdk",
         "title": "Download a JDK",
         "category": "kotlin-analyzer"

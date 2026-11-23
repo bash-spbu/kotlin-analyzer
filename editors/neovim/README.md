@@ -116,6 +116,9 @@ Inlay hints are off by default in Neovim; turn them on with
 - `:KotlinAnalyzerReload` exports the model again if the build changed, then
   reloads every file.
 - `:KotlinAnalyzerInstall` downloads the plugin's release again.
+- `:KotlinAnalyzerInvalidateCaches` deletes the project's caches (the
+  exported model, its libraries' indexes and extracted sources) and reads
+  the project as for the first time.
 - `:KotlinAnalyzerDownloadJdk` downloads a JDK into `~/.jdks`, asking which
   vendor and release; without any JDK the server asks at startup.
 - `:lsp restart` (Neovim 0.12) restarts the server.

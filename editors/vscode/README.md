@@ -191,6 +191,9 @@ Commands:
 
 - *kotlin-analyzer: Reload Workspace* exports the model again if the build
   changed, then reloads every file.
+- *Invalidate Caches and Restart* deletes the project's caches (the exported
+  model, its libraries' indexes and extracted sources) and reads the project
+  as for the first time: Gradle exports it, every library is indexed anew.
 - *Download a JDK* downloads one into `~/.jdks`, asking which vendor and
   release; without any JDK the server asks at startup.
 - *Restart Server*.

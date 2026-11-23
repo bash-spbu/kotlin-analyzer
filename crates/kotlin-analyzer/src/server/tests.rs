@@ -1494,7 +1494,14 @@ fn with_a_jdk_the_server_asks_nothing_and_offers_no_download() {
             "context": { "diagnostics": [] },
         }),
     );
-    assert_eq!(actions, json!([]));
+    // No download offered: only the source action every file has.
+    let titles: Vec<&str> = actions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|action| action["title"].as_str())
+        .collect();
+    assert_eq!(titles, ["Invalidate caches and restart kotlin-analyzer"]);
     assert!(
         !client
             .server_requests
@@ -1687,6 +1694,50 @@ fn after_an_edit_inside_a_body_only_the_edited_file_is_checked_again() {
     );
     let (full, _) = pull(&mut client, &ids);
     assert_eq!(full, ["Order.kt", "Use.kt"]);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn invalidating_the_caches_reads_the_project_again_keeping_what_is_open() {
+    let root = workspace("invalidate");
+    let sources = root.join("src/main/kotlin/app");
+    let saved = sources.join("Saved.kt");
+    std::fs::write(&saved, "package app\n\nclass Saved\n").unwrap();
+    let open = sources.join("Open.kt");
+    std::fs::write(&open, "package app\n\nclass OnDisk\n").unwrap();
+    let mut client = Client::start(&root);
+    client.wait_for_load(1);
+    // Unsaved in the editor.
+    client.open(&open, "package app\n\nclass Unsaved\n");
+    // Gone from the disk without the client saying so: a load from scratch
+    // doesn't find it.
+    std::fs::remove_file(&saved).unwrap();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": super::INVALIDATE_COMMAND, "arguments": [] }),
+    );
+    let message = client.wait_for(|notification| notification.method == "window/showMessage");
+    assert!(
+        message.params["message"]
+            .as_str()
+            .unwrap()
+            .contains("caches invalidated"),
+        "{}",
+        message.params
+    );
+    client.wait_for_load(2);
+    assert_eq!(
+        client.workspace_symbols("Unsaved"),
+        ["Unsaved"],
+        "the editor's text stays"
+    );
+    assert!(client.workspace_symbols("OnDisk").is_empty());
+    let saved_classes = client.workspace_symbols("Saved");
+    assert!(
+        !saved_classes.iter().any(|name| name == "Saved"),
+        "read again: gone, {saved_classes:?}"
+    );
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
 }

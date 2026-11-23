@@ -565,8 +565,8 @@ fn to_lsp(index: &LineIndex, text: &str, diagnostic: &ide::Diagnostic) -> Diagno
     }
 }
 
-/// The fixes of the diagnostics overlapping the requested range, and,
-/// while there's no JDK, downloading one.
+/// The fixes of the diagnostics overlapping the requested range; while
+/// there's no JDK, downloading one; and invalidating the caches.
 fn code_actions(
     snapshot: &Snapshot,
     params: lsp_types::CodeActionParams,
@@ -585,6 +585,19 @@ fn code_actions(
             },
         ));
     }
+    // A source action, offered anywhere: the way Zed runs a command.
+    actions.push(lsp_types::CodeActionOrCommand::CodeAction(
+        lsp_types::CodeAction {
+            title: "Invalidate caches and restart kotlin-analyzer".to_owned(),
+            kind: Some(lsp_types::CodeActionKind::SOURCE),
+            command: Some(lsp_types::Command {
+                title: "Invalidate caches and restart kotlin-analyzer".to_owned(),
+                command: super::INVALIDATE_COMMAND.to_owned(),
+                arguments: None,
+            }),
+            ..lsp_types::CodeAction::default()
+        },
+    ));
     Ok(serde_json::to_value(actions).unwrap_or_default())
 }
 

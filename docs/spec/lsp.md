@@ -74,7 +74,18 @@ are dropped and the new ones read (a file open in the editor is the
 editor's to report).
 
 `workspace/executeCommand`: `kotlin-analyzer.reloadWorkspace` — export the
-model again if the build files changed, and reload it and every file.
+model again if the build files changed, and reload it and every file;
+`kotlin-analyzer.invalidateCachesAndRestart` — IntelliJ's *Invalidate Caches
+and Restart*: the project's caches on disk are deleted (each workspace
+folder's exported Gradle model, and, of every library it read, the JDK's
+included, its index and its extracted sources), the model is exported
+again whatever the build files' state, and the workspace is read as by a
+server seeing it for the first time — every file read, every library
+indexed anew, nothing kept of what was analysed. Until that load ends,
+answers come from what there was; then the new analysis replaces it whole.
+It's also a source code action, *Invalidate caches and restart
+kotlin-analyzer*, offered everywhere (Zed runs commands no other way). The
+caches of other projects stay.
 
 Settings in `initializationOptions`: `diagnostics.disabled`,
 `diagnostics.experimental`, `formatting.formatter` (`"ktrs"`, `"ktfmt"`,
