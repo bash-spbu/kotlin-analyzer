@@ -10,6 +10,7 @@ mod completion;
 mod diagnostics;
 mod doc_markdown;
 mod document_symbols;
+mod file_interface;
 mod file_rename;
 mod folding;
 mod goto_definition;
@@ -36,6 +37,7 @@ pub use code_lens::{CodeLens, CodeLensKind, TestTarget};
 pub use completion::{CompletionItem, CompletionKind, Completions};
 pub use diagnostics::{Check, Diagnostic, DiagnosticsConfig, Fix, Severity, Stability, TextEdit};
 pub use document_symbols::DocumentSymbol;
+pub use file_interface::FileInterface;
 pub use file_rename::FileMove;
 pub use folding::{Fold, FoldKind};
 pub use hierarchy::{HierarchyCall, HierarchyItem, HierarchyKey};
@@ -106,6 +108,11 @@ impl Analysis {
     }
 
     /// Every file of the workspace's source sets.
+    /// What other files' analysis reads of `file` (`None`: no such file).
+    pub fn file_interface(&self, file: FileId) -> Cancellable<Option<FileInterface>> {
+        self.with_db(|db| file_interface::file_interface(db, file))
+    }
+
     pub fn workspace_files(&self) -> Cancellable<Vec<FileId>> {
         self.with_db(|db| {
             db.all_files()

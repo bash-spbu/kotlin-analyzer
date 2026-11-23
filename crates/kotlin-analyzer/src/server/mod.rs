@@ -533,8 +533,11 @@ struct GlobalState {
     sent_tokens: Arc<semantic_tokens::SentTokens>,
     /// What a position's column counts, as agreed with the client.
     encoding: vfs::ColumnUnit,
-    /// How many times files, the model or the settings changed.
+    /// How many times the model (a load) or the settings changed: part of
+    /// a pull diagnostics report's id, with what `report_basis` keeps.
     revision: u64,
+    /// What the pull diagnostics reports were made from, per file.
+    report_basis: Arc<std::sync::Mutex<pull_diagnostics::ReportBasis>>,
     /// The client asks for diagnostics (`textDocument/diagnostic`) rather
     /// than being sent them; and whether it can be asked to ask again.
     pull_diagnostics: bool,
@@ -602,6 +605,7 @@ impl GlobalState {
             sent_tokens: Arc::default(),
             encoding: vfs::ColumnUnit::Utf16,
             revision: 0,
+            report_basis: Arc::default(),
             pull_diagnostics: false,
             diagnostics_refresh: false,
             java: project_model::jdk::JavaEnvironment::default(),
@@ -1543,6 +1547,7 @@ impl GlobalState {
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
+            report_basis: self.report_basis.clone(),
         }
     }
 
@@ -1883,8 +1888,9 @@ impl GlobalState {
     fn apply_vfs_changes(&mut self) {
         let changes = load::file_changes(&mut self.vfs, &self.model);
         if !changes.is_empty() {
+            // Which reports a change leaves current is the report basis's
+            // to tell, file by file.
             self.host.apply_change(changes);
-            self.revision += 1;
         }
         self.refresh_paths();
     }

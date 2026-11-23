@@ -1609,3 +1609,84 @@ fn hierarchy_lenses_show_what_a_member_overrides_and_what_implements_it() {
     client.shut_down();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn after_an_edit_inside_a_body_only_the_edited_file_is_checked_again() {
+    let root = workspace("pull-incremental");
+    let sources = root.join("src/main/kotlin/app");
+    let order = sources.join("Order.kt");
+    let order_text =
+        "package app\n\nclass Order {\n    fun total(): Int {\n        return 1\n    }\n}\n";
+    let usage = sources.join("Use.kt");
+    let usage_text = "package app\n\nfun use(order: Order): Int = order.total()\n";
+    std::fs::write(&order, order_text).unwrap();
+    std::fs::write(&usage, usage_text).unwrap();
+    let (mut client, _) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({ "textDocument": { "diagnostic": {} } }),
+    );
+    client.wait_for_load(1);
+    client.open(&order, order_text);
+    // Which files a workspace pull, given the ids from the last one,
+    // reports in full; and the ids it gives.
+    let pull = |client: &mut Client, previous: &Value| -> (Vec<String>, Value) {
+        let answer = client.request(
+            "workspace/diagnostic",
+            json!({ "previousResultIds": previous }),
+        );
+        let items = answer["items"].as_array().unwrap().clone();
+        let mut full: Vec<String> = items
+            .iter()
+            .filter(|item| item["kind"] == "full")
+            .map(|item| {
+                item["uri"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        full.sort();
+        let ids: Vec<Value> = items
+            .iter()
+            .map(|item| json!({ "uri": item["uri"], "value": item["resultId"] }))
+            .collect();
+        (full, Value::Array(ids))
+    };
+    let edit = |client: &mut Client, version: i32, text: &str| {
+        client.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri(&order), "version": version },
+                "contentChanges": [{ "text": text }],
+            }),
+        );
+    };
+    let (full, ids) = pull(&mut client, &json!([]));
+    assert_eq!(full, ["Order.kt", "Use.kt"]);
+    let (full, ids) = pull(&mut client, &ids);
+    assert!(full.is_empty(), "nothing changed: {full:?}");
+
+    // Whitespace and a body under a declared type: Order.kt alone.
+    edit(
+        &mut client,
+        2,
+        "package app\n\nclass Order {\n    fun total(): Int {\n        return  1 + 2\n    }\n}\n",
+    );
+    let (full, ids) = pull(&mut client, &ids);
+    assert_eq!(full, ["Order.kt"]);
+
+    // A signature: every file, Use.kt reading it.
+    edit(
+        &mut client,
+        3,
+        "package app\n\nclass Order {\n    fun total(): Long {\n        return 1\n    }\n}\n",
+    );
+    let (full, _) = pull(&mut client, &ids);
+    assert_eq!(full, ["Order.kt", "Use.kt"]);
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

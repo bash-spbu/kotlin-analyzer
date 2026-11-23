@@ -35,9 +35,11 @@ pub(super) struct Snapshot {
     pub(super) jdk_missing: bool,
     /// What a position's column counts, as agreed with the client.
     pub(super) encoding: vfs::ColumnUnit,
-    /// How many times the workspace has changed: a pull diagnostics
-    /// report's id.
+    /// How many times the model or the settings changed: part of a pull
+    /// diagnostics report's id.
     pub(super) revision: u64,
+    /// What the pull diagnostics reports were made from, per file.
+    pub(super) report_basis: Arc<std::sync::Mutex<super::pull_diagnostics::ReportBasis>>,
     /// The semantic tokens last sent per file, for deltas.
     pub(super) sent_tokens: Arc<super::semantic_tokens::SentTokens>,
 }
@@ -57,6 +59,7 @@ impl Snapshot {
             sent_tokens: self.sent_tokens.clone(),
             encoding: self.encoding,
             revision: self.revision,
+            report_basis: self.report_basis.clone(),
         }
     }
 }

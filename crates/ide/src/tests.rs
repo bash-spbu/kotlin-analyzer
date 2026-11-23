@@ -4663,3 +4663,37 @@ fn workspace_symbols_find_library_classes_once_and_only_closely() {
         ["b PairUp (workspace)", "b pairwise (workspace)"]
     );
 }
+
+#[test]
+fn a_files_interface_changes_with_its_declarations_and_inferred_types_only() {
+    let interface_of = |text: &str| {
+        let fixture = Fixture::parse(&format!("\n//- /app/a/Orders.kt\n{text}"));
+        let file = fixture.file("/app/a/Orders.kt");
+        analysis(&fixture).file_interface(file).unwrap().unwrap()
+    };
+    let base = interface_of(
+        "package a\n\nclass Orders {\n    fun total(): Int {\n        return 1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() = 2\n    val name = \"orders\"\n    val size: Int = 3\n}\n",
+    );
+    let same = [
+        // Whitespace anywhere.
+        "package a\n\n\nclass Orders {\n    fun total(): Int {\n        return  1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() =  2\n    val name = \"orders\"\n    val size: Int = 3\n}\n",
+        // A body under a declared type, a block body of `Unit`, a typed initializer.
+        "package a\n\nclass Orders {\n    fun total(): Int {\n        return 1 + 41\n    }\n    fun log() {\n        println(2)\n        println(3)\n    }\n    fun count() = 2\n    val name = \"orders\"\n    val size: Int = 4\n}\n",
+    ];
+    for text in same {
+        assert_eq!(interface_of(text), base, "{text}");
+    }
+    let changed = [
+        // A signature.
+        "package a\n\nclass Orders {\n    fun total(): Long {\n        return 1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() = 2\n    val name = \"orders\"\n    val size: Int = 3\n}\n",
+        // An expression body the return type is inferred from.
+        "package a\n\nclass Orders {\n    fun total(): Int {\n        return 1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() = \"two\"\n    val name = \"orders\"\n    val size: Int = 3\n}\n",
+        // An initializer the type is inferred from.
+        "package a\n\nclass Orders {\n    fun total(): Int {\n        return 1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() = 2\n    val name = 42\n    val size: Int = 3\n}\n",
+        // A declaration more.
+        "package a\n\nclass Orders {\n    fun total(): Int {\n        return 1\n    }\n    fun log() {\n        println(1)\n    }\n    fun count() = 2\n    val name = \"orders\"\n    val size: Int = 3\n}\nclass Refunds\n",
+    ];
+    for text in changed {
+        assert_ne!(interface_of(text), base, "{text}");
+    }
+}
