@@ -2063,3 +2063,81 @@ fn every_rendered_java_file_of_a_library_parses() {
         "{rendered} files, {with_bodies} with bodies"
     );
 }
+
+#[test]
+fn the_first_library_on_the_classpath_that_declares_a_name_has_it() {
+    use base_db::{ArchiveKind, ArchiveStamp, IndexedLibrary, IndexedPackage, LibrarySource};
+
+    use crate::library_tree_store::KeptTree;
+    use crate::{ItemContainer, def_map::visible_top_level};
+
+    // Both libraries declare `lib.Client`; their trees come from the store
+    // (the archives aren't there).
+    let declares_client = Fixture::parse(
+        r#"
+//- /src/lib/Client.kt
+package lib
+class Client
+"#,
+    );
+    let client_tree = (*file_item_tree(
+        &declares_client.database,
+        declares_client.database.all_files()[0],
+    ))
+    .clone();
+    let store = std::env::temp_dir().join(format!("kotlin-analyzer-first-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    let stamp = ArchiveStamp {
+        modified: None,
+        length: 1,
+    };
+    let library = |name: &str| LibrarySource {
+        archive: std::path::PathBuf::from(format!("/nowhere/{name}.jar")),
+        kind: ArchiveKind::Jar,
+        sources: None,
+    };
+    let (early, late) = (library("early"), library("late"));
+    let indexed = IndexedLibrary {
+        packages: vec![IndexedPackage {
+            package: Path::parse("lib"),
+            names: vec![intern::Name::new("Client")],
+            entries: Vec::new(),
+            module: None,
+        }],
+        stamp,
+    };
+    for source in [&early, &late] {
+        KeptTree::new(&store, source, stamp, &Path::parse("lib")).write(&client_tree);
+    }
+    let found_in = |order: Vec<usize>| -> Vec<String> {
+        let mut parsed = Fixture::parse(
+            r#"
+//- /app/x/Use.kt
+package x
+"#,
+        );
+        parsed.database.set_library_tree_store(Some(store.clone()));
+        parsed.database.set_libraries(
+            vec![
+                (late.clone(), indexed.clone()),
+                (early.clone(), indexed.clone()),
+            ],
+            vec![order],
+            None,
+        );
+        let db = &parsed.database;
+        let file = db.all_files()[0];
+        visible_top_level(db, file, &Path::parse("lib"), intern::Name::new("Client"))
+            .iter()
+            .map(|location| match location.container {
+                ItemContainer::Library(package) => {
+                    package.library(db).source(db).archive.display().to_string()
+                }
+                ItemContainer::File(_) => "a file".to_owned(),
+            })
+            .collect()
+    };
+    assert_eq!(found_in(vec![1, 0]), ["/nowhere/early.jar"]);
+    assert_eq!(found_in(vec![0, 1]), ["/nowhere/late.jar"]);
+    let _ = std::fs::remove_dir_all(&store);
+}

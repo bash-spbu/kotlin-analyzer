@@ -1348,8 +1348,8 @@ impl<'db> Inferrer<'db> {
         let bound = self
             .types
             .type_parameter_bounds(*receiver_parameter)
-            .into_iter()
-            .next()?;
+            .first()
+            .cloned()?;
         // Only a class's own type: a star and a type that didn't resolve
         // are both unknown here, and another bound (`Any`) would say less
         // than nothing.
@@ -1930,7 +1930,13 @@ impl<'db> Inferrer<'db> {
             "type_identifier" | "user_type" | "nullable_type" => self.written_type(receiver),
             _ => self.expression(receiver, None).non_null(),
         };
-        crate::lower::builtin(self.db, self.file, "kotlin.reflect", "KClass", vec![class])
+        crate::lower::builtin(
+            self.db,
+            self.file,
+            crate::lower::KnownPackage::KotlinReflect,
+            "KClass",
+            vec![class],
+        )
     }
 
     /// A property a bare `::name` can mean: of an implicit receiver, or
@@ -2006,7 +2012,8 @@ fn match_arguments(
     arguments: &[Argument<'_>],
 ) -> Option<Vec<usize>> {
     let parameters = &signature.parameters;
-    let mut given = vec![false; parameters.len()];
+    // On the stack: a call's parameters are a handful.
+    let mut given: smallvec::SmallVec<[bool; 16]> = smallvec::smallvec![false; parameters.len()];
     let mut parameter_of = Vec::with_capacity(arguments.len());
     let mut position = 0;
     for argument in arguments {
@@ -2046,12 +2053,14 @@ fn match_arguments(
     all_given.then_some(parameter_of)
 }
 
-/// How many distinct parameters the arguments went to.
+/// How many distinct parameters the arguments went to — counted in place:
+/// a call's arguments are a handful.
 fn dedup_count(parameter_of: &[usize]) -> usize {
-    let mut seen: Vec<usize> = parameter_of.to_vec();
-    seen.sort_unstable();
-    seen.dedup();
-    seen.len()
+    parameter_of
+        .iter()
+        .enumerate()
+        .filter(|(position, parameter)| !parameter_of[..*position].contains(parameter))
+        .count()
 }
 
 /// How many parameters a lambda declares; `None` when it declares none
@@ -2093,5 +2102,21 @@ fn name_site(receiver: &Typed) -> NameSite {
         Typed::Value(receiver_type) => NameSite::Member(receiver_type.clone()),
         Typed::Class(_) => NameSite::Static,
         Typed::Package(_) => NameSite::Package,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dedup_count;
+
+    #[test]
+    fn distinct_parameters_are_counted_once_each() {
+        assert_eq!(dedup_count(&[]), 0);
+        assert_eq!(dedup_count(&[2]), 1);
+        assert_eq!(
+            dedup_count(&[0, 1, 1, 1, 3, 0]),
+            3,
+            "a vararg takes several arguments"
+        );
     }
 }

@@ -143,7 +143,7 @@ impl Types<'_> {
         match crate::lower::builtin(
             self.db,
             self.from,
-            "kotlin.collections",
+            crate::lower::KnownPackage::KotlinCollections,
             &qualified,
             Vec::new(),
         ) {

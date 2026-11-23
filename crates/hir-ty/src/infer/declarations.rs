@@ -655,9 +655,13 @@ impl<'db> Inferrer<'db> {
         });
         match primitive {
             Some(name) => self.types.builtin(&format!("{name}Array")),
-            None => {
-                crate::lower::builtin(self.db, self.file, "kotlin", "Array", vec![element.clone()])
-            }
+            None => crate::lower::builtin(
+                self.db,
+                self.file,
+                crate::lower::KnownPackage::Kotlin,
+                "Array",
+                vec![element.clone()],
+            ),
         }
     }
 

@@ -644,7 +644,7 @@ impl Inferrer<'_> {
         Some(crate::lower::builtin(
             self.db,
             self.file,
-            "kotlin.enums",
+            crate::lower::KnownPackage::KotlinEnums,
             "EnumEntries",
             vec![entry],
         ))

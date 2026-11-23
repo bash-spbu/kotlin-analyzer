@@ -336,7 +336,13 @@ impl Types<'_> {
             ),
             GeneratedFunction::Values => (
                 Vec::new(),
-                crate::lower::builtin(self.db, self.from, "kotlin", "Array", vec![class_type]),
+                crate::lower::builtin(
+                    self.db,
+                    self.from,
+                    crate::lower::KnownPackage::Kotlin,
+                    "Array",
+                    vec![class_type],
+                ),
             ),
             GeneratedFunction::SamConstructor => {
                 let class_type = self.self_type(class);

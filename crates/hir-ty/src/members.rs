@@ -64,6 +64,9 @@ pub struct Types<'db> {
     >,
     /// `kotlin.<name>` types by name: asked for on every fit check.
     builtins: RefCell<FxHashMap<Box<str>, Ty>>,
+    /// Each type parameter's upper bounds: asked for on every fit check of
+    /// a generic call.
+    bounds: RefCell<FxHashMap<TypeParameterId, Arc<[Ty]>>>,
     /// A mutable collection class's read-only counterpart.
     pub(crate) read_only_collections: RefCell<FxHashMap<ItemLocation, Option<ItemLocation>>>,
 }
@@ -79,6 +82,7 @@ impl<'db> Types<'db> {
             members_by_name: RefCell::default(),
             signatures: RefCell::default(),
             builtins: RefCell::default(),
+            bounds: RefCell::default(),
             read_only_collections: RefCell::default(),
         }
     }
@@ -88,7 +92,13 @@ impl<'db> Types<'db> {
         if let Some(known) = self.builtins.borrow().get(name) {
             return known.clone();
         }
-        let found = builtin(self.db, self.from, "kotlin", name, Vec::new());
+        let found = builtin(
+            self.db,
+            self.from,
+            crate::lower::KnownPackage::Kotlin,
+            name,
+            Vec::new(),
+        );
         self.builtins
             .borrow_mut()
             .insert(name.into(), found.clone());
@@ -144,9 +154,13 @@ impl<'db> Types<'db> {
                 arguments: Box::new([]),
                 nullability: Nullability::NotNull,
             });
-            if let Ty::Class(enum_type) =
-                builtin(self.db, self.from, "kotlin", "Enum", vec![self_type])
-            {
+            if let Ty::Class(enum_type) = builtin(
+                self.db,
+                self.from,
+                crate::lower::KnownPackage::Kotlin,
+                "Enum",
+                vec![self_type],
+            ) {
                 direct.push(enum_type);
             }
         }
@@ -280,8 +294,17 @@ impl<'db> Types<'db> {
         }
     }
 
-    /// The declared upper bounds of a type parameter.
-    pub fn type_parameter_bounds(&self, parameter: TypeParameterId) -> Vec<Ty> {
+    /// The declared upper bounds of a type parameter (remembered).
+    pub fn type_parameter_bounds(&self, parameter: TypeParameterId) -> Arc<[Ty]> {
+        if let Some(known) = self.bounds.borrow().get(&parameter) {
+            return known.clone();
+        }
+        let bounds: Arc<[Ty]> = self.declared_bounds(parameter).into();
+        self.bounds.borrow_mut().insert(parameter, bounds.clone());
+        bounds
+    }
+
+    fn declared_bounds(&self, parameter: TypeParameterId) -> Vec<Ty> {
         let tree = item_tree(self.db, parameter.owner.container);
         let Some(declared) = tree
             .item(parameter.owner.item)
@@ -529,22 +552,26 @@ impl<'db> Types<'db> {
         let Some(first) = spelled.chars().next() else {
             return Vec::new();
         };
-        let capitalized: String = first
-            .to_uppercase()
-            .chain(spelled.chars().skip(1))
-            .collect();
+        // A getter's name is looked up, never interned: one nothing declares
+        // isn't interned, and the interner keeps every name for good.
+        let mut getter = String::with_capacity(spelled.len() + 3);
         let likely_getter = if getter_property_name(spelled).as_deref() == Some(spelled) {
-            name
+            Some(name)
         } else {
-            Name::new(&format!("get{capitalized}"))
+            getter.push_str("get");
+            getter.extend(first.to_uppercase());
+            getter.push_str(&spelled[first.len_utf8()..]);
+            Name::existing(&getter)
         };
-        let getters: Vec<Member> = self
-            .members_named(receiver, likely_getter)
-            .into_iter()
-            .filter(names_property)
-            .collect();
-        if !getters.is_empty() {
-            return getters;
+        if let Some(likely_getter) = likely_getter {
+            let getters: Vec<Member> = self
+                .members_named(receiver, likely_getter)
+                .into_iter()
+                .filter(names_property)
+                .collect();
+            if !getters.is_empty() {
+                return getters;
+            }
         }
         // An acronym's getter: `getURL` for `url`, `getURLName` for `urlName`
         // — the leading lower-case run upper-cased, in part or whole.
@@ -552,17 +579,26 @@ impl<'db> Types<'db> {
             .chars()
             .take_while(|char| char.is_ascii_lowercase())
             .count();
-        (2..=run)
-            .flat_map(|upper| {
-                let acronym = format!(
-                    "get{}{}",
-                    spelled[..upper].to_ascii_uppercase(),
-                    &spelled[upper..]
-                );
-                self.members_named(receiver, Name::new(&acronym))
-            })
-            .filter(names_property)
-            .collect()
+        let mut found = Vec::new();
+        for upper in 2..=run {
+            getter.clear();
+            getter.push_str("get");
+            getter.extend(
+                spelled[..upper]
+                    .chars()
+                    .map(|char| char.to_ascii_uppercase()),
+            );
+            getter.push_str(&spelled[upper..]);
+            let Some(acronym) = Name::existing(&getter) else {
+                continue;
+            };
+            found.extend(
+                self.members_named(receiver, acronym)
+                    .into_iter()
+                    .filter(names_property),
+            );
+        }
+        found
     }
 
     /// An `expect` class as the asking file sees it: its `actual` when that

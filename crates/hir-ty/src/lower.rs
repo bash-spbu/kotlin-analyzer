@@ -166,16 +166,55 @@ const PRIMITIVES: &[(&str, &str)] = &[
 /// How deep type alias expansion goes.
 const MAX_ALIAS_DEPTH: usize = 8;
 
-/// The class `kotlin.<name>` (or another package's), seen from `from`.
+/// A package the analysis names itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KnownPackage {
+    Kotlin,
+    KotlinCollections,
+    KotlinEnums,
+    KotlinReflect,
+}
+
+impl KnownPackage {
+    const ALL: [KnownPackage; 4] = [
+        KnownPackage::Kotlin,
+        KnownPackage::KotlinCollections,
+        KnownPackage::KotlinEnums,
+        KnownPackage::KotlinReflect,
+    ];
+
+    fn spelled(self) -> &'static str {
+        match self {
+            KnownPackage::Kotlin => "kotlin",
+            KnownPackage::KotlinCollections => "kotlin.collections",
+            KnownPackage::KotlinEnums => "kotlin.enums",
+            KnownPackage::KotlinReflect => "kotlin.reflect",
+        }
+    }
+
+    /// The package as a path, parsed once.
+    pub fn path(self) -> &'static Path {
+        static PATHS: std::sync::OnceLock<[Path; 4]> = std::sync::OnceLock::new();
+        let paths =
+            PATHS.get_or_init(|| KnownPackage::ALL.map(|known| Path::parse(known.spelled())));
+        &paths[self as usize]
+    }
+}
+
+/// A class's names, outermost first: most types name one or two.
+type ClassNames = smallvec::SmallVec<[Name; 4]>;
+
+/// The class `<package>.<name>` (`kotlin.Int`, `kotlin.Map.Entry`), seen
+/// from `from`.
 pub fn builtin(
     db: &dyn SourceDatabase,
     from: SourceFile,
-    package: &str,
+    package: KnownPackage,
     name: &str,
     arguments: Vec<Ty>,
 ) -> Ty {
-    let names: Vec<Name> = name.split('.').map(Name::new).collect();
-    match resolve_qualified(db, from, &Path::parse(package), &names) {
+    let names: ClassNames = name.split('.').map(Name::new).collect();
+    match resolve_qualified(db, from, package.path(), &names) {
         Resolution::Declaration(class) => Ty::Class(ClassType {
             class,
             arguments: arguments.into_boxed_slice(),
@@ -223,7 +262,7 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                 .last()
                 .map(|segment| lower_arguments(db, scope, &segment.arguments, depth))
                 .unwrap_or_default();
-            let names: Vec<Name> = classes.iter().map(|segment| segment.name).collect();
+            let names: ClassNames = classes.iter().map(|segment| segment.name).collect();
             match resolve_qualified(db, scope.from, package, &names) {
                 Resolution::Declaration(class) => {
                     class_type(db, scope, class, arguments, nullability, depth)
@@ -262,7 +301,13 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                 .find(|(java, _)| *java == name.as_str())
                 .map(|(_, kotlin)| *kotlin);
             match kotlin {
-                Some(kotlin) => builtin(db, scope.from, "kotlin", kotlin, Vec::new()),
+                Some(kotlin) => builtin(
+                    db,
+                    scope.from,
+                    crate::lower::KnownPackage::Kotlin,
+                    kotlin,
+                    Vec::new(),
+                ),
                 None => Ty::Unknown,
             }
         }
@@ -273,14 +318,26 @@ fn lower(db: &dyn SourceDatabase, scope: TypeScope, type_ref: &TypeRef, depth: u
                     .find(|(java, _)| *java == name.as_str())
                     .map(|(_, kotlin)| format!("{kotlin}Array"));
                 return match array {
-                    Some(array) => builtin(db, scope.from, "kotlin", &array, Vec::new())
-                        .with_nullability(nullability(scope, false)),
+                    Some(array) => builtin(
+                        db,
+                        scope.from,
+                        crate::lower::KnownPackage::Kotlin,
+                        &array,
+                        Vec::new(),
+                    )
+                    .with_nullability(nullability(scope, false)),
                     None => Ty::Unknown,
                 };
             }
             let element = lower(db, scope, element, depth);
-            builtin(db, scope.from, "kotlin", "Array", vec![element])
-                .with_nullability(nullability(scope, false))
+            builtin(
+                db,
+                scope.from,
+                crate::lower::KnownPackage::Kotlin,
+                "Array",
+                vec![element],
+            )
+            .with_nullability(nullability(scope, false))
         }
         TypeRef::Unreadable => Ty::Error,
     }
@@ -436,53 +493,157 @@ fn kotlin_view(db: &dyn SourceDatabase, from: SourceFile, class: ItemLocation) -
     if !is_java_package {
         return class;
     }
-    let mut classes = Vec::new();
-    let mut current = Some(class.item);
-    while let Some(index) = current {
-        let item = tree.item(index);
-        classes.push(item.name);
-        current = item.parent;
-    }
-    classes.reverse();
-    let written = qualified_name(&tree.package, &classes);
-    let Some((_, kotlin)) = MAPPED_TYPES.iter().find(|(java, _)| *java == written) else {
+    let mapped = mapped_types().iter().find(|mapped| {
+        mapped.java.package == tree.package && is_named(&tree, class.item, &mapped.java.classes)
+    });
+    let Some(mapped) = mapped else {
         return class;
     };
-    let (package, classes) = split_kotlin_name(kotlin);
-    match resolve_qualified(db, from, &package, &classes) {
-        Resolution::Declaration(mapped) => mapped,
+    match resolve_qualified(db, from, &mapped.kotlin.package, &mapped.kotlin.classes) {
+        Resolution::Declaration(kotlin) => kotlin,
         _ => class,
     }
 }
 
-fn qualified_name(package: &Path, classes: &[Name]) -> String {
-    let mut name = package.to_string();
-    for class in classes {
-        if !name.is_empty() {
-            name.push('.');
-        }
-        name.push_str(class.as_str());
-    }
-    name
+/// A class's qualified name: its package, and its class and the classes
+/// around it, outermost first.
+#[derive(Debug, PartialEq, Eq)]
+struct ClassName {
+    package: Path,
+    classes: Box<[Name]>,
 }
 
-/// `kotlin.collections.MutableMap.MutableEntry` → package and classes, by
-/// the convention that classes start with a capital letter.
-fn split_kotlin_name(name: &str) -> (Path, Vec<Name>) {
-    let segments: Vec<&str> = name.split('.').collect();
-    let first_class = segments
-        .iter()
-        .position(|segment| segment.starts_with(|first: char| first.is_uppercase()))
-        .unwrap_or(segments.len());
-    (
-        Path::new(
-            segments[..first_class]
-                .iter()
-                .map(|segment| Name::new(segment)),
-        ),
-        segments[first_class..]
+impl ClassName {
+    /// `kotlin.collections.MutableMap.MutableEntry` → package and classes,
+    /// by the convention that classes start with a capital letter.
+    fn parse(qualified: &str) -> ClassName {
+        let segments: Vec<&str> = qualified.split('.').collect();
+        let first_class = segments
             .iter()
-            .map(|segment| Name::new(segment))
-            .collect(),
-    )
+            .position(|segment| segment.starts_with(|first: char| first.is_uppercase()))
+            .unwrap_or(segments.len());
+        ClassName {
+            package: Path::new(
+                segments[..first_class]
+                    .iter()
+                    .map(|segment| Name::new(segment)),
+            ),
+            classes: segments[first_class..]
+                .iter()
+                .map(|segment| Name::new(segment))
+                .collect(),
+        }
+    }
+}
+
+/// A Java type Kotlin sees as its own, as names.
+struct MappedType {
+    java: ClassName,
+    kotlin: ClassName,
+}
+
+/// [`MAPPED_TYPES`] as names, read once.
+fn mapped_types() -> &'static [MappedType] {
+    static MAPPED: std::sync::OnceLock<Box<[MappedType]>> = std::sync::OnceLock::new();
+    MAPPED.get_or_init(|| {
+        MAPPED_TYPES
+            .iter()
+            .map(|(java, kotlin)| MappedType {
+                java: ClassName::parse(java),
+                kotlin: ClassName::parse(kotlin),
+            })
+            .collect()
+    })
+}
+
+/// Whether `item` and the classes around it are named `classes`
+/// (outermost first), and nothing is around the outermost.
+fn is_named(tree: &hir_def::item_tree::ItemTree, item: hir_def::ItemId, classes: &[Name]) -> bool {
+    let mut current = Some(item);
+    for expected in classes.iter().rev() {
+        let Some(index) = current else {
+            return false;
+        };
+        let found = tree.item(index);
+        if found.name != *expected {
+            return false;
+        }
+        current = found.parent;
+    }
+    current.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use base_db::fixture::Fixture;
+
+    use super::*;
+
+    #[test]
+    fn known_packages_are_their_spelling_parsed_once() {
+        for known in KnownPackage::ALL {
+            assert_eq!(*known.path(), Path::parse(known.spelled()), "{known:?}");
+            assert!(std::ptr::eq(known.path(), known.path()));
+        }
+    }
+
+    #[test]
+    fn a_mapped_types_name_is_its_package_and_its_classes() {
+        assert_eq!(
+            ClassName::parse("java.util.Map.Entry"),
+            ClassName {
+                package: Path::parse("java.util"),
+                classes: [Name::new("Map"), Name::new("Entry")].into(),
+            }
+        );
+        let kotlin = &mapped_types()
+            .iter()
+            .find(|mapped| mapped.java == ClassName::parse("java.util.Map.Entry"))
+            .unwrap()
+            .kotlin;
+        assert_eq!(kotlin.package, Path::parse("kotlin.collections"));
+        assert_eq!(
+            &*kotlin.classes,
+            [Name::new("MutableMap"), Name::new("MutableEntry")]
+        );
+    }
+
+    #[test]
+    fn a_class_is_named_by_its_whole_nesting_and_nothing_more() {
+        let fixture = Fixture::parse(
+            r#"
+//- /src/java/util/Map.java
+package java.util;
+public interface Map<K, V> { interface Entry<K, V> {} }
+//- /src/java/util/Entry.java
+package java.util;
+public class Entry {}
+"#,
+        );
+        let db = &fixture.database;
+        let tree_of = |path: &str| {
+            let file = db.source_file(fixture.file(path)).unwrap();
+            hir_def::file_item_tree(db, file)
+        };
+        let map_file = tree_of("/src/java/util/Map.java");
+        let find = |tree: &hir_def::item_tree::ItemTree, name: &str| {
+            tree.indexed_items()
+                .find(|(_, item)| item.name.as_str() == name)
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let map_entry = [Name::new("Map"), Name::new("Entry")];
+        let nested = find(&map_file, "Entry");
+        let map = find(&map_file, "Map");
+        assert!(is_named(&map_file, nested, &map_entry));
+        assert!(!is_named(&map_file, map, &map_entry));
+        assert!(
+            !is_named(&map_file, nested, &[Name::new("Entry")]),
+            "it has an outer class"
+        );
+        let entry_file = tree_of("/src/java/util/Entry.java");
+        let top_level = find(&entry_file, "Entry");
+        assert!(!is_named(&entry_file, top_level, &map_entry));
+        assert!(is_named(&entry_file, top_level, &[Name::new("Entry")]));
+    }
 }

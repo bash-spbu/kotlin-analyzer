@@ -87,6 +87,22 @@ impl Name {
         Name(id)
     }
 
+    /// The name spelled `text` if anything interned it — nothing declares
+    /// a name that was never interned. Unlike [`Name::new`], an unknown
+    /// spelling is left out of the interner (which keeps names for good).
+    pub fn existing(text: &str) -> Option<Name> {
+        let interner = interner();
+        let shard = &interner.shards
+            [BuildHasherDefault::<FxHasher>::default().hash_one(text) as usize % SHARDS];
+        let lock_held = "interner lock is never poisoned: no code panics while holding it";
+        shard
+            .read()
+            .expect(lock_held)
+            .ids
+            .get(text)
+            .map(|id| Name(*id))
+    }
+
     pub fn as_str(self) -> &'static str {
         interner().spellings[self.0 as usize]
     }
@@ -311,6 +327,18 @@ mod tests {
             static STORAGE: OnceLock<InternStorage<Shape>> = OnceLock::new();
             STORAGE.get_or_init(InternStorage::default)
         }
+    }
+
+    #[test]
+    fn an_existing_name_is_found_and_an_unknown_one_stays_unknown() {
+        let known = Name::new("existing-name-test");
+        assert_eq!(Name::existing("existing-name-test"), Some(known));
+        assert_eq!(Name::existing("never-interned-name-test"), None);
+        assert_eq!(
+            Name::existing("never-interned-name-test"),
+            None,
+            "still not interned"
+        );
     }
 
     #[test]

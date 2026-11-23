@@ -28,6 +28,16 @@ pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
 /// `String` is `kotlin.String`, not `java.lang.String`.
 pub const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
+/// The default imports as paths, parsed once: Kotlin's level, then the
+/// platform's.
+fn default_import_levels() -> &'static [Box<[Path]>; 2] {
+    static LEVELS: std::sync::OnceLock<[Box<[Path]>; 2]> = std::sync::OnceLock::new();
+    LEVELS.get_or_init(|| {
+        [DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES]
+            .map(|level| level.iter().map(|package| Path::parse(package)).collect())
+    })
+}
+
 /// Whether `from` is built with the Android SDK on its classpath — by the
 /// Android Gradle plugin, which generates classes (`R`, `BuildConfig`) a
 /// build makes before compiling.
@@ -60,14 +70,8 @@ pub enum Resolution {
 }
 
 impl Resolution {
-    fn of_candidates(candidates: Vec<ItemLocation>) -> Option<Resolution> {
-        let mut unique: Vec<ItemLocation> = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            if !unique.contains(&candidate) {
-                unique.push(candidate);
-            }
-        }
-        let candidates = unique;
+    fn of_candidates(mut candidates: Vec<ItemLocation>) -> Option<Resolution> {
+        keep_first_of_each(&mut candidates);
         match candidates.len() {
             0 => None,
             1 => Some(Resolution::Declaration(candidates[0])),
@@ -83,6 +87,20 @@ impl Resolution {
             _ => Vec::new(),
         }
     }
+}
+
+/// Drops each value seen before in `values`, keeping the order of the
+/// rest — in place: a list of candidates is usually one or two.
+fn keep_first_of_each<T: PartialEq>(values: &mut Vec<T>) {
+    let mut kept = 0;
+    for index in 0..values.len() {
+        let seen = values[..kept].contains(&values[index]);
+        if !seen {
+            values.swap(kept, index);
+            kept += 1;
+        }
+    }
+    values.truncate(kept);
 }
 
 /// What the type name `path` written at `offset` in `file` refers to (in
@@ -212,11 +230,11 @@ pub fn top_level_levels(
         }
     }
     levels.push(from_star_imports);
-    for level in [DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES] {
+    for level in default_import_levels() {
         levels.push(
             level
                 .iter()
-                .flat_map(|package| visible_top_level(db, file, &Path::parse(package), name))
+                .flat_map(|package| visible_top_level(db, file, package, name))
                 .collect(),
         );
     }
@@ -634,10 +652,10 @@ impl<'db> HierarchyWalk<'db> {
             return Some(resolution);
         }
 
-        for level in [DEFAULT_IMPORT_PACKAGES, PLATFORM_DEFAULT_IMPORT_PACKAGES] {
+        for level in default_import_levels() {
             let defaults: Vec<ItemLocation> = level
                 .iter()
-                .flat_map(|package| classifiers_in_package(db, file, &Path::parse(package), name))
+                .flat_map(|package| classifiers_in_package(db, file, package, name))
                 .collect();
             if let Some(resolution) = Resolution::of_candidates(defaults) {
                 return Some(resolution);
@@ -658,4 +676,33 @@ fn own_classifiers(db: &dyn SourceDatabase, class: ItemLocation, name: Name) -> 
             item: *child,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_first_of_each;
+
+    #[test]
+    fn the_default_imports_are_parsed_once_in_their_order() {
+        let [kotlin, platform] = super::default_import_levels();
+        let spelled = |level: &[intern::Path]| -> Vec<String> {
+            level.iter().map(|path| path.to_string()).collect()
+        };
+        assert_eq!(spelled(kotlin), super::DEFAULT_IMPORT_PACKAGES);
+        assert_eq!(spelled(platform), super::PLATFORM_DEFAULT_IMPORT_PACKAGES);
+        assert!(std::ptr::eq(kotlin, &super::default_import_levels()[0]));
+    }
+
+    #[test]
+    fn the_first_of_each_value_stays_in_its_order() {
+        let mut values = vec![3, 1, 3, 2, 1, 1, 4, 2];
+        keep_first_of_each(&mut values);
+        assert_eq!(values, [3, 1, 2, 4]);
+        let mut one = vec![7];
+        keep_first_of_each(&mut one);
+        assert_eq!(one, [7]);
+        let mut none: Vec<u8> = Vec::new();
+        keep_first_of_each(&mut none);
+        assert!(none.is_empty());
+    }
 }

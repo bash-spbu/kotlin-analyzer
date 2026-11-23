@@ -124,24 +124,38 @@ pub fn visible_top_level(
         crate::expect_actual::hide_expects_with_actuals(db, &mut found);
         return found;
     }
-    for library_package in classpath_packages(db, from, package) {
-        if !library_package.declares(db, name) {
-            continue;
-        }
-        let tree = library_package_tree(db, library_package);
-        let declared: Vec<ItemLocation> = tree
-            .named(None, name)
-            .iter()
-            .map(|index| ItemLocation {
-                container: ItemContainer::Library(library_package),
-                item: *index,
-            })
-            .collect();
-        if !declared.is_empty() {
-            return declared;
-        }
+    // The first library on the classpath that declares the name has it —
+    // found without ordering them all; when its declarations don't have
+    // the name after all, the next ones, in order.
+    let declaring = |library_package: LibraryPackage| library_package.declares(db, name);
+    let Some(first) = first_classpath_package(db, from, package, declaring) else {
+        return Vec::new();
+    };
+    let declared = declared_in(db, first, name);
+    if !declared.is_empty() {
+        return declared;
     }
-    Vec::new()
+    classpath_packages(db, from, package, declaring)
+        .into_iter()
+        .map(|library_package| declared_in(db, library_package, name))
+        .find(|declared| !declared.is_empty())
+        .unwrap_or_default()
+}
+
+/// The top-level declarations named `name` in a library's package.
+fn declared_in(
+    db: &dyn SourceDatabase,
+    library_package: LibraryPackage,
+    name: Name,
+) -> Vec<ItemLocation> {
+    library_package_tree(db, library_package)
+        .named(None, name)
+        .iter()
+        .map(|index| ItemLocation {
+            container: ItemContainer::Library(library_package),
+            item: *index,
+        })
+        .collect()
 }
 
 /// The def maps of the source sets `source_set` sees, its own first —
@@ -331,7 +345,7 @@ pub fn package_names(db: &dyn SourceDatabase, from: SourceFile, package: &Path) 
             names.extend(def_map.package_names(package));
         }
     }
-    for library_package in classpath_packages(db, from, package) {
+    for library_package in classpath_packages(db, from, package, |_| true) {
         names.extend(library_package.names(db).iter().copied());
     }
     // By spelling, not by `Name` (the order names were first interned in,
@@ -384,41 +398,77 @@ pub fn classpath_positions(
     Arc::new(positions)
 }
 
-/// The packages named `package` of the libraries `from` compiles against,
-/// in classpath order.
+/// The packages named `package` of the libraries `from` compiles against
+/// that `wanted` keeps, in classpath order. Kept before they're ordered: a
+/// lookup of one name usually keeps none, and then allocates nothing.
 fn classpath_packages(
     db: &dyn SourceDatabase,
     from: SourceFile,
     package: &Path,
+    wanted: impl Fn(LibraryPackage) -> bool,
 ) -> Vec<LibraryPackage> {
-    let index = library_packages(db);
-    let Some(declaring) = index.by_package.get(package) else {
-        return Vec::new();
-    };
-    let positions = match source_set_input(db, from) {
-        Some(source_set) => classpath_positions(db, source_set),
-        None => {
-            let jdk = db.classpaths().jdk(db);
-            return declaring
-                .iter()
-                .filter(|library_package| Some(library_package.library(db)) == jdk)
-                .copied()
-                .collect();
+    let mut ordered: Vec<(u32, LibraryPackage)> = Vec::new();
+    for_each_classpath_package(db, from, package, |position, library_package| {
+        if wanted(library_package) {
+            ordered.push((position, library_package));
         }
-    };
-    let mut ordered: Vec<(u32, LibraryPackage)> = declaring
-        .iter()
-        .filter_map(|library_package| {
-            positions
-                .get(&library_package.library(db))
-                .map(|position| (*position, *library_package))
-        })
-        .collect();
+    });
     ordered.sort_by_key(|(position, _)| *position);
     ordered
         .into_iter()
         .map(|(_, library_package)| library_package)
         .collect()
+}
+
+/// The first on the classpath of [`classpath_packages`] — found without
+/// ordering them all.
+fn first_classpath_package(
+    db: &dyn SourceDatabase,
+    from: SourceFile,
+    package: &Path,
+    wanted: impl Fn(LibraryPackage) -> bool,
+) -> Option<LibraryPackage> {
+    let mut first: Option<(u32, LibraryPackage)> = None;
+    for_each_classpath_package(db, from, package, |position, library_package| {
+        let is_earlier = first.is_none_or(|(earliest, _)| position < earliest);
+        if is_earlier && wanted(library_package) {
+            first = Some((position, library_package));
+        }
+    });
+    first.map(|(_, library_package)| library_package)
+}
+
+/// Each package named `package` of the libraries `from` compiles against,
+/// with its library's place on the classpath, in no order. A file outside
+/// every source set compiles against the JDK alone.
+fn for_each_classpath_package(
+    db: &dyn SourceDatabase,
+    from: SourceFile,
+    package: &Path,
+    mut visit: impl FnMut(u32, LibraryPackage),
+) {
+    let index = library_packages(db);
+    let Some(declaring) = index.by_package.get(package) else {
+        return;
+    };
+    match source_set_input(db, from) {
+        Some(source_set) => {
+            let positions = classpath_positions(db, source_set);
+            for library_package in declaring {
+                if let Some(position) = positions.get(&library_package.library(db)) {
+                    visit(*position, *library_package);
+                }
+            }
+        }
+        None => {
+            let jdk = db.classpaths().jdk(db);
+            for library_package in declaring {
+                if Some(library_package.library(db)) == jdk {
+                    visit(0, *library_package);
+                }
+            }
+        }
+    }
 }
 
 pub fn source_set_input(db: &dyn SourceDatabase, file: SourceFile) -> Option<SourceSet> {
@@ -489,7 +539,7 @@ pub fn package_exists(db: &dyn SourceDatabase, from: SourceFile, package: &Path)
             .iter()
             .any(|def_map| def_map.has_package(package))
     });
-    in_sources || !classpath_packages(db, from, package).is_empty()
+    in_sources || !classpath_packages(db, from, package, |_| true).is_empty()
 }
 
 /// The inputs of the source sets `from` sees, its own first.

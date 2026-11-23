@@ -1772,3 +1772,68 @@ class Stats {
         expect![""],
     );
 }
+
+#[test]
+fn a_type_parameters_bounds_are_lowered_once_per_file() {
+    let fixture = with_stdlib(
+        r#"
+//- /app/Use.kt
+package app
+interface Shape
+fun <T> area(shape: T): Int where T : Shape, T : Comparable<T> = 0
+fun <R> plain(value: R): R = value
+"#,
+    );
+    let db = &fixture.database;
+    let file = db.source_file(fixture.file("/app/Use.kt")).unwrap();
+    let tree = file_item_tree(db, file);
+    let parameter_of = |function: &str| {
+        let (item, _) = tree
+            .indexed_items()
+            .find(|(_, item)| item.name == Name::new(function))
+            .unwrap();
+        crate::ty::TypeParameterId {
+            owner: ItemLocation::in_file(file, item),
+            index: 0,
+        }
+    };
+    let types = Types::new(db, file);
+    let bounds = types.type_parameter_bounds(parameter_of("area"));
+    let shown: Vec<String> = bounds.iter().map(|bound| display(db, bound)).collect();
+    assert_eq!(shown, ["Shape", "Comparable<T>"]);
+    let again = types.type_parameter_bounds(parameter_of("area"));
+    assert!(std::sync::Arc::ptr_eq(&bounds, &again), "remembered");
+    assert!(
+        types
+            .type_parameter_bounds(parameter_of("plain"))
+            .is_empty()
+    );
+}
+
+#[test]
+fn looking_for_a_getter_nothing_declares_interns_no_name() {
+    let fixture = with_stdlib(
+        r#"
+//- /app/Store.java
+package app;
+public class Store {
+    public String getURL() { return null; }
+}
+//- /app/Use.kt
+package app
+val store: Store = TODO()
+"#,
+    );
+    assert_eq!(
+        describe_members(&fixture, "store", "url"),
+        vec!["fun Store.getURL: String!"]
+    );
+    assert!(describe_members(&fixture, "store", "qzxwvNameNobodyHas").is_empty());
+    for never_declared in [
+        "getQzxwvNameNobodyHas",
+        "getQZxwvNameNobodyHas",
+        "getQZXWVNameNobodyHas",
+    ] {
+        assert_eq!(Name::existing(never_declared), None, "{never_declared}");
+    }
+}
