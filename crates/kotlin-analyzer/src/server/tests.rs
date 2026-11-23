@@ -1741,3 +1741,60 @@ fn invalidating_the_caches_reads_the_project_again_keeping_what_is_open() {
     client.shut_down();
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn a_workspace_check_in_several_batches_reports_every_file_once() {
+    let root = workspace("pull-batches");
+    let sources = root.join("src/main/kotlin/app");
+    for index in 0..5 {
+        let text = if index == 4 {
+            "package app\n\nfun broken( {\n".to_owned()
+        } else {
+            format!("package app\n\nclass Part{index}\n")
+        };
+        std::fs::write(sources.join(format!("Part{index}.kt")), text).unwrap();
+    }
+    let (mut client, _) = Client::start_offering(
+        &root,
+        json!({ "gradleExport": false }),
+        json!({ "textDocument": { "diagnostic": {} } }),
+    );
+    client.wait_for_load(1);
+    let answer = client.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+    let items = answer["items"].as_array().unwrap();
+    let mut files: Vec<&str> = items
+        .iter()
+        .map(|item| item["uri"].as_str().unwrap().rsplit('/').next().unwrap())
+        .collect();
+    files.sort();
+    // Five files in batches of two: each once, in full.
+    assert_eq!(
+        files,
+        ["Part0.kt", "Part1.kt", "Part2.kt", "Part3.kt", "Part4.kt"]
+    );
+    assert!(items.iter().all(|item| item["kind"] == "full"));
+    let broken = items
+        .iter()
+        .find(|item| item["uri"].as_str().unwrap().ends_with("Part4.kt"))
+        .unwrap();
+    assert!(!broken["items"].as_array().unwrap().is_empty(), "{broken}");
+    // Asked again with those ids: all unchanged, none checked.
+    let previous: Vec<Value> = items
+        .iter()
+        .map(|item| json!({ "uri": item["uri"], "value": item["resultId"] }))
+        .collect();
+    let again = client.request(
+        "workspace/diagnostic",
+        json!({ "previousResultIds": previous }),
+    );
+    assert!(
+        again["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "unchanged"),
+        "{again}"
+    );
+    client.shut_down();
+    std::fs::remove_dir_all(&root).unwrap();
+}

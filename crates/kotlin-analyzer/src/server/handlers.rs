@@ -8,8 +8,7 @@ use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::request::{
     CodeActionRequest, DocumentDiagnosticRequest, DocumentSymbolRequest, GotoDeclaration,
     GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest,
-    InlayHintResolveRequest, Request as _, SelectionRangeRequest, WorkspaceDiagnosticRequest,
-    WorkspaceSymbolRequest,
+    InlayHintResolveRequest, Request as _, SelectionRangeRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, GotoDefinitionResponse, Location,
@@ -111,8 +110,6 @@ pub(super) fn handle(snapshot: Snapshot, request: Request) -> Response {
             method if editing::handles(method) => editing::handle(&snapshot, request),
             DocumentDiagnosticRequest::METHOD => params::<DocumentDiagnosticRequest>(request)
                 .map(|params| super::pull_diagnostics::document(&snapshot, params)),
-            WorkspaceDiagnosticRequest::METHOD => params::<WorkspaceDiagnosticRequest>(request)
-                .map(|params| super::pull_diagnostics::workspace(&snapshot, params, None)),
             method if super::code_lens::METHODS.contains(&method) => {
                 Ok(super::code_lens::handle(&snapshot, method, &request.params))
             }

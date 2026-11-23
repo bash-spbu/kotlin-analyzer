@@ -156,32 +156,33 @@ pub(super) fn document(
     Ok(serde_json::to_value(result).unwrap_or_default())
 }
 
-/// `workspace/diagnostic`: every workspace file's, checked in parallel —
-/// "unchanged" for those the client has from this revision.
-/// `workspace/diagnostic` as a request: run on the background pool, its
-/// progress shown.
-pub(super) fn workspace_request(
-    snapshot: &Snapshot,
-    request: lsp_server::Request,
-    progress: &Progress,
-) -> lsp_server::Response {
-    let id = request.id;
-    let result = serde_json::from_value::<lsp_types::WorkspaceDiagnosticParams>(request.params)
-        .map_err(|error| error.to_string())
-        .map(|params| workspace(snapshot, params, Some(progress)));
-    super::handlers::response(id, result)
+/// A workspace check to make: the files whose report the client has
+/// ("unchanged"), and those to check again, each with its URI and id.
+pub(super) struct WorkspacePlan {
+    pub(super) unchanged: Vec<WorkspaceDocumentDiagnosticReport>,
+    pub(super) to_check: Vec<FileToCheck>,
 }
 
-pub(super) fn workspace(
+pub(super) struct FileToCheck {
+    file: FileId,
+    uri: lsp_types::Uri,
+    id: String,
+}
+
+/// `workspace/diagnostic`'s first step: which files the client's reports
+/// leave current, which to check again. The checking goes in batches, the
+/// main loop dropping what the last one left beyond each cache's limit
+/// before the next (`GlobalState::next_check_batch`): one pass over a large
+/// workspace doesn't keep every file's analysis.
+pub(super) fn plan(
     snapshot: &Snapshot,
     params: lsp_types::WorkspaceDiagnosticParams,
-    progress: Option<&Progress>,
-) -> Cancellable<Value> {
+) -> Cancellable<WorkspacePlan> {
     if !snapshot.loaded {
-        let empty = WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport {
-            items: Vec::new(),
+        return Ok(WorkspacePlan {
+            unchanged: Vec::new(),
+            to_check: Vec::new(),
         });
-        return Ok(serde_json::to_value(empty).unwrap_or_default());
     }
     let workspace_files = snapshot.analysis.workspace_files()?;
     let ids = report_ids(snapshot, &workspace_files, Asked::All)?;
@@ -191,41 +192,64 @@ pub(super) fn workspace(
         .into_iter()
         .map(|previous| (previous.uri.as_str().to_owned(), previous.value))
         .collect();
-    // Each file with its URI, its id, and whether the client's is it.
-    let files: Vec<(FileId, lsp_types::Uri, String, bool)> = workspace_files
-        .into_iter()
-        .filter_map(|file| {
-            let uri = convert::uri_of(snapshot.paths.get(file.index())?)?;
-            let id = ids.get(&file)?.clone();
-            let current = previous.get(uri.as_str()) == Some(&id);
-            Some((file, uri, id, current))
-        })
-        .collect();
-    // Only the files to check again count towards the progress.
-    let total = files.iter().filter(|(_, _, _, current)| !current).count();
-    let checked = AtomicUsize::new(0);
-    let threads = rayon::current_num_threads().max(1);
-    let chunk = files.len().div_ceil(threads * 4).max(1);
-    let reports: Vec<Cancellable<Vec<WorkspaceDocumentDiagnosticReport>>> = files
-        .chunks(chunk)
-        .map(|chunk| (snapshot.with_analysis_clone(), chunk.to_vec()))
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(|(part, chunk)| {
-            let mut reports = Vec::with_capacity(chunk.len());
-            for (file, uri, id, current) in chunk {
-                if current {
-                    reports.push(WorkspaceDocumentDiagnosticReport::Unchanged(
-                        WorkspaceUnchangedDocumentDiagnosticReport {
-                            uri,
-                            version: None,
-                            unchanged_document_diagnostic_report:
-                                UnchangedDocumentDiagnosticReport { result_id: id },
+    let mut plan = WorkspacePlan {
+        unchanged: Vec::new(),
+        to_check: Vec::new(),
+    };
+    for file in workspace_files {
+        let Some(uri) = snapshot
+            .paths
+            .get(file.index())
+            .and_then(|path| convert::uri_of(path))
+        else {
+            continue;
+        };
+        let Some(id) = ids.get(&file).cloned() else {
+            continue;
+        };
+        let current = previous.get(uri.as_str()) == Some(&id);
+        if current {
+            plan.unchanged
+                .push(WorkspaceDocumentDiagnosticReport::Unchanged(
+                    WorkspaceUnchangedDocumentDiagnosticReport {
+                        uri,
+                        version: None,
+                        unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                            result_id: id,
                         },
-                    ));
-                    continue;
-                }
-                let report = WorkspaceDocumentDiagnosticReport::Full(
+                    },
+                ));
+        } else {
+            plan.to_check.push(FileToCheck { file, uri, id });
+        }
+    }
+    Ok(plan)
+}
+
+/// Checks `batch` in parallel, counting each file checked in `checked`
+/// towards the progress's `total`.
+pub(super) fn check_batch(
+    snapshot: &Snapshot,
+    batch: Vec<FileToCheck>,
+    progress: &Progress,
+    checked: &AtomicUsize,
+    total: usize,
+) -> Cancellable<Vec<WorkspaceDocumentDiagnosticReport>> {
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = batch.len().div_ceil(threads * 4).max(1);
+    let mut batch = batch;
+    let mut parts: Vec<(Snapshot, Vec<FileToCheck>)> = Vec::new();
+    while !batch.is_empty() {
+        let rest = batch.split_off(chunk.min(batch.len()));
+        parts.push((snapshot.with_analysis_clone(), batch));
+        batch = rest;
+    }
+    let reports: Vec<Cancellable<Vec<WorkspaceDocumentDiagnosticReport>>> = parts
+        .into_par_iter()
+        .map(|(part, files)| {
+            let mut reports = Vec::with_capacity(files.len());
+            for FileToCheck { file, uri, id } in files {
+                reports.push(WorkspaceDocumentDiagnosticReport::Full(
                     WorkspaceFullDocumentDiagnosticReport {
                         uri,
                         version: None,
@@ -234,28 +258,27 @@ pub(super) fn workspace(
                             items: diagnostics_of(&part, file)?,
                         },
                     },
-                );
-                reports.push(report);
+                ));
                 let done = checked.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Some(progress) = progress {
-                    progress.report(
-                        format!("{done}/{total}"),
-                        super::progress::percentage(done, total),
-                    );
-                }
+                progress.report(
+                    format!("{done}/{total}"),
+                    super::progress::percentage(done, total),
+                );
             }
             Ok(reports)
         })
         .collect();
-    let mut items = Vec::with_capacity(files.len());
+    let mut items = Vec::new();
     for part in reports {
         items.extend(part?);
     }
-    if let Some(progress) = progress {
-        progress.end(Some(format!("{total} files checked")));
-    }
+    Ok(items)
+}
+
+/// The answer to `workspace/diagnostic`: every file's report.
+pub(super) fn workspace_answer(items: Vec<WorkspaceDocumentDiagnosticReport>) -> Value {
     let result = WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items });
-    Ok(serde_json::to_value(result).unwrap_or_default())
+    serde_json::to_value(result).unwrap_or_default()
 }
 
 /// A file's diagnostics: syntax alone until the workspace has loaded.

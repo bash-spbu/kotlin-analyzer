@@ -428,6 +428,16 @@ enum Task {
         request: crate::agent::protocol::AgentRequest,
         replier: agent::Replier,
     },
+    /// A workspace check's first step ended: what to check.
+    CheckPlanned {
+        request: RequestId,
+        plan: ide::Cancellable<pull_diagnostics::WorkspacePlan>,
+    },
+    /// A batch of a workspace check ended.
+    CheckBatch {
+        request: RequestId,
+        reports: ide::Cancellable<Vec<lsp_types::WorkspaceDocumentDiagnosticReport>>,
+    },
     /// A JDK download ended (see `jdk_download`).
     JdkDownloaded {
         installed: Result<jdk_download::InstalledJdk, jdk_download::Failure>,
@@ -557,6 +567,10 @@ struct GlobalState {
     jdk_missing: bool,
     /// Where a load from scratch (after the caches were invalidated) is.
     fresh_load: FreshLoad,
+    /// The workspace checks (`workspace/diagnostic`) in progress, by request.
+    workspace_checks: FxHashMap<RequestId, WorkspaceCheck>,
+    /// How many of their batches are being checked.
+    check_batches_running: usize,
     /// The questions about downloading a JDK the client hasn't answered.
     jdk_questions: FxHashMap<RequestId, jdk_download::JdkQuestion>,
     downloading_jdk: bool,
@@ -623,6 +637,8 @@ impl GlobalState {
             jdk_missing: false,
             jdk_questions: FxHashMap::default(),
             fresh_load: FreshLoad::None,
+            workspace_checks: FxHashMap::default(),
+            check_batches_running: 0,
             downloading_jdk: false,
         }
     }
@@ -917,6 +933,11 @@ impl GlobalState {
                 self.on_loaded(loaded);
             }
             Task::JdkDownloaded { installed, took } => self.on_jdk_downloaded(installed, took),
+            Task::CheckPlanned { request, plan } => self.on_check_planned(request, plan),
+            Task::CheckBatch { request, reports } => {
+                self.check_batches_running = self.check_batches_running.saturating_sub(1);
+                self.on_check_batch(request, reports);
+            }
             Task::Diagnostics {
                 file,
                 version,
@@ -943,6 +964,181 @@ impl GlobalState {
                     },
                 );
             }
+        }
+    }
+
+    /// `workspace/diagnostic`: what to check is worked out in the
+    /// background, then the files are checked in batches — between two,
+    /// when nothing else is being answered, the database drops what is
+    /// beyond each cache's limit (`evict_if_idle`), so one pass doesn't keep
+    /// every file's analysis.
+    fn start_workspace_check(&mut self, request: Request) {
+        let id = request_number(&request.id);
+        let method = known_method(&request.method);
+        log_request(&request, id, method, None);
+        let params: lsp_types::WorkspaceDiagnosticParams =
+            match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    self.respond(Response::new_err(
+                        request.id,
+                        lsp_server::ErrorCode::InvalidParams as i32,
+                        error.to_string(),
+                    ));
+                    return;
+                }
+            };
+        self.in_flight
+            .insert(request.id.clone(), Arc::new(AtomicBool::new(false)));
+        self.background_running += 1;
+        let finished = BackgroundGuard(self.task_sender.clone());
+        let snapshot = self.snapshot(None);
+        let sender = self.task_sender.clone();
+        let request_id = request.id;
+        self.background_pool.spawn(move || {
+            let _finished = finished;
+            let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pull_diagnostics::plan(&snapshot, params)
+            }));
+            drop(snapshot);
+            let task = match planned {
+                Ok(plan) => Task::CheckPlanned {
+                    request: request_id,
+                    plan,
+                },
+                Err(_) => Task::Response(failed_request(request_id)),
+            };
+            let _ = sender.send(task);
+        });
+    }
+
+    fn on_check_planned(
+        &mut self,
+        request: RequestId,
+        plan: ide::Cancellable<pull_diagnostics::WorkspacePlan>,
+    ) {
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(_cancelled) => {
+                self.answer_check(request, content_modified);
+                return;
+            }
+        };
+        self.next_check += 1;
+        let progress = progress::Progress::deferred(
+            self.task_sender.clone(),
+            format!("kotlin-analyzer/checking/{}", self.next_check),
+            "Checking files",
+            CHECK_PROGRESS_DELAY,
+        );
+        let total = plan.to_check.len();
+        self.workspace_checks.insert(
+            request.clone(),
+            WorkspaceCheck {
+                to_check: plan.to_check,
+                reports: plan.unchanged,
+                progress: Arc::new(progress),
+                checked: Arc::default(),
+                total,
+            },
+        );
+        self.next_check_batch(request);
+    }
+
+    fn on_check_batch(
+        &mut self,
+        request: RequestId,
+        reports: ide::Cancellable<Vec<lsp_types::WorkspaceDocumentDiagnosticReport>>,
+    ) {
+        match reports {
+            Ok(reports) => {
+                if let Some(check) = self.workspace_checks.get_mut(&request) {
+                    check.reports.extend(reports);
+                }
+                self.evict_if_idle();
+                self.next_check_batch(request);
+            }
+            Err(_cancelled) => {
+                self.workspace_checks.remove(&request);
+                self.answer_check(request, content_modified);
+            }
+        }
+    }
+
+    /// Sends a workspace check's next batch to the background pool; with
+    /// none left, answers it.
+    fn next_check_batch(&mut self, request: RequestId) {
+        // Cancelled by the client (answered then): nothing more to do.
+        if !self.in_flight.contains_key(&request) {
+            self.workspace_checks.remove(&request);
+            return;
+        }
+        let Some(check) = self.workspace_checks.get_mut(&request) else {
+            return;
+        };
+        if check.to_check.is_empty() {
+            let Some(check) = self.workspace_checks.remove(&request) else {
+                return;
+            };
+            check
+                .progress
+                .end(Some(format!("{} files checked", check.total)));
+            let answer = pull_diagnostics::workspace_answer(check.reports);
+            self.answer_check(request, |id| Response::new_ok(id, answer));
+            return;
+        }
+        let size = CHECK_BATCH.min(check.to_check.len());
+        let batch: Vec<pull_diagnostics::FileToCheck> = check.to_check.drain(..size).collect();
+        let progress = check.progress.clone();
+        let checked = check.checked.clone();
+        let total = check.total;
+        self.check_batches_running += 1;
+        self.background_running += 1;
+        let finished = BackgroundGuard(self.task_sender.clone());
+        let snapshot = self.snapshot(None);
+        let sender = self.task_sender.clone();
+        self.background_pool.spawn(move || {
+            let _finished = finished;
+            let checked_batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pull_diagnostics::check_batch(&snapshot, batch, &progress, &checked, total)
+            }));
+            // Gone before the main loop hears: dropping what the caches
+            // hold beyond their limit waits for every snapshot.
+            drop(snapshot);
+            let task = match checked_batch {
+                Ok(reports) => Task::CheckBatch { request, reports },
+                Err(_) => Task::Response(failed_request(request)),
+            };
+            let _ = sender.send(task);
+        });
+    }
+
+    /// Answers a workspace check, unless the client cancelled it.
+    fn answer_check(&mut self, request: RequestId, answer: impl FnOnce(RequestId) -> Response) {
+        if self.in_flight.remove(&request).is_some() {
+            let response = answer(request);
+            log_response(
+                &response,
+                request_number(&response.id),
+                known_method(request::WorkspaceDiagnosticRequest::METHOD),
+                None,
+                Timing::default(),
+            );
+            self.respond(response);
+        }
+    }
+
+    /// Drops what the database holds beyond each cache's limit, when no
+    /// batch is being checked and no other request is being answered —
+    /// dropping cancels what runs, and a user's request mustn't be.
+    fn evict_if_idle(&mut self) {
+        let others_answered = self
+            .in_flight
+            .keys()
+            .any(|id| !self.workspace_checks.contains_key(id));
+        let idle = self.check_batches_running == 0 && !others_answered;
+        if idle {
+            self.host.trigger_lru_eviction();
         }
     }
 
@@ -1525,16 +1721,7 @@ impl GlobalState {
             return;
         }
         if request.method == request::WorkspaceDiagnosticRequest::METHOD {
-            self.next_check += 1;
-            let progress = progress::Progress::deferred(
-                self.task_sender.clone(),
-                format!("kotlin-analyzer/checking/{}", self.next_check),
-                "Checking files",
-                CHECK_PROGRESS_DELAY,
-            );
-            self.answer_on(PoolKind::Background, request, move |snapshot, request| {
-                pull_diagnostics::workspace_request(&snapshot, request, &progress)
-            });
+            self.start_workspace_check(request);
             return;
         }
         self.answer_on_pool(request, handlers::handle);
@@ -1548,15 +1735,6 @@ impl GlobalState {
         request: Request,
         handle: impl FnOnce(handlers::Snapshot, Request) -> Response + Send + 'static,
     ) {
-        self.answer_on(PoolKind::Interactive, request, handle);
-    }
-
-    fn answer_on(
-        &mut self,
-        pool: PoolKind,
-        request: Request,
-        handle: impl FnOnce(handlers::Snapshot, Request) -> Response + Send + 'static,
-    ) {
         let request_file = self.request_file_of(&request);
         let method = known_method(&request.method);
         let id = request_number(&request.id);
@@ -1567,19 +1745,7 @@ impl GlobalState {
         let received = Instant::now();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.in_flight.insert(request.id.clone(), cancelled.clone());
-        let finished = match pool {
-            PoolKind::Interactive => None,
-            PoolKind::Background => {
-                self.background_running += 1;
-                Some(BackgroundGuard(self.task_sender.clone()))
-            }
-        };
-        let pool = match pool {
-            PoolKind::Interactive => &self.pool,
-            PoolKind::Background => &self.background_pool,
-        };
-        pool.spawn(move || {
-            let _finished = finished;
+        self.pool.spawn(move || {
             // Cancelled while it waited for a worker: nothing to compute.
             if cancelled.load(Ordering::SeqCst) {
                 return;
@@ -2106,6 +2272,40 @@ fn chosen_jdk(arguments: &[serde_json::Value]) -> Option<(jdk_download::Vendor, 
     Some((vendor, release))
 }
 
+/// A workspace check (`workspace/diagnostic`) in progress.
+struct WorkspaceCheck {
+    /// The files left to check.
+    to_check: Vec<pull_diagnostics::FileToCheck>,
+    /// The reports so far, the unchanged ones first.
+    reports: Vec<lsp_types::WorkspaceDocumentDiagnosticReport>,
+    progress: Arc<progress::Progress>,
+    checked: Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
+}
+
+/// How many files a workspace check's batch holds: between two, the
+/// database drops what is beyond its caches' limits. Tests check in
+/// several batches with few files.
+const CHECK_BATCH: usize = if cfg!(test) { 2 } else { 256 };
+
+/// The answer to a request whose job panicked (the log has where).
+fn failed_request(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        lsp_server::ErrorCode::InternalError as i32,
+        "kotlin-analyzer failed on this request; its log says where".to_owned(),
+    )
+}
+
+/// The answer to a request an edit cancelled: the client asks again.
+fn content_modified(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        lsp_server::ErrorCode::ContentModified as i32,
+        "content modified".to_owned(),
+    )
+}
+
 /// A load from scratch, after *Invalidate caches and restart*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FreshLoad {
@@ -2153,15 +2353,6 @@ impl Drop for BackgroundGuard {
     fn drop(&mut self) {
         let _ = self.0.send(Task::BackgroundFinished);
     }
-}
-
-/// Which of the server's thread pools a request runs on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PoolKind {
-    /// What the user waits for.
-    Interactive,
-    /// Workspace-wide work, on fewer threads.
-    Background,
 }
 
 /// A workspace check shows its progress only once it has run this long.
@@ -2282,7 +2473,7 @@ fn log_response(
 
 /// How long work waited for a free worker, and how long it then took: the
 /// user waits for both.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Timing {
     waited: Duration,
     took: Duration,
