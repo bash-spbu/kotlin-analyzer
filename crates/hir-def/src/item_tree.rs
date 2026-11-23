@@ -5,9 +5,11 @@
 //! Function bodies and initializers aren't in it, so editing inside a body
 //! changes nothing that only depends on declarations.
 
+mod item_map;
 mod lower_java;
 mod lower_kotlin;
 pub(crate) mod pretty;
+use item_map::{ItemMap, NamedItems};
 mod written_annotations;
 mod written_contract;
 
@@ -76,45 +78,47 @@ pub struct ItemTree {
     /// order, and each one's id.
     items: Box<[Item]>,
     ids: Box<[ItemId]>,
+    /// Where each item is in `items`: hashed, as every read of an item
+    /// goes through it.
     positions: FxHashMap<ItemId, u32>,
     /// Items by parent (`None`: top level) and name, in document order —
     /// a library package has thousands of top-level functions, a lookup
     /// mustn't walk them.
-    named: FxHashMap<(Option<ItemId>, Name), Box<[ItemId]>>,
+    named: NamedItems,
     pub top_level: Box<[ItemId]>,
     /// What each deprecated item's deprecation says (its modifiers have
     /// `DEPRECATED`).
-    deprecations: FxHashMap<ItemId, Deprecation>,
+    deprecations: ItemMap<Deprecation>,
     /// The annotation classes on each annotated item that may mark it as
     /// needing opt-in: qualified for a library's items, as written for a
     /// file's (resolved where it's declared).
-    annotations: FxHashMap<ItemId, Box<[Path]>>,
+    annotations: ItemMap<Box<[Path]>>,
     /// The annotation classes that are opt-in markers (`@RequiresOptIn`).
-    opt_in_markers: FxHashMap<ItemId, OptInMarker>,
+    opt_in_markers: ItemMap<OptInMarker>,
     /// What each function with a contract promises (`contract { … }`).
-    contracts: FxHashMap<ItemId, Contract>,
+    contracts: ItemMap<Contract>,
 }
 
 impl ItemTree {
     /// The function's contract, if it has one.
     pub fn contract(&self, id: ItemId) -> Option<&Contract> {
-        self.contracts.get(&id)
+        self.contracts.get(id)
     }
 
     /// What `@Deprecated` on the item says, if it's deprecated.
     pub fn deprecation(&self, id: ItemId) -> Option<&Deprecation> {
-        self.deprecations.get(&id)
+        self.deprecations.get(id)
     }
 
     /// The annotation classes on the item that may mark it as needing
     /// opt-in.
     pub fn annotations(&self, id: ItemId) -> &[Path] {
-        self.annotations.get(&id).map_or(&[], |paths| &paths[..])
+        self.annotations.get(id).map_or(&[], |paths| &paths[..])
     }
 
     /// `@RequiresOptIn` on an annotation class.
     pub fn opt_in_marker(&self, id: ItemId) -> Option<&OptInMarker> {
-        self.opt_in_markers.get(&id)
+        self.opt_in_markers.get(id)
     }
 
     pub fn item(&self, id: ItemId) -> &Item {
@@ -124,10 +128,7 @@ impl ItemTree {
     /// The items named `name` declared in `parent` (`None`: at the top
     /// level), in document order.
     pub fn named(&self, parent: Option<ItemId>, name: Name) -> &[ItemId] {
-        self.named
-            .get(&(parent, name))
-            .map(|items| &items[..])
-            .unwrap_or_default()
+        self.named.get(parent, name)
     }
 
     /// Every item with its id, in document order.
@@ -608,10 +609,12 @@ impl ItemTreeBuilder {
         source_files: Vec<(ItemId, Box<str>)>,
     ) -> (ItemTree, ItemSourceMap) {
         let (imports, import_ranges): (Vec<Import>, Vec<TextRange>) = imports.into_iter().unzip();
-        let mut named: FxHashMap<(Option<ItemId>, Name), Vec<ItemId>> = FxHashMap::default();
-        for (id, item) in self.ids.iter().zip(self.items.iter()) {
-            named.entry((item.parent, item.name)).or_default().push(*id);
-        }
+        let named = NamedItems::new(
+            self.ids
+                .iter()
+                .zip(self.items.iter())
+                .map(|(id, item)| ((item.parent, item.name), *id)),
+        );
         let tree = ItemTree {
             package,
             source_files: source_files.into_boxed_slice(),
@@ -620,15 +623,12 @@ impl ItemTreeBuilder {
             items: self.items.into_boxed_slice(),
             ids: self.ids.into_boxed_slice(),
             positions: self.positions,
-            named: named
-                .into_iter()
-                .map(|(key, items)| (key, items.into_boxed_slice()))
-                .collect(),
+            named,
             top_level: top_level.into_boxed_slice(),
-            deprecations: self.deprecations,
-            annotations: self.annotations,
-            opt_in_markers: self.opt_in_markers,
-            contracts: self.contracts,
+            deprecations: self.deprecations.into_iter().collect(),
+            annotations: self.annotations.into_iter().collect(),
+            opt_in_markers: self.opt_in_markers.into_iter().collect(),
+            contracts: self.contracts.into_iter().collect(),
         };
         let source_map = ItemSourceMap {
             items: self.ranges,
