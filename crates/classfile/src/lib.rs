@@ -151,7 +151,7 @@ pub struct Modifiers {
 
 /// What a deprecation says: Kotlin's `@Deprecated`, Java's `@Deprecated`
 /// or a Javadoc `@deprecated` tag.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Deprecation {
     pub level: DeprecationLevel,
     pub message: Option<Box<str>>,
@@ -186,7 +186,9 @@ impl Deprecation {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
+)]
 pub enum DeprecationLevel {
     Warning,
     Error,
@@ -195,7 +197,7 @@ pub enum DeprecationLevel {
 
 /// Where a deprecation was written: Kotlin's passes to overrides, Java's
 /// doesn't.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DeprecationOrigin {
     Kotlin,
     Java,
@@ -203,20 +205,20 @@ pub enum DeprecationOrigin {
 
 /// `@RequiresOptIn` on an annotation class: what using API marked with it
 /// without opting in is.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OptInMarker {
     pub level: OptInLevel,
     pub message: Option<Box<str>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum OptInLevel {
     Warning,
     Error,
 }
 
 /// `@DeprecatedSinceKotlin(warningSince, errorSince, hiddenSince)`.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeprecatedSinceKotlin {
     pub warning_since: Option<Box<str>>,
     pub error_since: Option<Box<str>>,
@@ -299,7 +301,7 @@ pub struct Member {
 /// A function's contract: what holds of its arguments, given how it
 /// returned (Kotlin's `returns() implies …` and the like), and which
 /// lambdas it calls before it returns (`callsInPlace`).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Contract<T> {
     pub effects: Box<[ContractEffect<T>]>,
     pub calls_in_place: Box<[CallsInPlace]>,
@@ -307,14 +309,14 @@ pub struct Contract<T> {
 
 /// `callsInPlace(block, kind)`: the function calls the lambda passed as
 /// `block` before it returns, `kind` many times.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CallsInPlace {
     pub lambda: ContractSubject,
     pub invocation: Invocation,
 }
 
 /// How many times a function calls a lambda in place.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Invocation {
     AtMostOnce,
     ExactlyOnce,
@@ -330,14 +332,14 @@ impl Invocation {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContractEffect<T> {
     pub returns: Returns,
     pub implies: ContractCondition<T>,
 }
 
 /// How a function returned, for a contract's effect to hold.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Returns {
     /// `returns()`: at all.
     Normally,
@@ -350,7 +352,7 @@ pub enum Returns {
 }
 
 /// What a contract's effect says about an argument.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ContractCondition<T> {
     /// `x == null` (`x != null` when negated).
     IsNull {
@@ -373,7 +375,7 @@ pub enum ContractCondition<T> {
 }
 
 /// What a contract's condition is about.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ContractSubject {
     /// The extension receiver.
     Receiver,

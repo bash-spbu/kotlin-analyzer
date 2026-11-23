@@ -24,7 +24,15 @@ and length, by the same version of the server; else it indexes the archive
 and writes the file (written whole or not at all). A file that can't be
 read is ignored. A package's
 declarations are read when a query first needs them and kept while
-recently used. Nothing runs on a JVM.
+recently used (all of them in the balanced memory mode, the 128 used last
+in the economical one; lsp.md, Settings). Once read from the archive, they
+are kept on disk too, in `$XDG_CACHE_HOME/kotlin-analyzer/library-trees/`
+(a directory per library, named by its archive and a hash of the archive,
+kind and sources; a file per package): reading them again — after a
+restart, or after the economical mode dropped them — takes them from there
+when they were read from the same library with the same modification time
+and length, by the same version of the server; else from the archive,
+writing the file (whole or not at all). Nothing runs on a JVM.
 
 ## Which library a name comes from
 

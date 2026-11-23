@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 rustc-hash.workspace = true
 intern.workspace = true
+serde.workspace = true
 zip.workspace = true
 
 

@@ -16,6 +16,7 @@ use crate::item_tree::{
     ClassKind, Item, ItemId, ItemKind, ItemRanges, ItemTree, ItemTreeBuilder, Modifiers, Parameter,
     Signature, TypeArgument, TypeParameter, TypeRef, TypeSegment, Variance, Visibility,
 };
+use crate::library_tree_store::KeptTree;
 
 /// Where an archive entry's declarations belong (their package is the one
 /// they declare).
@@ -174,10 +175,34 @@ pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) ->
     let library = package.library(db);
     // Ties the tree to the archive as indexed: one rewritten in place gets
     // a new stamp on reload, and is read again.
-    library.stamp(db);
-    let source = library.source(db).clone();
-    let Ok(mut archive) = classfile::Archive::open(&source.archive) else {
+    let stamp = library.stamp(db);
+    let source = library.source(db);
+    let kept = db
+        .classpaths()
+        .tree_store(db)
+        .as_deref()
+        .map(|store| KeptTree::new(store, source, stamp, package.package(db)));
+    if let Some(tree) = kept.as_ref().and_then(KeptTree::read) {
+        return Arc::new(tree);
+    }
+    let Some(tree) = read_package(db, package, source) else {
         return Arc::new(ItemTree::default());
+    };
+    if let Some(kept) = &kept {
+        kept.write(&tree);
+    }
+    Arc::new(tree)
+}
+
+/// `package`'s declarations as its archive has them; `None` when the
+/// archive can't be opened.
+fn read_package(
+    db: &dyn SourceDatabase,
+    package: LibraryPackage,
+    source: &LibrarySource,
+) -> Option<ItemTree> {
+    let Ok(mut archive) = classfile::Archive::open(&source.archive) else {
+        return None;
     };
     let mut classes: Vec<LibraryClass> = Vec::new();
     let mut builtins: Vec<LibraryClass> = Vec::new();
@@ -210,7 +235,7 @@ pub fn library_package_tree(db: &dyn SourceDatabase, package: LibraryPackage) ->
             classes.push(class);
         }
     }
-    Arc::new(lower(package.package(db).clone(), classes, members))
+    Some(lower(package.package(db).clone(), classes, members))
 }
 
 /// The classes and top-level members of one package as an item tree.

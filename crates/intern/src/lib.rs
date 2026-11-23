@@ -217,6 +217,47 @@ impl std::fmt::Debug for Path {
     }
 }
 
+/// Written as its text: an interned name's number is this process's.
+impl serde::Serialize for Name {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Name {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Name, D::Error> {
+        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        Ok(Name::new(&text))
+    }
+}
+
+/// Written as its segments' texts.
+impl serde::Serialize for Path {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.segments().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Path {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Path, D::Error> {
+        let segments = Vec::<Name>::deserialize(deserializer)?;
+        Ok(Path::new(segments))
+    }
+}
+
+/// Written as the value; read back, interned again.
+impl<T: serde::Serialize> serde::Serialize for Interned<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, T: Internable + serde::Deserialize<'de>> serde::Deserialize<'de> for Interned<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Interned<T>, D::Error> {
+        T::deserialize(deserializer).map(Interned::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +270,33 @@ mod tests {
             static STORAGE: OnceLock<InternStorage<Shape>> = OnceLock::new();
             STORAGE.get_or_init(InternStorage::default)
         }
+    }
+
+    #[test]
+    fn names_paths_and_interned_values_are_written_as_text_and_read_back_as_the_same() {
+        #[derive(PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+        struct Shape(String);
+        impl Internable for Shape {
+            fn storage() -> &'static InternStorage<Shape> {
+                static STORAGE: std::sync::OnceLock<InternStorage<Shape>> =
+                    std::sync::OnceLock::new();
+                STORAGE.get_or_init(InternStorage::default)
+            }
+        }
+        let name = Name::new("written-name");
+        let bytes = postcard::to_stdvec(&name).unwrap();
+        assert!(bytes.ends_with(b"written-name"), "the text, not a number");
+        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap(), name);
+        let path = Path::parse("com.example.Client");
+        let bytes = postcard::to_stdvec(&path).unwrap();
+        assert_eq!(postcard::from_bytes::<Path>(&bytes).unwrap(), path);
+        let shape = Interned::new(Shape("circle".to_owned()));
+        let bytes = postcard::to_stdvec(&shape).unwrap();
+        let read: Interned<Shape> = postcard::from_bytes(&bytes).unwrap();
+        assert!(
+            std::ptr::eq(&*read, &*shape),
+            "interned again: the same value"
+        );
     }
 
     #[test]

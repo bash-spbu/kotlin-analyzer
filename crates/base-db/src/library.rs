@@ -125,4 +125,9 @@ pub struct Classpaths {
     pub by_source_set: Arc<[Arc<[Library]>]>,
     #[returns(copy)]
     pub jdk: Option<Library>,
+    /// Where libraries' package declarations are kept once read (see
+    /// `hir_def::library_tree_store`); `None`: nowhere, each is read from
+    /// its archive.
+    #[returns(ref)]
+    pub tree_store: Option<Arc<std::path::Path>>,
 }

@@ -112,6 +112,12 @@ impl AnalysisHost {
         self.db.apply_change(changes);
     }
 
+    /// Keeps libraries' package declarations, once read, under `directory`
+    /// (`None`: nowhere — each is read from its archive).
+    pub fn set_library_tree_store(&mut self, directory: Option<std::path::PathBuf>) {
+        self.db.set_library_tree_store(directory);
+    }
+
     /// Sets the libraries' indexes, which of them each source set sees, and
     /// which one is the JDK.
     pub fn set_libraries<Index: Into<hir::LibraryIndex>>(

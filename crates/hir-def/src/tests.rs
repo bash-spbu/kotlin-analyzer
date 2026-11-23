@@ -932,6 +932,102 @@ fn kept_library_trees_are_the_most_recent_ones_or_all() {
 }
 
 #[test]
+fn a_tree_read_back_from_its_bytes_is_the_same_tree() {
+    use crate::item_tree::ItemTree;
+
+    let fixture = Fixture::parse(
+        r#"
+//- /src/Api.kt
+package app
+import kotlin.contracts.contract
+@RequiresOptIn(message = "Still changing") annotation class Beta
+@Beta class Holder<T : Comparable<T>>(@Deprecated("Use size") val count: Int) : Base(), Runnable {
+    @Deprecated("Use b", ReplaceWith("b()")) fun a(vararg names: String, block: suspend Holder<T>.(Int) -> Map<String, List<T>>?) {}
+    companion object { const val LIMIT = 1 }
+    override fun run() {}
+}
+fun requireName(name: String?): String {
+    contract { returns() implies (name != null) }
+    return name!!
+}
+//- /src/Base.java
+package app;
+public abstract class Base { protected static int[] values(String... names) { return null; } }
+"#,
+    );
+    let db = &fixture.database;
+    let mut contracts = 0;
+    for file in db.all_files() {
+        let tree = file_item_tree(db, file);
+        contracts += tree
+            .indexed_items()
+            .filter(|(id, _)| tree.contract(*id).is_some())
+            .count();
+        let bytes = tree.to_bytes().unwrap();
+        let read = ItemTree::from_bytes(&bytes).unwrap();
+        assert_eq!(read, *tree);
+        assert_eq!(read.pretty(), tree.pretty());
+        assert!(ItemTree::from_bytes(&bytes[..bytes.len() / 2]).is_none());
+    }
+    assert_eq!(contracts, 1, "a contract went through too");
+}
+
+#[test]
+fn a_library_package_is_read_from_the_store_while_its_archive_is_as_it_was() {
+    use std::sync::Arc;
+
+    use base_db::{ArchiveKind, ArchiveStamp, Library, LibraryPackage, LibrarySource};
+
+    use crate::library::library_package_tree;
+    use crate::library_tree_store::KeptTree;
+
+    let fixture = Fixture::parse(
+        r#"
+//- /src/Client.kt
+package app
+class Client { fun connect(timeout: Int): Boolean = true }
+"#,
+    );
+    let kept = (*file_item_tree(&fixture.database, fixture.database.all_files()[0])).clone();
+    let store = std::env::temp_dir().join(format!("kotlin-analyzer-trees-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    // The archive isn't there: what is read comes from the store.
+    let source = LibrarySource {
+        archive: std::path::PathBuf::from("/nowhere/client.jar"),
+        kind: ArchiveKind::Jar,
+        sources: None,
+    };
+    let stamp = ArchiveStamp {
+        modified: None,
+        length: 7,
+    };
+    KeptTree::new(&store, &source, stamp, &Path::parse("app")).write(&kept);
+
+    let mut db = base_db::RootDatabase::default();
+    db.set_library_tree_store(Some(store.clone()));
+    let package_of = |db: &base_db::RootDatabase, stamp: ArchiveStamp| {
+        let library = Library::new(db, Arc::new(source.clone()), Arc::default(), stamp);
+        LibraryPackage::new(
+            db,
+            library,
+            Path::parse("app"),
+            Arc::new([]),
+            Arc::new([]),
+            None,
+        )
+    };
+    let as_kept = package_of(&db, stamp);
+    assert_eq!(*library_package_tree(&db, as_kept), kept);
+    // Rewritten since (another length): not what was kept.
+    let rewritten = package_of(&db, ArchiveStamp { length: 8, ..stamp });
+    assert!(library_package_tree(&db, rewritten).is_empty());
+    // No store: the archive alone.
+    db.set_library_tree_store(None);
+    assert!(library_package_tree(&db, as_kept).is_empty());
+    let _ = std::fs::remove_dir_all(&store);
+}
+
+#[test]
 fn which_files_can_name_a_declaration() {
     let fixture = Fixture::parse(
         r#"

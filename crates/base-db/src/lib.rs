@@ -137,7 +137,7 @@ impl Default for RootDatabase {
             Arc::new(ProjectModel::empty(std::path::PathBuf::new())),
             Arc::new([]),
         ));
-        database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None));
+        database.classpaths = Some(Classpaths::new(&database, Arc::new([]), None, None));
         database
     }
 }
@@ -343,6 +343,17 @@ impl RootDatabase {
         let classpaths = self.classpaths();
         classpaths.set_by_source_set(self).to(by_source_set);
         classpaths.set_jdk(self).to(jdk);
+    }
+
+    /// Keeps libraries' package declarations, once read, under `directory`
+    /// (`None`: nowhere).
+    pub fn set_library_tree_store(&mut self, directory: Option<std::path::PathBuf>) {
+        use salsa::Setter;
+        let directory: Option<Arc<std::path::Path>> = directory.map(Arc::from);
+        let classpaths = self.classpaths();
+        if *classpaths.tree_store(self) != directory {
+            classpaths.set_tree_store(self).to(directory);
+        }
     }
 
     /// The input for `source` indexed as `indexed`: the known one when

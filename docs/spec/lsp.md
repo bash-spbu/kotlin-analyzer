@@ -78,7 +78,8 @@ model again if the build files changed, and reload it and every file;
 `kotlin-analyzer.invalidateCachesAndRestart` — IntelliJ's *Invalidate Caches
 and Restart*: the project's caches on disk are deleted (each workspace
 folder's exported Gradle model, and, of every library it read, the JDK's
-included, its index and its extracted sources), the model is exported
+included, its index, its packages' declarations and its extracted
+sources), the model is exported
 again whatever the build files' state, and the workspace is read as by a
 server seeing it for the first time — every file read, every library
 indexed anew, nothing kept of what was analysed. Until that load ends,

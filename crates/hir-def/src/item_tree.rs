@@ -9,6 +9,7 @@ mod item_map;
 mod lower_java;
 mod lower_kotlin;
 pub(crate) mod pretty;
+mod stored;
 use item_map::{ItemMap, NamedItems};
 mod written_annotations;
 mod written_contract;
@@ -35,7 +36,9 @@ pub use pretty::type_text;
 /// its kind, its name and its place among same-named siblings of that kind
 /// — not from where it is in the file — so an edit elsewhere in the file
 /// leaves it, and everything that refers to it, unchanged.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
 pub struct ItemId(u32);
 
 /// The coarse kind an [`ItemId`] is derived from: turning a `val` into a
@@ -121,6 +124,15 @@ impl ItemTree {
         self.opt_in_markers.get(id)
     }
 
+    /// Each item by parent and name, for [`ItemTree::named`].
+    fn named_items(ids: &[ItemId], items: &[Item]) -> NamedItems {
+        NamedItems::new(
+            ids.iter()
+                .zip(items.iter())
+                .map(|(id, item)| ((item.parent, item.name), *id)),
+        )
+    }
+
     pub fn item(&self, id: ItemId) -> &Item {
         &self.items[self.positions[&id] as usize]
     }
@@ -173,14 +185,14 @@ impl ItemTree {
 }
 
 /// An `import` line.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Import {
     /// `a.b.C` of `import a.b.C`; `a.b` of `import a.b.*`.
     pub path: Path,
     pub target: ImportTarget,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ImportTarget {
     /// `import a.b.C` (`as Alias`).
     Single { alias: Option<Name> },
@@ -198,7 +210,7 @@ impl Import {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub name: Name,
     pub kind: ItemKind,
@@ -210,7 +222,7 @@ pub struct Item {
     pub signature: Signature,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ItemKind {
     Class(ClassKind),
     Function,
@@ -228,7 +240,7 @@ impl ItemKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClassKind {
     Class,
     Interface,
@@ -238,7 +250,7 @@ pub enum ClassKind {
     CompanionObject,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Visibility {
     Public,
     Protected,
@@ -249,7 +261,7 @@ pub enum Visibility {
 }
 
 /// Declaration modifiers that change what a declaration means.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct Modifiers(u32);
 
 impl Modifiers {
@@ -341,7 +353,7 @@ impl std::fmt::Debug for Modifiers {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeParameter {
     pub name: Name,
     pub bounds: Box<[Interned<TypeRef>]>,
@@ -352,7 +364,7 @@ pub struct TypeParameter {
 }
 
 /// What a declaration says about types, per kind of declaration.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Signature {
     Class {
         supertypes: Box<[Interned<TypeRef>]>,
@@ -379,7 +391,7 @@ pub enum Signature {
     None,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Parameter {
     pub name: Name,
     pub type_ref: Option<Interned<TypeRef>>,
@@ -390,7 +402,7 @@ pub struct Parameter {
 /// A type as written. Declarations hold it interned (`Interned<TypeRef>`):
 /// the same type, written in a thousand signatures — library ones above
 /// all — is stored once.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypeRef {
     /// `a.b.Outer<X>.Inner<Y>?`
     Named {
@@ -446,13 +458,13 @@ impl TypeRef {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeSegment {
     pub name: Name,
     pub arguments: Box<[TypeArgument]>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypeArgument {
     Star,
     Type {
@@ -461,7 +473,7 @@ pub enum TypeArgument {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Variance {
     Invariant,
     In,
@@ -609,12 +621,7 @@ impl ItemTreeBuilder {
         source_files: Vec<(ItemId, Box<str>)>,
     ) -> (ItemTree, ItemSourceMap) {
         let (imports, import_ranges): (Vec<Import>, Vec<TextRange>) = imports.into_iter().unzip();
-        let named = NamedItems::new(
-            self.ids
-                .iter()
-                .zip(self.items.iter())
-                .map(|(id, item)| ((item.parent, item.name), *id)),
-        );
+        let named = ItemTree::named_items(&self.ids, &self.items);
         let tree = ItemTree {
             package,
             source_files: source_files.into_boxed_slice(),

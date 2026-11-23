@@ -13,6 +13,7 @@ pub mod def_map;
 pub mod expect_actual;
 pub mod item_tree;
 pub mod library;
+pub mod library_tree_store;
 pub mod resolver;
 
 use std::sync::Arc;

@@ -17,6 +17,11 @@ impl<V> Default for ItemMap<V> {
 }
 
 impl<V> ItemMap<V> {
+    /// Every entry, by id.
+    pub(crate) fn entries(&self) -> &[(ItemId, V)] {
+        &self.0
+    }
+
     pub(crate) fn get(&self, id: ItemId) -> Option<&V> {
         let found = self.0.binary_search_by_key(&id, |(key, _)| *key).ok()?;
         Some(&self.0[found].1)

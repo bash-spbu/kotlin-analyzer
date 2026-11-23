@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 classfile.workspace = true
 intern.workspace = true
+serde.workspace = true
+postcard.workspace = true
 salsa.workspace = true
 rustc-hash.workspace = true
 base-db.workspace = true

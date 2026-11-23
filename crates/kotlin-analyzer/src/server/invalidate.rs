@@ -7,14 +7,15 @@ use std::path::{Path, PathBuf};
 
 /// The project's caches under the cache directory `cache`: each exported
 /// model's directory (`exported_models` are the model files), and, of each
-/// library, its index file and the directories its archive's and its
-/// sources' entries are written to.
+/// library, its index file, its package declarations' directory and the
+/// directories its archive's and its sources' entries are written to.
 pub(super) fn project_caches(
     cache: &Path,
     exported_models: &[PathBuf],
     libraries: &[hir::LibrarySource],
 ) -> Vec<PathBuf> {
     let index_directory = crate::library_index_cache::directory(cache);
+    let tree_store = crate::load::library_tree_store(cache);
     let mut caches: Vec<PathBuf> = exported_models
         .iter()
         .filter_map(|model| model.parent().map(Path::to_path_buf))
@@ -24,6 +25,7 @@ pub(super) fn project_caches(
             &index_directory,
             library,
         ));
+        caches.push(hir::library_tree_directory(&tree_store, library));
         let archives = std::iter::once(&library.archive).chain(library.sources.as_ref());
         caches.extend(archives.map(|archive| super::library_sources::directory_of(cache, archive)));
     }
@@ -76,6 +78,7 @@ mod tests {
                 "library-index/client-1.0.jar",
                 "library-sources/client-1.0",
                 "library-sources/client-1.0-sources",
+                "library-trees/client-1.0.jar",
                 "projects/shop",
             ]
         );

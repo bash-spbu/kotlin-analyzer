@@ -336,7 +336,20 @@ pub fn apply_files(
 
 /// Hands the indexed libraries to `host`.
 pub fn apply_libraries(host: &mut AnalysisHost, libraries: LoadedLibraries) {
+    // Tests leave the user's cache alone.
+    let tree_store = if cfg!(test) {
+        None
+    } else {
+        crate::server::cache_directory().map(|cache| library_tree_store(&cache))
+    };
+    host.set_library_tree_store(tree_store);
     host.set_libraries(libraries.libraries, libraries.by_source_set, libraries.jdk);
+}
+
+/// Where libraries' package declarations are kept, under the cache
+/// directory `cache` (`docs/spec/libraries.md`).
+pub fn library_tree_store(cache: &Path) -> PathBuf {
+    cache.join("library-trees")
 }
 
 /// The changes `vfs` recorded, as database file changes.
